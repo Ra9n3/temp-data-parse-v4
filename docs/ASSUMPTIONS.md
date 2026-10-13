@@ -34,6 +34,15 @@ This environment is a React + Vite + Tailwind web app, not a native Tauri/JUCE s
 - Per-track MIDI export downloads a zip (browser has no folder picker).
 - Piano roll: click empty grid to add a note, click a note to delete.
 
+## Module 12 — percussion battery (supersedes M8 gesture percussion)
+
+- M8's Task-8.5 transition-gesture percussion (\`applyArrangementGestures\` + \`buildBoundaries\`) is DELETED. \`generatePercussion()\` in \`src/generation/percussion.ts\` is the SOLE percussion content source, driven by M8's measure profiles, section spans and \`project.chords\`. \`enableTransitionGestures\` remains in generation settings for persistence/import compatibility but is superseded (nothing consumes it).
+- **Deterministic-jitter deviation**: the spec's randomize-±2 ms/±3 roll jitter is implemented as a period-2 index-based sign alternation (±2 ms timing, ±3 velocity on alternating hits) — NO RNG anywhere in the battery, so the engine output for a given project is seed-INDEPENDENT by design; seed variation enters through the surrounding ensemble, not the battery. Monotonic ramp checks assert the period-2 envelope.
+- **Mallet percussion CONTENT is deferred** to the native era (no home tracks). The machinery ships as pure functions — bowl allocator + validation, \`malletTransposition\` (DB: xylo +12, glock +24, celesta +12), \`vibraphoneControllers\`, \`needsDecayRoll\` decay table — library-ready, unexercised by generation.
+- **Aux chair map (trk_aux, 36–81)**: GM-style — kick 36, closed hi-hat 42, tom-mid 45, ride 51, triangle 81. v1 content is deliberately sparse (cadence kick accents at Chorus ends + a ride pulse on beats 1&3 at ≥ Dense energy); the full auxiliary palette (congas, mark trees, wind chimes) waits for native samples.
+- Timpani retunes (chord-root tuning) fire only where ≥2 measures of timpani silence precede the next gesture; rolls never cross section boundaries (their terminating accents ring exactly TO the edge — the hand-mute rule). Pedal glissando for hypothetical mid-roll retunes uses M4 ±200-cent bends and, for >200-cent intervals, SPLITS into chained ≤2-semitone legs (documented choice over clamping).
+- Balance does NOT process the battery (outside the semantic pipeline): engine notes bake their own cc11/cc74 (`percussionCc74 = clamp(40 + v·0.45)`) at creation; non-percussion tracks pass through byte-identical (field-diff-proven).
+
 ## Out of scope in this build (M4–M6 native)
 
 - Tauri window, sidecar, Windows installer

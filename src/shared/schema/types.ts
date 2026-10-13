@@ -366,6 +366,16 @@ export interface Note {
    * SOUNDING pitch; the tag drives the native engine's patch switch. Playback
    * ignores the tag (same family wave). */
   auxInstrumentId?: string;
+  /** Module 12 (percussion sub-engine, additive metadata): mallet hardness for
+   * pitched-percussion notes ("SOFT_FELT" pp–mf, "HARD_WOOD" f–ff). Metadata
+   * only — playback ignores it (square wave). */
+  malletType?: string;
+  /** Module 12 (additive metadata): velocity tier GHOST 1–39, GROOVE 40–90,
+   * ACCENT 91–127. */
+  velocityTier?: "GHOST" | "GROOVE" | "ACCENT";
+  /** Module 12 (additive metadata): true when the note is one hit OF an
+   * unmeasured roll (the notes ARE the roll; playback needs no special mode). */
+  isRoll?: boolean;
   /** Module 6: additive brightness-CC offset from the anti-flanging filter. */
   cc74Offset?: number;
   /** Module 7 deterministic balance output; absent on manually-authored notes. */

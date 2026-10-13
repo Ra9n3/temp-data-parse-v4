@@ -9,17 +9,17 @@
  *     six pinned stages are untouched) + intensityAt/subdivisionCapAt probes
  *     handed to realizeRhythm.
  *  2. POST-score: breakdown-drop event filter (after doubling/anti-flanging,
- *     before attenuation + dynamics, so dropped events cost nothing).
- *  3. BAKE: transition gestures written directly as Notes on percussion +
- *     melody tracks (fixed performance semantics; the semantic pipeline is
- *     bypassed by design — Module 12 will generalize percussion).
- *
+ *     before attenuation + dynamics, so dropped events cost nothing). * 3. BAKE: (SUPERSEDED by Module 12) the Task-8.5 transition-gesture
+   *     percussion writers were deleted; generatePercussion() in
+   *     ./percussion.ts is the sole percussion content source, driven by the
+   *     measure profiles and section spans this module produces.
+   *
  * Two-tier energy relationship: stage 2's BASE_DYNAMICS baseline (in generate.ts)
  * is deliberately NOT reused as the measure baseline. This module computes its
  * own spec-table baselines (B) below; virtual slices exploit stage 2's exact
  * groupFor/DENSITY_VALUES mappings through the section data we feed it.
  */
-import type { Project, Note, Track, Section } from "../shared/schema/types";
+import type { Project, Track, Section } from "../shared/schema/types";
 import { barToTick, ticksPerBar } from "../shared/schema/time";
 import { normalizeSectionName } from "./config";
 import { parseChord } from "../shared/schema/chords";
@@ -61,15 +61,6 @@ const DENSITY_VALUES_REF: Record<string, number> = { Sparse: 0.28, Balanced: 0.5
 /** Local redeclares (established pattern — generate.ts keeps its own). */
 const clamp = (value: number, low: number, high: number) => Math.max(low, Math.min(high, value));
 const pc = (value: number) => ((Math.round(value) % 12) + 12) % 12;
-function pitchInClass(pitchClass: number, range: { low: number; high: number }, preferred: number): number {
-  const candidates: number[] = [];
-  for (let pitch = Math.ceil(range.low); pitch <= range.high; pitch++) {
-    if (pc(pitch) === pc(pitchClass)) candidates.push(pitch);
-  }
-  if (!candidates.length) return clamp(preferred, range.low, range.high);
-  return candidates.reduce((best, pitch) => Math.abs(pitch - preferred) < Math.abs(best - preferred) ? pitch : best, candidates[0]!);
-}
-
 export type ArrangementSectionType = "Intro" | "Verse" | "PreChorus" | "Chorus" | "Build" | "Breakdown" | "Outro";
 
 /** Reuse the EXISTING config.ts normalization (no second mapper). */
@@ -319,120 +310,14 @@ export function truncateNotesAtBreakdownBoundaries(tracks: Track[], windows: Arr
   }));
 }
 
-interface GestureContext {
-  project: Project;
-  measures: MeasureProfile[];
-  config: ArrangementConfig;
-}
-
-interface BuildBoundary {
-  boundaryTick: number;
-  nextChord: { rootPitchClass: number } | undefined;
-}
-
-function ctxKeyRoot(project: Project): number {
-  return project.key;
-}
-
-function parsedChordRoot(chord: { symbol: string }, keyRoot: number): number {
-  const parsed = parseChord(chord.symbol);
-  return parsed.ok ? parsed.chord.root : pc(keyRoot);
-}
-
-/** Find BUILD→(CHORUS|CLIMAX) boundaries with the chord covering the downbeat. */
-function buildBoundaries(project: Project): BuildBoundary[] {
-  const ts = project.timeSignature;
-  const barTicks = ticksPerBar(ts);
-  const out: BuildBoundary[] = [];
-  const sorted = [...project.sections].sort((a, b) => a.startBar - b.startBar);
-  for (let i = 0; i < sorted.length - 1; i++) {
-    const current = sorted[i]!;
-    const next = sorted[i + 1]!;
-    if (sectionTypeFor(current.name) !== "Build") continue;
-    const nextType = sectionTypeFor(next.name);
-    if (nextType !== "Chorus") continue;
-    const boundaryTick = barToTick(next.startBar, ts);
-    if (barToTick(current.startBar + current.lengthBars, ts) !== boundaryTick) {
-      // Still gesture when the build ends exactly one bar before the chorus (pickup).
-      if (barToTick(current.startBar + current.lengthBars, ts) !== boundaryTick - barTicks) continue;
-    }
-    const chord = project.chords
-      .filter((block) => block.startTick <= boundaryTick && boundaryTick < block.startTick + block.durationTicks)
-      .sort((a, b) => a.startTick - b.startTick)[0];
-    out.push({ boundaryTick, nextChord: chord ? { rootPitchClass: parsedChordRoot(chord, ctxKeyRoot(project)) } : undefined });
-  }
-  return out;
-}
-
-
-
-/** Task 8.5: deterministic transition gestures appended to tracks. */
-export function applyArrangementGestures(tracks: Track[], ctx: GestureContext): Track[] {
-  if (!ctx.config.enableTransitionGestures) return tracks.map((track) => ({ ...track, notes: track.notes.map((note) => ({ ...note })) }));
-  const additions = new Map<string, Note[]>();
-  const push = (trackId: string, note: Note) => {
-    const bucket = additions.get(trackId) ?? [];
-    bucket.push(note);
-    additions.set(trackId, bucket);
-  };
-  const ts = ctx.project.timeSignature;
-  const barTicksPerBar = ticksPerBar(ts);
-
-  for (const boundary of buildBoundaries(ctx.project)) {
-    const T = boundary.boundaryTick;
-    // ---- Timpani roll: final 2 bars before T; hits every 16th, ramp 40→95, accent at T.
-    const timpani = tracks.find((track) => track.id === "trk_timpani");
-    if (timpani) {
-      const rollLength = 2 * barTicksPerBar;
-      const rollStart = T - rollLength;
-      const hits = Math.floor(rollLength / 240);
-      const rollRamp = Array.from({ length: hits }, (_, index) => index);
-      for (const index of rollRamp) {
-        const tick = rollStart + index * 240;
-        const velocity = Math.round(40 + (95 - 40) * (index / Math.max(1, hits - 1)));
-        push("trk_timpani", pickTimpaniPitch(ctx.project.key, { startTick: tick, endTick: tick + 216 }, velocity, index));
-      }
-      push("trk_timpani", { ...pickTimpaniPitch(ctx.project.key, { startTick: T, endTick: T + 480 }, 112, hits), velocity: 112, durationTicks: 480, dynamics: { cc11Value: 118, cc74Value: 64, attenuationActive: false } });
-    }
-    // ---- Cymbal swell: one long note + ≤6 grace notes for the crescendo.
-    const cymbals = tracks.find((track) => track.id === "trk_cymbals");
-    if (cymbals) {
-      const swellStart = T - 2 * barTicksPerBar;
-      push("trk_cymbals", { pitch: 49, startTick: swellStart, durationTicks: rollLengthSafe(T - swellStart), velocity: 50, dynamics: { cc11Value: 95, cc74Value: 64, attenuationActive: false } });
-      const graceCount = 6;
-      for (let index = 0; index < graceCount; index++) {
-        const graceStart = swellStart + Math.round(((T - swellStart) / graceCount) * index);
-        const cc = Math.round(25 + (90 - 25) * (index / Math.max(1, graceCount - 1)));
-        push("trk_cymbals", { pitch: 49, startTick: graceStart, durationTicks: 120, velocity: 40 + index * 8, dynamics: { cc11Value: cc, cc74Value: 64, attenuationActive: false } });
-      }
-    }
-    // ---- Percussion only at boundaries: the run into the next section is owned
-    // by the LEAD/melody engine (theme.ts) — do NOT add scale runs here.
-  }
-  if (!additions.size) return tracks.map((track) => ({ ...track, notes: track.notes.map((note) => ({ ...note })) }));
-  return tracks.map((track) => {
-    const extra = additions.get(track.id);
-    if (!extra) return { ...track, notes: track.notes.map((note) => ({ ...note })) };
-    return { ...track, notes: [...track.notes.map((note) => ({ ...note })), ...extra].sort((a, b) => a.startTick - b.startTick || a.pitch - b.pitch) };
-  });
-}
-
-function rollLengthSafe(delta: number): number {
-  return Math.max(1, Math.round(delta));
-}
-
-function pickTimpaniPitch(keyRoot: number, span: { startTick: number; endTick: number }, velocity: number, index: number): Note {
-  void span;
-  const dynamic = { cc11Value: Math.round(30 + (110 - 30) * (index / 16)), cc74Value: 64, attenuationActive: false };
-  return {
-    pitch: pitchInClass(keyRoot, { low: 38, high: 57 }, 45),
-    startTick: span.startTick,
-    durationTicks: 216,
-    velocity,
-    dynamics: dynamic,
-  };
-}
-
+/** Module 12 supersession: M8's Task-8.5 transition-GESTURE percussion
+ * (applyArrangementGestures + buildBoundaries + its timpani/cymbal writers)
+ * has been DELETED — generatePercussion() in ./percussion.ts is the sole
+ * percussion content source, driven by these same measure profiles, section
+ * spans and project.chords. The boundary/run section logic lives on only
+ * where other callers need it (sectionTypeFor, breakdown windows below); no
+ * external caller referenced the deleted gesture helpers.
+ */
 
 /** Exposed for the wiring layer: measure-driven rhythm probes + windows. */
 export function arrangementContext(project: Project, config: ArrangementConfig): {

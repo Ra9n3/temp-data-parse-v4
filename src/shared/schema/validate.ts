@@ -119,6 +119,10 @@ function validateTrack(track: Track, index: number, errors: string[]): void {
     if (note.isKeySwitch !== undefined && typeof note.isKeySwitch !== "boolean") errors.push(`${np}.isKeySwitch must be a boolean`);
     if (note.isDoubling !== undefined && typeof note.isDoubling !== "boolean") errors.push(`${np}.isDoubling must be a boolean`);
     if (note.auxInstrumentId !== undefined && (typeof note.auxInstrumentId !== "string" || note.auxInstrumentId.length === 0 || note.auxInstrumentId.length > 32)) errors.push(`${np}.auxInstrumentId must be a string of at most 32 characters`);
+    // Module 12 percussion metadata (additive, same error style as the M11 aux tag).
+    if (note.malletType !== undefined && (typeof note.malletType !== "string" || note.malletType.length === 0 || note.malletType.length > 32)) errors.push(`${np}.malletType must be a string of at most 32 characters`);
+    if (note.velocityTier !== undefined && !["GHOST", "GROOVE", "ACCENT"].includes(note.velocityTier)) errors.push(`${np}.velocityTier must be GHOST, GROOVE or ACCENT`);
+    if (note.isRoll !== undefined && typeof note.isRoll !== "boolean") errors.push(`${np}.isRoll must be a boolean`);
     if (note.cc74Offset !== undefined && (typeof note.cc74Offset !== "number" || !Number.isFinite(note.cc74Offset))) errors.push(`${np}.cc74Offset must be a finite number`);
     if (note.dynamics !== undefined) {
       if (!note.dynamics || typeof note.dynamics !== "object"

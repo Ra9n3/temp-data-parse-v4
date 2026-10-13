@@ -43,7 +43,8 @@ import { applyAccompanimentAttenuation, applyAntiphonalWindowing, calculateNoteD
 // transformGeneratedNotes' detune block; all other V2 terms are deterministic
 // pure functions from ./humanizeV2.
 // Module 8 arrangement/gestures: deterministic, no salt.
-import { applyArrangementGestures, applyBreakdownDrop, arrangementContext, DEFAULT_ARRANGEMENT_CONFIG, expandSectionsForStaggering, truncateNotesAtBreakdownBoundaries } from "./arrangement";
+import { applyBreakdownDrop, arrangementContext, DEFAULT_ARRANGEMENT_CONFIG, expandSectionsForStaggering, truncateNotesAtBreakdownBoundaries } from "./arrangement";
+import { generatePercussion } from "./percussion";
 import { guardTrackNotes, verifyMonophonyInvariant } from "./monophony";
 import { applyActiveMask, applyRoleRotation, divideChorusRoles, exposedBreakdownRoles, planRotation, resolveRotationConfig, type RotationPlan } from "./rotation";
 import { consolidateSustains, reconcileConsolidatedPads } from "./sustain";
@@ -1285,14 +1286,17 @@ export function generate(project: Project, options: GenerateOptions): Track[] {
     };
     returned.push(generatedTrack);
   }
-  // Module 8 BAKE: transition gestures written directly as Notes on percussion +
-  // melody tracks. Bypasses the semantic pipeline by design (fixed performance
-  // semantics; Module 12 generalizes percussion). Deterministic, no RNG.
-  const gestured = applyArrangementGestures(returned, { project, measures: arrangementInfo.measures, config: arrangement });
+  // Module 12 — percussion sub-engine: the SOLE content source for the battery
+  // (supersedes M8's gesture percussion, deleted from arrangement.ts). Same
+  // position as the superseded call: post-bake, pre-MonophonyGuard — the guard
+  // stays the FINAL invariant below. Deterministic, no RNG; the engine bakes
+  // its own dynamics/cc11/cc74 at note creation (balance never touches the
+  // battery), and non-percussion tracks pass through untouched.
+  const percussed = generatePercussion(returned, { project, measures: arrangementInfo.measures, config: arrangement });
   // Final truncation pass: the articulation duration multiplier can push a note a
   // few ticks past a breakdown boundary after the event-level drop; the spec's
   // "instant mute" is note-level, so enforce it on the built tracks.
-  const truncated = truncateNotesAtBreakdownBoundaries(gestured, arrangementInfo.windows);
+  const truncated = truncateNotesAtBreakdownBoundaries(percussed, arrangementInfo.windows);
   // Module 8.5 §5 — chorus role divider: post-bake, after gestures, BEFORE the
   // guard (the guard stays the FINAL invariant below). Deterministic; expected
   // ≈ 0 resolutions; doubling guests are exempt (they follow their source).

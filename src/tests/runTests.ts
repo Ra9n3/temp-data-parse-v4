@@ -3,7 +3,7 @@ import { Midi } from "@tonejs/midi";
 import { parseChord } from "../shared/schema/chords";
 import { cloneProject, createDefaultProject, nextMidiChannel } from "../shared/schema/factory";
 import { type ModeName, type Project, type TimeSignature } from "../shared/schema/types";
-import { ticksPerBar, ticksPerBeat } from "../shared/schema/time";
+import { msToTicks, ticksPerBar, ticksPerBeat } from "../shared/schema/time";
 import { validateProject } from "../shared/schema/validate";
 import { exportMergedMidi, exportPerTrackMidi, midiDurationTicks, parseMidiNotes } from "../export/midi";
 import { exportProjectJson, importProjectJson, projectsEqual } from "../export/json";
@@ -742,6 +742,114 @@ export function runUnitTests(): TestResult[] {
       const fixtureBassMedian = bassDurations[Math.floor(bassDurations.length / 2)] ?? 0;
       assert(fixtureBassMedian >= 2 * 960, `fixture BASS median ${fixtureBassMedian}t below the documented 2.00-beat baseline`);
       return "synthetic BASS/PAD medians ≥ 4 beats (seeds 6,15); fixture BASS 2.00-beat exception documented";
+    }),
+    timed("Percussion engine (M8 tests re-pointed): roll before the chorus boundary, cymbal swell/crash at pitch 49", () => {
+      // Module 12 — the M8 gesture assertions live on here ONLY as
+      // M12-engine-output checks (the M8 gesture writers are deleted). The
+      // assertions are NOT weakened: roll in the final 2 bars before a chorus
+      // boundary, ranges respected, cymbal pitch 49, swell reaching the
+      // boundary — plus the M12 strengtheners (ACCENT tiers, isRoll tags). The
+      // M8 gesture engine only fired at Build→Chorus boundaries, so this test
+      // carries one synthetic boundary scenario exactly as that engine did.
+      const base = fixture();
+      const barTicks = ticksPerBar(base.timeSignature);
+      assert(barTicks === 3840, "fixture must stay 4/4 for the boundary math");
+      const project = cloneProject(base);
+      project.sections = [
+        { ...project.sections[0]!, name: "Verse", startBar: 1, lengthBars: 6 },
+        { ...project.sections[0]!, name: "Build", startBar: 7, lengthBars: 4, targetDynamic: 0.85, densityLevel: "Dense" },
+        { ...project.sections[0]!, name: "Chorus", startBar: 11, lengthBars: 6, targetDynamic: 0.95, densityLevel: "Tutti" },
+      ];
+      const boundary = 10 * barTicks; // chorus downbeat (bar 11)
+      const tracks = generate(project, { seed: 6, density: 0.75, humanize: false, lockedTrackIds: [] });
+      const timpani = tracks.find((t) => t.id === "trk_timpani");
+      const snare = tracks.find((t) => t.id === "trk_snare");
+      const cymbals = tracks.find((t) => t.id === "trk_cymbals");
+      const aux = tracks.find((t) => t.id === "trk_aux");
+      assert(timpani && snare && cymbals && aux, "battery tracks missing");
+      const rollHits = timpani!.notes.filter((n) => n.startTick >= boundary - 2 * barTicks && n.startTick <= boundary);
+      assert(rollHits.length >= 8, `timpani roll before the boundary too thin: ${rollHits.length}`);
+      assert(rollHits.every((n) => n.pitch >= 38 && n.pitch <= 57 && Boolean(n.isRoll)), "roll hits must sit in the bowl gamut and carry isRoll");
+      // A roll hit per grid subdivision with the documented ±2 ms alternation:
+      // consecutive gaps zigzag (small/large/…) and the spread is exactly
+      // 4×jitter (−j, +j per hit ⇒ g[0] < g[1] > g[2] < …). Grid-agnostic:
+      // works for both the 16th and the ff 32nd subdivisions.
+      const regularHits = rollHits.filter((n) => n.startTick <= boundary).slice(0, -1); // drop the terminating accent
+      assert(regularHits.length >= 8, `roll regular hits missing: ${regularHits.length}`);
+      const gaps: number[] = [];
+      for (let index = 1; index < regularHits.length; index++) gaps.push(regularHits[index].startTick - regularHits[index - 1].startTick);
+      assert(gaps.length >= 6 && gaps.slice(0, 6).every((gap, i) => i === 5 || (i % 2 === 0 ? gap < gaps[i + 1]! : gap > gaps[i + 1]!)), `roll timing jitter is not the documented alternation: ${JSON.stringify(gaps.slice(0, 6))}`);
+      const expectedJitter = Math.round(msToTicks(2, project.bpm)); // the engine rounds the jitter tick value FIRST
+      assert(Math.max(...gaps) - Math.min(...gaps) === 4 * expectedJitter, `jitter spread ${Math.max(...gaps) - Math.min(...gaps)} != 4×${expectedJitter}`);
+      const velocities = regularHits.map((n) => n.velocity);
+      assert(velocities.length > 2 && velocities.slice(2).every((v, i) => v >= velocities[i]), "roll velocity ramp not monotone under the period-2 alternation");
+      assert(snare!.notes.every((n) => n.pitch === 38), "snare pitch must be exactly 38");
+      assert(cymbals!.notes.every((n) => n.pitch === 49), "cymbal pitch must be exactly 49");
+      assert(aux!.notes.every((n) => n.pitch >= 36 && n.pitch <= 81), "aux pitch outside the chair range");
+      const swell = cymbals!.notes.filter((n) => n.startTick >= boundary - 2 * barTicks && n.startTick < boundary);
+      assert(swell.length >= 2, `cymbal swell before the chorus downbeat too thin: ${swell.length}`);
+      const swellFirstCc = Math.min(...swell.map((n) => n.dynamics?.cc11Value ?? 127));
+      const crash = cymbals!.notes.find((n) => n.startTick === boundary);
+      assert(crash !== undefined && crash.velocityTier === "ACCENT", "crash at the chorus downbeat missing or not ACCENT");
+      assert(swellFirstCc < 40 && (crash!.dynamics?.cc11Value ?? 0) >= 110, "cymbal CC11 build does not swell into the boundary");
+      const snareRoll = snare!.notes.filter((n) => n.isRoll && n.startTick >= boundary - 2 * barTicks);
+      assert(snareRoll.length >= 8, "snare drive under the build missing");
+      const ccStream = snareRoll.filter((n) => n.startTick < boundary).map((n) => n.dynamics?.cc11Value ?? 0);
+      assert(ccStream.length > 1 && ccStream.every((value, i) => i === 0 || value >= ccStream[i - 1]!), "snare roll CC11 not monotonic");
+      assert(timpani!.notes.every((n) => n.startTick >= 0), "onset below zero");
+      // The terminating accent: the highest-velocity roll hit, parked in the
+      // final grid slot before the boundary (the ramp's top regular hits
+      // may themselves reach the ACCENT band — that is fine; the accent is
+      // specifically the ≥100 peak that lands last).
+      const timpaniAccent = rollHits.reduce((best, n) => (n.velocity > best.velocity ? n : best), rollHits[0]!);
+      assert(timpaniAccent.velocity >= 100 && timpaniAccent.velocityTier === "ACCENT" && timpaniAccent.startTick >= boundary - 240, "timpani roll terminating accent missing");
+      return `roll ${rollHits.length} hits into the boundary, snare drive ${snareRoll.length}, cymbal swell ${swell.length}+crash@49 (CC11 ${swellFirstCc}→${crash!.dynamics?.cc11Value})`;
+    }),
+    timed("Percussion engine: chord-root tuning retunes only at ≥2-measure rests, per-track ledger holds", () => {
+      // Module 12: tuning follows chord roots across the fixture's Dm7/G7
+      // changes, but ONLY where ≥2 measures of timpani silence allow (a real
+      // timpanist doesn't pedal mid-phrase); the per-track gesture ledger
+      // keeps distinct gestures from ever overlapping (one player per chair).
+      for (const label of ["s6", "s15"] as const) {
+        const project = fixture();
+        const barTicks = ticksPerBar(project.timeSignature);
+        const tracks = generate(project, { seed: label === "s6" ? 6 : 15, density: 0.75, humanize: false, lockedTrackIds: [] });
+        const timpani = tracks.find((t) => t.id === "trk_timpani");
+        assert(timpani && timpani.notes.length > 0, `timpani content missing (${label})`);
+        assert(timpani.notes.every((n) => n.pitch >= 38 && n.pitch <= 57), `timpani range violated (${label})`);
+        const sorted = [...timpani.notes].sort((a, b) => a.startTick - b.startTick || a.pitch - b.pitch);
+        for (let index = 1; index < sorted.length; index++) {
+          if (sorted[index].pitch !== sorted[index - 1].pitch) {
+            const gap = sorted[index].startTick - (sorted[index - 1].startTick + sorted[index - 1].durationTicks);
+            assert(gap >= 2 * barTicks, `retune without ≥2-measure rest (gap ${gap}, ${label})`);
+          }
+        }
+        for (const trackId of ["trk_cymbals", "trk_snare", "trk_aux"] as const) {
+          const track = tracks.find((t) => t.id === trackId);
+          const sortedTrack = [...(track?.notes ?? [])].sort((a, b) => a.startTick - b.startTick);
+          for (let index = 1; index < sortedTrack.length; index++) {
+            assert(sortedTrack[index].startTick >= sortedTrack[index - 1].startTick + sortedTrack[index - 1].durationTicks, `${trackId} overlapping distinct gestures (${label})`);
+          }
+        }
+      }
+      return "tuning stays put mid-phrase and only retunes inside ≥2-measure rests; no overlapping gestures";
+    }),
+    timed("Percussion metadata validators: malletType/velocityTier/isRoll", () => {
+      const happy = fixture();
+      happy.tracks.find((t) => t.id === "trk_cymbals")!.notes.push({ pitch: 49, startTick: 0, durationTicks: 480, velocity: 116, velocityTier: "ACCENT", malletType: "HARD_WOOD", isRoll: true });
+      assert(validateProject(happy).ok, "valid percussion metadata rejected");
+      const badTier = fixture();
+      badTier.tracks.find((t) => t.id === "trk_cymbals")!.notes.push({ pitch: 49, startTick: 0, durationTicks: 480, velocity: 116, velocityTier: "LOUD" as unknown as "ACCENT" });
+      const tierResult = validateProject(badTier);
+      assert(!tierResult.ok && tierResult.errors.some((error) => error.includes("velocityTier")), "invalid velocityTier accepted");
+      const badMallet = fixture();
+      badMallet.tracks.find((t) => t.id === "trk_snare")!.notes.push({ pitch: 38, startTick: 0, durationTicks: 480, velocity: 20, malletType: "x".repeat(33) });
+      const malletResult = validateProject(badMallet);
+      assert(!malletResult.ok && malletResult.errors.some((error) => error.includes("malletType")), "long malletType accepted");
+      const badRoll = fixture();
+      badRoll.tracks.find((t) => t.id === "trk_aux")!.notes.push({ pitch: 51, startTick: 0, durationTicks: 480, velocity: 20, isRoll: "yes" as unknown as boolean });
+      assert(!validateProject(badRoll).ok, "non-boolean isRoll accepted");
+      return "malletType ≤32 chars, velocityTier enum, isRoll boolean validated";
     }),
   ];
 }

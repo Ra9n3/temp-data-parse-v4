@@ -13394,19 +13394,841 @@
  },
  {
   "id": "trk_timpani",
-  "notes": []
+  "notes": [
+   {
+    "pitch": 50,
+    "startTick": 30720,
+    "durationTicks": 480,
+    "velocity": 110,
+    "dynamics": {
+     "cc11Value": 99,
+     "cc74Value": 90,
+     "attenuationActive": false
+    },
+    "velocityTier": "ACCENT",
+    "malletType": "HARD_WOOD"
+   },
+   {
+    "pitch": 50,
+    "startTick": 60480,
+    "durationTicks": 960,
+    "velocity": 110,
+    "dynamics": {
+     "cc11Value": 99,
+     "cc74Value": 90,
+     "attenuationActive": false
+    },
+    "velocityTier": "ACCENT",
+    "malletType": "HARD_WOOD"
+   }
+  ]
  },
  {
   "id": "trk_snare",
-  "notes": []
+  "notes": [
+   {
+    "pitch": 38,
+    "startTick": 30720,
+    "durationTicks": 480,
+    "velocity": 105,
+    "dynamics": {
+     "cc11Value": 95,
+     "cc74Value": 87,
+     "attenuationActive": false
+    },
+    "velocityTier": "ACCENT"
+   },
+   {
+    "pitch": 38,
+    "startTick": 31680,
+    "durationTicks": 120,
+    "velocity": 22,
+    "dynamics": {
+     "cc11Value": 20,
+     "cc74Value": 50,
+     "attenuationActive": false
+    },
+    "velocityTier": "GHOST"
+   },
+   {
+    "pitch": 38,
+    "startTick": 32640,
+    "durationTicks": 120,
+    "velocity": 26,
+    "dynamics": {
+     "cc11Value": 23,
+     "cc74Value": 52,
+     "attenuationActive": false
+    },
+    "velocityTier": "GHOST"
+   },
+   {
+    "pitch": 38,
+    "startTick": 33600,
+    "durationTicks": 120,
+    "velocity": 22,
+    "dynamics": {
+     "cc11Value": 20,
+     "cc74Value": 50,
+     "attenuationActive": false
+    },
+    "velocityTier": "GHOST"
+   },
+   {
+    "pitch": 38,
+    "startTick": 34560,
+    "durationTicks": 120,
+    "velocity": 26,
+    "dynamics": {
+     "cc11Value": 23,
+     "cc74Value": 52,
+     "attenuationActive": false
+    },
+    "velocityTier": "GHOST"
+   },
+   {
+    "pitch": 38,
+    "startTick": 35520,
+    "durationTicks": 120,
+    "velocity": 22,
+    "dynamics": {
+     "cc11Value": 20,
+     "cc74Value": 50,
+     "attenuationActive": false
+    },
+    "velocityTier": "GHOST"
+   },
+   {
+    "pitch": 38,
+    "startTick": 36480,
+    "durationTicks": 120,
+    "velocity": 26,
+    "dynamics": {
+     "cc11Value": 23,
+     "cc74Value": 52,
+     "attenuationActive": false
+    },
+    "velocityTier": "GHOST"
+   },
+   {
+    "pitch": 38,
+    "startTick": 37440,
+    "durationTicks": 120,
+    "velocity": 22,
+    "dynamics": {
+     "cc11Value": 20,
+     "cc74Value": 50,
+     "attenuationActive": false
+    },
+    "velocityTier": "GHOST"
+   },
+   {
+    "pitch": 38,
+    "startTick": 38400,
+    "durationTicks": 120,
+    "velocity": 26,
+    "dynamics": {
+     "cc11Value": 23,
+     "cc74Value": 52,
+     "attenuationActive": false
+    },
+    "velocityTier": "GHOST"
+   },
+   {
+    "pitch": 38,
+    "startTick": 39360,
+    "durationTicks": 120,
+    "velocity": 22,
+    "dynamics": {
+     "cc11Value": 20,
+     "cc74Value": 50,
+     "attenuationActive": false
+    },
+    "velocityTier": "GHOST"
+   },
+   {
+    "pitch": 38,
+    "startTick": 40320,
+    "durationTicks": 120,
+    "velocity": 26,
+    "dynamics": {
+     "cc11Value": 23,
+     "cc74Value": 52,
+     "attenuationActive": false
+    },
+    "velocityTier": "GHOST"
+   },
+   {
+    "pitch": 38,
+    "startTick": 41280,
+    "durationTicks": 120,
+    "velocity": 22,
+    "dynamics": {
+     "cc11Value": 20,
+     "cc74Value": 50,
+     "attenuationActive": false
+    },
+    "velocityTier": "GHOST"
+   },
+   {
+    "pitch": 38,
+    "startTick": 42240,
+    "durationTicks": 120,
+    "velocity": 26,
+    "dynamics": {
+     "cc11Value": 23,
+     "cc74Value": 52,
+     "attenuationActive": false
+    },
+    "velocityTier": "GHOST"
+   },
+   {
+    "pitch": 38,
+    "startTick": 43200,
+    "durationTicks": 120,
+    "velocity": 22,
+    "dynamics": {
+     "cc11Value": 20,
+     "cc74Value": 50,
+     "attenuationActive": false
+    },
+    "velocityTier": "GHOST"
+   },
+   {
+    "pitch": 38,
+    "startTick": 44160,
+    "durationTicks": 120,
+    "velocity": 26,
+    "dynamics": {
+     "cc11Value": 23,
+     "cc74Value": 52,
+     "attenuationActive": false
+    },
+    "velocityTier": "GHOST"
+   },
+   {
+    "pitch": 38,
+    "startTick": 45120,
+    "durationTicks": 120,
+    "velocity": 22,
+    "dynamics": {
+     "cc11Value": 20,
+     "cc74Value": 50,
+     "attenuationActive": false
+    },
+    "velocityTier": "GHOST"
+   },
+   {
+    "pitch": 38,
+    "startTick": 46080,
+    "durationTicks": 120,
+    "velocity": 26,
+    "dynamics": {
+     "cc11Value": 23,
+     "cc74Value": 52,
+     "attenuationActive": false
+    },
+    "velocityTier": "GHOST"
+   },
+   {
+    "pitch": 38,
+    "startTick": 47040,
+    "durationTicks": 120,
+    "velocity": 22,
+    "dynamics": {
+     "cc11Value": 20,
+     "cc74Value": 50,
+     "attenuationActive": false
+    },
+    "velocityTier": "GHOST"
+   },
+   {
+    "pitch": 38,
+    "startTick": 48000,
+    "durationTicks": 120,
+    "velocity": 26,
+    "dynamics": {
+     "cc11Value": 23,
+     "cc74Value": 52,
+     "attenuationActive": false
+    },
+    "velocityTier": "GHOST"
+   },
+   {
+    "pitch": 38,
+    "startTick": 48960,
+    "durationTicks": 120,
+    "velocity": 22,
+    "dynamics": {
+     "cc11Value": 20,
+     "cc74Value": 50,
+     "attenuationActive": false
+    },
+    "velocityTier": "GHOST"
+   },
+   {
+    "pitch": 38,
+    "startTick": 49920,
+    "durationTicks": 120,
+    "velocity": 26,
+    "dynamics": {
+     "cc11Value": 23,
+     "cc74Value": 52,
+     "attenuationActive": false
+    },
+    "velocityTier": "GHOST"
+   },
+   {
+    "pitch": 38,
+    "startTick": 50880,
+    "durationTicks": 120,
+    "velocity": 22,
+    "dynamics": {
+     "cc11Value": 20,
+     "cc74Value": 50,
+     "attenuationActive": false
+    },
+    "velocityTier": "GHOST"
+   },
+   {
+    "pitch": 38,
+    "startTick": 51840,
+    "durationTicks": 120,
+    "velocity": 26,
+    "dynamics": {
+     "cc11Value": 23,
+     "cc74Value": 52,
+     "attenuationActive": false
+    },
+    "velocityTier": "GHOST"
+   },
+   {
+    "pitch": 38,
+    "startTick": 52800,
+    "durationTicks": 120,
+    "velocity": 22,
+    "dynamics": {
+     "cc11Value": 20,
+     "cc74Value": 50,
+     "attenuationActive": false
+    },
+    "velocityTier": "GHOST"
+   },
+   {
+    "pitch": 38,
+    "startTick": 53760,
+    "durationTicks": 120,
+    "velocity": 26,
+    "dynamics": {
+     "cc11Value": 23,
+     "cc74Value": 52,
+     "attenuationActive": false
+    },
+    "velocityTier": "GHOST"
+   },
+   {
+    "pitch": 38,
+    "startTick": 54720,
+    "durationTicks": 120,
+    "velocity": 22,
+    "dynamics": {
+     "cc11Value": 20,
+     "cc74Value": 50,
+     "attenuationActive": false
+    },
+    "velocityTier": "GHOST"
+   },
+   {
+    "pitch": 38,
+    "startTick": 55680,
+    "durationTicks": 120,
+    "velocity": 26,
+    "dynamics": {
+     "cc11Value": 23,
+     "cc74Value": 52,
+     "attenuationActive": false
+    },
+    "velocityTier": "GHOST"
+   },
+   {
+    "pitch": 38,
+    "startTick": 56640,
+    "durationTicks": 120,
+    "velocity": 22,
+    "dynamics": {
+     "cc11Value": 20,
+     "cc74Value": 50,
+     "attenuationActive": false
+    },
+    "velocityTier": "GHOST"
+   },
+   {
+    "pitch": 38,
+    "startTick": 57600,
+    "durationTicks": 120,
+    "velocity": 26,
+    "dynamics": {
+     "cc11Value": 23,
+     "cc74Value": 52,
+     "attenuationActive": false
+    },
+    "velocityTier": "GHOST"
+   },
+   {
+    "pitch": 38,
+    "startTick": 58560,
+    "durationTicks": 120,
+    "velocity": 22,
+    "dynamics": {
+     "cc11Value": 20,
+     "cc74Value": 50,
+     "attenuationActive": false
+    },
+    "velocityTier": "GHOST"
+   },
+   {
+    "pitch": 38,
+    "startTick": 59520,
+    "durationTicks": 120,
+    "velocity": 26,
+    "dynamics": {
+     "cc11Value": 23,
+     "cc74Value": 52,
+     "attenuationActive": false
+    },
+    "velocityTier": "GHOST"
+   },
+   {
+    "pitch": 38,
+    "startTick": 60480,
+    "durationTicks": 120,
+    "velocity": 22,
+    "dynamics": {
+     "cc11Value": 20,
+     "cc74Value": 50,
+     "attenuationActive": false
+    },
+    "velocityTier": "GHOST"
+   }
+  ]
  },
  {
   "id": "trk_cymbals",
-  "notes": []
+  "notes": [
+   {
+    "pitch": 49,
+    "startTick": 15360,
+    "durationTicks": 672,
+    "velocity": 30,
+    "dynamics": {
+     "cc11Value": 25,
+     "cc74Value": 54,
+     "attenuationActive": false
+    },
+    "velocityTier": "GHOST"
+   },
+   {
+    "pitch": 49,
+    "startTick": 16320,
+    "durationTicks": 672,
+    "velocity": 33,
+    "dynamics": {
+     "cc11Value": 31,
+     "cc74Value": 55,
+     "attenuationActive": false
+    },
+    "velocityTier": "GHOST"
+   },
+   {
+    "pitch": 49,
+    "startTick": 17280,
+    "durationTicks": 672,
+    "velocity": 35,
+    "dynamics": {
+     "cc11Value": 37,
+     "cc74Value": 56,
+     "attenuationActive": false
+    },
+    "velocityTier": "GHOST"
+   },
+   {
+    "pitch": 49,
+    "startTick": 18240,
+    "durationTicks": 672,
+    "velocity": 38,
+    "dynamics": {
+     "cc11Value": 42,
+     "cc74Value": 57,
+     "attenuationActive": false
+    },
+    "velocityTier": "GHOST"
+   },
+   {
+    "pitch": 49,
+    "startTick": 19200,
+    "durationTicks": 672,
+    "velocity": 41,
+    "dynamics": {
+     "cc11Value": 48,
+     "cc74Value": 58,
+     "attenuationActive": false
+    },
+    "velocityTier": "GROOVE"
+   },
+   {
+    "pitch": 49,
+    "startTick": 20160,
+    "durationTicks": 672,
+    "velocity": 43,
+    "dynamics": {
+     "cc11Value": 54,
+     "cc74Value": 59,
+     "attenuationActive": false
+    },
+    "velocityTier": "GROOVE"
+   },
+   {
+    "pitch": 49,
+    "startTick": 21120,
+    "durationTicks": 672,
+    "velocity": 46,
+    "dynamics": {
+     "cc11Value": 60,
+     "cc74Value": 61,
+     "attenuationActive": false
+    },
+    "velocityTier": "GROOVE"
+   },
+   {
+    "pitch": 49,
+    "startTick": 22080,
+    "durationTicks": 672,
+    "velocity": 49,
+    "dynamics": {
+     "cc11Value": 66,
+     "cc74Value": 62,
+     "attenuationActive": false
+    },
+    "velocityTier": "GROOVE"
+   },
+   {
+    "pitch": 49,
+    "startTick": 23040,
+    "durationTicks": 672,
+    "velocity": 51,
+    "dynamics": {
+     "cc11Value": 71,
+     "cc74Value": 63,
+     "attenuationActive": false
+    },
+    "velocityTier": "GROOVE"
+   },
+   {
+    "pitch": 49,
+    "startTick": 24000,
+    "durationTicks": 672,
+    "velocity": 54,
+    "dynamics": {
+     "cc11Value": 77,
+     "cc74Value": 64,
+     "attenuationActive": false
+    },
+    "velocityTier": "GROOVE"
+   },
+   {
+    "pitch": 49,
+    "startTick": 24960,
+    "durationTicks": 672,
+    "velocity": 57,
+    "dynamics": {
+     "cc11Value": 83,
+     "cc74Value": 66,
+     "attenuationActive": false
+    },
+    "velocityTier": "GROOVE"
+   },
+   {
+    "pitch": 49,
+    "startTick": 25920,
+    "durationTicks": 672,
+    "velocity": 59,
+    "dynamics": {
+     "cc11Value": 89,
+     "cc74Value": 67,
+     "attenuationActive": false
+    },
+    "velocityTier": "GROOVE"
+   },
+   {
+    "pitch": 49,
+    "startTick": 26880,
+    "durationTicks": 672,
+    "velocity": 62,
+    "dynamics": {
+     "cc11Value": 95,
+     "cc74Value": 68,
+     "attenuationActive": false
+    },
+    "velocityTier": "GROOVE"
+   },
+   {
+    "pitch": 49,
+    "startTick": 27840,
+    "durationTicks": 672,
+    "velocity": 65,
+    "dynamics": {
+     "cc11Value": 100,
+     "cc74Value": 69,
+     "attenuationActive": false
+    },
+    "velocityTier": "GROOVE"
+   },
+   {
+    "pitch": 49,
+    "startTick": 28800,
+    "durationTicks": 672,
+    "velocity": 67,
+    "dynamics": {
+     "cc11Value": 106,
+     "cc74Value": 70,
+     "attenuationActive": false
+    },
+    "velocityTier": "GROOVE"
+   },
+   {
+    "pitch": 49,
+    "startTick": 29760,
+    "durationTicks": 672,
+    "velocity": 70,
+    "dynamics": {
+     "cc11Value": 112,
+     "cc74Value": 72,
+     "attenuationActive": false
+    },
+    "velocityTier": "GROOVE"
+   },
+   {
+    "pitch": 49,
+    "startTick": 30720,
+    "durationTicks": 1920,
+    "velocity": 116,
+    "dynamics": {
+     "cc11Value": 118,
+     "cc74Value": 92,
+     "attenuationActive": false
+    },
+    "velocityTier": "ACCENT"
+   }
+  ]
  },
  {
   "id": "trk_aux",
-  "notes": []
+  "notes": [
+   {
+    "pitch": 51,
+    "startTick": 30720,
+    "durationTicks": 336,
+    "velocity": 54,
+    "dynamics": {
+     "cc11Value": 49,
+     "cc74Value": 64,
+     "attenuationActive": false
+    },
+    "velocityTier": "GROOVE"
+   },
+   {
+    "pitch": 51,
+    "startTick": 32640,
+    "durationTicks": 336,
+    "velocity": 54,
+    "dynamics": {
+     "cc11Value": 49,
+     "cc74Value": 64,
+     "attenuationActive": false
+    },
+    "velocityTier": "GROOVE"
+   },
+   {
+    "pitch": 51,
+    "startTick": 34560,
+    "durationTicks": 336,
+    "velocity": 54,
+    "dynamics": {
+     "cc11Value": 49,
+     "cc74Value": 64,
+     "attenuationActive": false
+    },
+    "velocityTier": "GROOVE"
+   },
+   {
+    "pitch": 51,
+    "startTick": 36480,
+    "durationTicks": 336,
+    "velocity": 54,
+    "dynamics": {
+     "cc11Value": 49,
+     "cc74Value": 64,
+     "attenuationActive": false
+    },
+    "velocityTier": "GROOVE"
+   },
+   {
+    "pitch": 51,
+    "startTick": 38400,
+    "durationTicks": 336,
+    "velocity": 54,
+    "dynamics": {
+     "cc11Value": 49,
+     "cc74Value": 64,
+     "attenuationActive": false
+    },
+    "velocityTier": "GROOVE"
+   },
+   {
+    "pitch": 51,
+    "startTick": 40320,
+    "durationTicks": 336,
+    "velocity": 54,
+    "dynamics": {
+     "cc11Value": 49,
+     "cc74Value": 64,
+     "attenuationActive": false
+    },
+    "velocityTier": "GROOVE"
+   },
+   {
+    "pitch": 51,
+    "startTick": 42240,
+    "durationTicks": 336,
+    "velocity": 54,
+    "dynamics": {
+     "cc11Value": 49,
+     "cc74Value": 64,
+     "attenuationActive": false
+    },
+    "velocityTier": "GROOVE"
+   },
+   {
+    "pitch": 51,
+    "startTick": 44160,
+    "durationTicks": 336,
+    "velocity": 54,
+    "dynamics": {
+     "cc11Value": 49,
+     "cc74Value": 64,
+     "attenuationActive": false
+    },
+    "velocityTier": "GROOVE"
+   },
+   {
+    "pitch": 51,
+    "startTick": 46080,
+    "durationTicks": 336,
+    "velocity": 54,
+    "dynamics": {
+     "cc11Value": 49,
+     "cc74Value": 64,
+     "attenuationActive": false
+    },
+    "velocityTier": "GROOVE"
+   },
+   {
+    "pitch": 51,
+    "startTick": 48000,
+    "durationTicks": 336,
+    "velocity": 54,
+    "dynamics": {
+     "cc11Value": 49,
+     "cc74Value": 64,
+     "attenuationActive": false
+    },
+    "velocityTier": "GROOVE"
+   },
+   {
+    "pitch": 51,
+    "startTick": 49920,
+    "durationTicks": 336,
+    "velocity": 54,
+    "dynamics": {
+     "cc11Value": 49,
+     "cc74Value": 64,
+     "attenuationActive": false
+    },
+    "velocityTier": "GROOVE"
+   },
+   {
+    "pitch": 51,
+    "startTick": 51840,
+    "durationTicks": 336,
+    "velocity": 54,
+    "dynamics": {
+     "cc11Value": 49,
+     "cc74Value": 64,
+     "attenuationActive": false
+    },
+    "velocityTier": "GROOVE"
+   },
+   {
+    "pitch": 51,
+    "startTick": 53760,
+    "durationTicks": 336,
+    "velocity": 54,
+    "dynamics": {
+     "cc11Value": 49,
+     "cc74Value": 64,
+     "attenuationActive": false
+    },
+    "velocityTier": "GROOVE"
+   },
+   {
+    "pitch": 51,
+    "startTick": 55680,
+    "durationTicks": 336,
+    "velocity": 54,
+    "dynamics": {
+     "cc11Value": 49,
+     "cc74Value": 64,
+     "attenuationActive": false
+    },
+    "velocityTier": "GROOVE"
+   },
+   {
+    "pitch": 51,
+    "startTick": 57600,
+    "durationTicks": 336,
+    "velocity": 54,
+    "dynamics": {
+     "cc11Value": 49,
+     "cc74Value": 64,
+     "attenuationActive": false
+    },
+    "velocityTier": "GROOVE"
+   },
+   {
+    "pitch": 51,
+    "startTick": 59520,
+    "durationTicks": 336,
+    "velocity": 54,
+    "dynamics": {
+     "cc11Value": 49,
+     "cc74Value": 64,
+     "attenuationActive": false
+    },
+    "velocityTier": "GROOVE"
+   },
+   {
+    "pitch": 36,
+    "startTick": 60480,
+    "durationTicks": 480,
+    "velocity": 96,
+    "dynamics": {
+     "cc11Value": 86,
+     "cc74Value": 83,
+     "attenuationActive": false
+    },
+    "velocityTier": "ACCENT"
+   }
+  ]
  },
  {
   "id": "trk_piano",
