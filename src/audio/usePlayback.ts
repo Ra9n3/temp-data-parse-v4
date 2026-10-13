@@ -25,26 +25,33 @@ interface MasterBus {
   makeup: GainNode;
 }
 
-/** Module 8.8 B1 — per-ROLE preview gain trims, from scripts/loudness-audit.ts.
+/** Module 8.8 B1 / Module 8.9 v2 — per-ROLE preview gain trims.
  *
- * Constants are the deliverable: the audit measured trombones at 4.90× (user)
- * / 5.19× (fixture) the horn reference median, decomposed as cc7 2.00 × cc11
- * 1.27–1.60 × pitch 1.12–1.22 × vel 1.03–1.13. Trim ×0.21 lands trombones at
- * 103% (user) / 109% (fixture) — both inside the ±10% band. doubleBass
- * (170%/227%) was also flagged by the audit; ×0.60 centers the user project
- * at 102% (the fixture residual 136% is documented — no single constant
- * satisfies both projects, and the user project is primary). Trumpets take
- * the same ×0.21 as the closest measured brass profile EXTRAPOLATED: the
- * role is silent in both projects' generate() output (0 notes across all
- * seeds, guest share 0% — see the audit report), so no median exists to
- * measure; report this limitation. Horns, strings, woodwinds and tuba are
- * UNTOUCHED (audit reference/within band). Preview-only; generate() and
- * export are untouched, so every instrument's final notes stay byte-identical.
+ * Module 8.9 recalibrated this map with a SOLVER over scripts/loudness-audit.ts
+ * v2 (20 seeds × user project + fixture, p90 vs horn-reference median, A3-
+ * corrected low-frequency weight V2-boost). Root failure of v1: 3 seeds —
+ * on seeds 6/15 the tuba never sounded (it is a BASS carrier on 13/20 seeds)
+ * and the discount pitch curve unfairly weighted low registers.
+ *
+ * Constants (p90 brought inside the ±10% band on the user project, primary,
+ * per established convention; fixture positions documented — the horn reference
+ * itself differs ~2× between projects, so some do not intersect):
+ *   tuba 1 → 0.198 (p90 505% → ~100%), bassTrombone 1 → 0.219 (457% → ~100%),
+ *   doubleBass 0.60 → 0.408 (147% → ~100%), cellos 1 → 0.699 (143% → ~100%),
+ *   clarinets 1 → 0.714 (140% → ~100%), bassoons 1 → 0.715 (140% → ~100%),
+ *   trumpets 0.21 / trombones 0.21 UNTOUCHED (93% / 100% — in band).
+ * Horns = 1.0 (the reference). Everything below band on both projects stays
+ * at 1.0 (no boosting of quiet roles).
  */
 export const ROLE_PREVIEW_GAIN_TRIM: Record<string, number> = {
-  trumpets: 0.21, // extrapolated — role silent in generate() output (see audit)
-  trombones: 0.21,
-  doubleBass: 0.60,
+  trumpets: 0.21, // in band (93%) — untouched by the v2 solver
+  trombones: 0.21, // in band (100%) — untouched by the v2 solver
+  tuba: 0.198,
+  bassTrombone: 0.219,
+  doubleBass: 0.408,
+  cellos: 0.699,
+  clarinets: 0.714,
+  bassoons: 0.715,
 };
 
 function createMasterBus(ctx: AudioContext): MasterBus {
