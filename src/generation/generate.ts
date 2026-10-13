@@ -45,6 +45,7 @@ import { applyAccompanimentAttenuation, applyAntiphonalWindowing, calculateNoteD
 // Module 8 arrangement/gestures: deterministic, no salt.
 import { applyBreakdownDrop, arrangementContext, DEFAULT_ARRANGEMENT_CONFIG, expandSectionsForStaggering, truncateNotesAtBreakdownBoundaries } from "./arrangement";
 import { generatePercussion } from "./percussion";
+import { applyBassPocket } from "./rhythm";
 import { guardTrackNotes, verifyMonophonyInvariant } from "./monophony";
 import { applyActiveMask, applyRoleRotation, divideChorusRoles, exposedBreakdownRoles, planRotation, resolveRotationConfig, type RotationPlan } from "./rotation";
 import { consolidateSustains, reconcileConsolidatedPads } from "./sustain";
@@ -1293,10 +1294,17 @@ export function generate(project: Project, options: GenerateOptions): Track[] {
   // its own dynamics/cc11/cc74 at note creation (balance never touches the
   // battery), and non-percussion tracks pass through untouched.
   const percussed = generatePercussion(returned, { project, measures: arrangementInfo.measures, config: arrangement });
+  // Module 13 — bass pocket (decision 2): ONE live duty — BASS-role notes on
+  // bass-carrying tracks sharing a beat window with an M12 aux-kick event
+  // (pitch 36) shift a flat deterministic +4 ms behind the kick, ledger-checked
+  // (never crosses the next bass note). No kick ⇒ no-op. VVQ machinery stays
+  // SHELVED: RHYTHM_SECTION_ROLES matches no current track, so it is provably
+  // a zero-application pass today (m13-check section 5).
+  const pocket = applyBassPocket(percussed, project);
   // Final truncation pass: the articulation duration multiplier can push a note a
   // few ticks past a breakdown boundary after the event-level drop; the spec's
   // "instant mute" is note-level, so enforce it on the built tracks.
-  const truncated = truncateNotesAtBreakdownBoundaries(percussed, arrangementInfo.windows);
+  const truncated = truncateNotesAtBreakdownBoundaries(pocket.tracks, arrangementInfo.windows);
   // Module 8.5 §5 — chorus role divider: post-bake, after gestures, BEFORE the
   // guard (the guard stays the FINAL invariant below). Deterministic; expected
   // ≈ 0 resolutions; doubling guests are exempt (they follow their source).

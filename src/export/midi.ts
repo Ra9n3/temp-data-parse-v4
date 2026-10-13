@@ -11,6 +11,7 @@ import { CC74_OFFSETS } from "../generation/articulation";
 import { acousticWeightForTrack, cc7ForWeight } from "../generation/balance";
 import { builtInProfileById, vst3EventAdapter, type PhysicalMidiStreamEvent } from "../plugins/expressionMaps";
 import { buildConductorTempoEvents } from "../generation/humanizeV2";
+import { keyboardPedalAutomation, PAN_CENTERED_ROLES, type PedalCcEvent } from "../generation/rhythm";
 
 function isInstrument(track: Track): boolean {
   return track.family !== "structure" && track.family !== "audio";
@@ -190,7 +191,7 @@ function applyHeader(midi: MidiInstance, project: Project, endTick: number): voi
   });
 }
 
-function writeInstrumentTrack(midi: MidiInstance, track: Track, endTick: number, channel: number, libraryGroups: Project["libraryGroups"] = [], bpm = 120): void {
+function writeInstrumentTrack(midi: MidiInstance, track: Track, endTick: number, channel: number, libraryGroups: Project["libraryGroups"] = [], bpm = 120, pedalEvents?: PedalCcEvent[]): void {
   const expression = track.expressionMapping;
   const mt = midi.addTrack();
   mt.name = track.name;
@@ -199,6 +200,19 @@ function writeInstrumentTrack(midi: MidiInstance, track: Track, endTick: number,
   // CC#7 is a static master fader by acoustic carrying power, deliberately separate
   // from per-note expressionMapping so custom CC assignments remain untouched.
   mt.addCC({ number: 7, value: cc7ForWeight(acousticWeightForTrack(track)) / 127, ticks: 0 });
+  // Module 13 decision 4 — pan centering (sub-150 Hz rule): bass-carrying
+  // tracks get CC10 = 64 at tick 0. No other pan automation (section stereo
+  // spread is native-era mixing). Deterministic, one event, tick 0.
+  if (PAN_CENTERED_ROLES.has(track.role ?? "")) mt.addCC({ number: 10, value: 64 / 127, ticks: 0 });
+  // Module 13 decision 3 — keyboard pedal catch on KEYS-family tracks only:
+  // chord-boundary CC64 streams (127 at start, 0 at the next start, 127 again
+  // +10 ms — "the catch"), replacing per-note sustain THERE. Non-keys tracks
+  // keep the M4 legacy per-note path byte-identically (pinned). When no pedal
+  // data exists (no chords) the legacy path stays in charge.
+  const usePedalCatch = track.family === "keys" && (pedalEvents?.length ?? 0) > 0;
+  for (const event of usePedalCatch ? pedalEvents! : []) {
+    mt.addCC({ number: event.cc, value: event.value / 127, ticks: Math.max(0, event.tick) });
+  }
   const group = libraryGroups.find((g) => g.id === track.libraryGroupId);
   const keySwitchMap = group?.keySwitchMap;
   const preTriggerMs = group?.preTriggerDelayMs ?? 15;
@@ -239,8 +253,10 @@ function writeInstrumentTrack(midi: MidiInstance, track: Track, endTick: number,
       mt.addPitchBend({ value: bend, ticks: start });
       mt.addPitchBend({ value: 0, ticks: start + clipped });
     }
-    mt.addCC({ number: expression?.sustainCC ?? 64, value: 1, ticks: start });
-    mt.addCC({ number: expression?.sustainCC ?? 64, value: 0, ticks: start + clipped });
+    if (!usePedalCatch) {
+      mt.addCC({ number: expression?.sustainCC ?? 64, value: 1, ticks: start });
+      mt.addCC({ number: expression?.sustainCC ?? 64, value: 0, ticks: start + clipped });
+    }
     mt.addNote({
       midi: n.pitch,
       ticks: start,
@@ -271,11 +287,18 @@ export function exportMergedMidi(
       const events = vst3EventAdapter(t.notes, profile, project.bpm, { endTick });
       nextChannel += physicalToTonejs(midi, events, { trackName: t.name, endTick, cc7Value: cc7ForWeight(acousticWeightForTrack(t)) / 127 });
     } else {
-      writeInstrumentTrack(midi, t, endTick, nextChannel % 16, project.libraryGroups, project.bpm);
+      writeInstrumentTrack(midi, t, endTick, nextChannel % 16, project.libraryGroups, project.bpm, pedalEventsFor(t, project, endTick));
       nextChannel += 1;
     }
   }
   return midi.toArray();
+}
+
+/** Module 13 decision 3 — keys-family pedal data (from project.chords + the
+ * track's own sustainCC constant); keys tracks without chords keep legacy. */
+function pedalEventsFor(track: Track, project: Project, endTick: number): PedalCcEvent[] | undefined {
+  if (track.family !== "keys") return undefined;
+  return keyboardPedalAutomation(project.chords, project.bpm, endTick, track.expressionMapping?.sustainCC ?? 64);
 }
 
 export function exportPerTrackMidi(
@@ -295,7 +318,7 @@ export function exportPerTrackMidi(
       const events = vst3EventAdapter(t.notes, profile, project.bpm, { endTick });
       physicalToTonejs(midi, events, { trackName: t.name, endTick, cc7Value: cc7ForWeight(acousticWeightForTrack(t)) / 127 });
     } else {
-      writeInstrumentTrack(midi, t, endTick, 0, project.libraryGroups, project.bpm);
+      writeInstrumentTrack(midi, t, endTick, 0, project.libraryGroups, project.bpm, pedalEventsFor(t, project, endTick));
     }
     const idx = String(nextChannel + 1).padStart(2, "0");
     nextChannel += 1;
