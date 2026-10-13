@@ -8,6 +8,9 @@ import { validateProject } from "../shared/schema/validate";
 import { exportMergedMidi, exportPerTrackMidi, midiDurationTicks, parseMidiNotes } from "../export/midi";
 import { exportProjectJson, importProjectJson, projectsEqual } from "../export/json";
 import {
+  applyEfgEngines,
+  buildEfgEnergies,
+  buildSemanticInputs,
   DynamicMappingEngine,
   generate,
   generateOrchestralScore,
@@ -35,6 +38,7 @@ import { DEFAULT_GENERATION_SETTINGS } from "../shared/schema/types";
 import { applyNctPass } from "../generation/nct";
 import { realizeRhythm } from "../generation/rhythm";
 import { guardTrackNotes, verifyMonophonyInvariant } from "../generation/monophony";
+import { exposedBreakdownRoles, planRotation, resolveRotationConfig } from "../generation/rotation";
 import { consolidateSustains } from "../generation/sustain";
 import { cc7ForWeight, DEFAULT_BALANCE_CONFIG } from "../generation/balance";
 import userProjectJson from "../fixtures/user-project.json";
@@ -673,6 +677,71 @@ export function runUnitTests(): TestResult[] {
       }
       assert(DEFAULT_BALANCE_CONFIG.cc11Floor === 40, `CC11 floor should be 40, got ${DEFAULT_BALANCE_CONFIG.cc11Floor}`);
       return "cc7 band [78,108] inverted (strings 99 > brass 81 > tuba 78), cc11 floor 40";
+    }),
+    timed("Sustain metric pinned: BASS/PAD median ≥ 4 beats on sustained sections", () => {
+      // Module 8.8 bundle — pins the 8.6 sustain-consolidation result against
+      // regressions. Measured at the same stage boundary as
+      // scripts/sustain-metric.ts (post engines+rotation+consolidation,
+      // pre-realizeRhythm) on the 32-bar multi-section synthetic. The dorian
+      // fixture's BASS median 2.00 beats is the documented baseline exception
+      // (not asserted here; asserted ≥ 2.00 as a floor for observability).
+      const fixtureBase = fixture();
+      const barTicks = ticksPerBar({ numerator: 4, denominator: 4 });
+      const synth = cloneProject(fixtureBase);
+      synth.sections = [
+        { ...synth.sections[0]!, name: "Verse", startBar: 1, lengthBars: 8 },
+        { ...synth.sections[0]!, name: "Pre-Chorus Lift", startBar: 9, lengthBars: 4, targetDynamic: 0.7, densityLevel: "Dense" },
+        { ...synth.sections[0]!, name: "Big Chorus", startBar: 13, lengthBars: 8, targetDynamic: 0.95, densityLevel: "Tutti" },
+        { ...synth.sections[0]!, name: "Breakdown", startBar: 21, lengthBars: 4, targetDynamic: 0.2, densityLevel: "Sparse" },
+        { ...synth.sections[0]!, name: "Outro", startBar: 25, lengthBars: 8, targetDynamic: 0.4, densityLevel: "Balanced" },
+      ];
+      const perBar = new Map<number, string>();
+      for (const block of fixtureBase.chords) {
+        const startBar = Math.floor(block.startTick / barTicks);
+        for (let offset = 0; offset < Math.max(1, Math.round(block.durationTicks / barTicks)); offset++) perBar.set(startBar + offset, block.symbol ?? "C");
+      }
+      synth.chords = Array.from({ length: 32 }, (_, barIndex) => ({ id: `sustain-pin-${barIndex}`, symbol: perBar.get(barIndex % 16) ?? "C", startTick: barIndex * barTicks, durationTicks: barTicks }));
+      for (const seed of [6, 15]) {
+        const settings = synth.generationSettings ?? DEFAULT_GENERATION_SETTINGS;
+        const inputs = buildSemanticInputs(synth, settings, seed);
+        const rotationPartial = settings.arrangement?.rotation;
+        const rotationConfig = resolveRotationConfig(rotationPartial);
+        const plan = rotationConfig.enabled ? planRotation(synth, rotationPartial, seed) : undefined;
+        const post = applyEfgEngines(inputs.score.events, {
+          config: inputs.config, chords: inputs.chords, sections: inputs.scoreSections,
+          energies: buildEfgEnergies(inputs.config, inputs.chords),
+          chordStartTimes: inputs.chords.map((block) => block.startTime),
+          profiles: inputs.compositionProfiles,
+          intensityAt: inputs.arrangementInfo.intensityAt,
+          subdivisionCapAt: inputs.arrangementInfo.subdivisionCapAt,
+          rotation: plan ? { plan, config: rotationConfig, measures: inputs.arrangementInfo.measures, exposedRoles: exposedBreakdownRoles(settings.arrangement?.breakdownExposedLayer) } : undefined,
+        }, seed, { germ: settings.themes?.germ ?? true, nct: settings.themes?.nct ?? true, counterline: settings.themes?.counterline ?? true }).events;
+        for (const role of ["BASS", "PAD"] as const) {
+          const durations = post.filter((event) => event.role === role).map((event) => event.duration);
+          const sorted = [...durations].sort((a, b) => a - b);
+          const median = sorted[Math.floor(sorted.length / 2)] ?? 0;
+          assert(median >= 4 * 960, `seed ${seed} ${role}: consolidated median ${median}t (${(median / 960).toFixed(2)} beats) < 4 beats — the sustain fix regressed`);
+        }
+      }
+      // Documented exception row (fixture, seed 6): BASS median 2.00 beats at the 8.6 baseline.
+      const fixtureSettings = fixtureBase.generationSettings ?? DEFAULT_GENERATION_SETTINGS;
+      const fixtureInputs = buildSemanticInputs(fixtureBase, fixtureSettings, 6);
+      const fixturePlan0 = fixtureSettings.arrangement?.rotation;
+      const fixtureCfg = resolveRotationConfig(fixturePlan0);
+      const fixturePlan = fixtureCfg.enabled ? planRotation(fixtureBase, fixturePlan0, 6) : undefined;
+      const fixturePost = applyEfgEngines(fixtureInputs.score.events, {
+        config: fixtureInputs.config, chords: fixtureInputs.chords, sections: fixtureInputs.scoreSections,
+        energies: buildEfgEnergies(fixtureInputs.config, fixtureInputs.chords),
+        chordStartTimes: fixtureInputs.chords.map((block) => block.startTime),
+        profiles: fixtureInputs.compositionProfiles,
+        intensityAt: fixtureInputs.arrangementInfo.intensityAt,
+        subdivisionCapAt: fixtureInputs.arrangementInfo.subdivisionCapAt,
+        rotation: fixturePlan ? { plan: fixturePlan, config: fixtureCfg, measures: fixtureInputs.arrangementInfo.measures, exposedRoles: exposedBreakdownRoles(fixtureSettings.arrangement?.breakdownExposedLayer) } : undefined,
+      }, 6, { germ: true, nct: true, counterline: true }).events;
+      const bassDurations = fixturePost.filter((event) => event.role === "BASS").map((event) => event.duration).sort((a, b) => a - b);
+      const fixtureBassMedian = bassDurations[Math.floor(bassDurations.length / 2)] ?? 0;
+      assert(fixtureBassMedian >= 2 * 960, `fixture BASS median ${fixtureBassMedian}t below the documented 2.00-beat baseline`);
+      return "synthetic BASS/PAD medians ≥ 4 beats (seeds 6,15); fixture BASS 2.00-beat exception documented";
     }),
   ];
 }

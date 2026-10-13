@@ -25,6 +25,28 @@ interface MasterBus {
   makeup: GainNode;
 }
 
+/** Module 8.8 B1 — per-ROLE preview gain trims, from scripts/loudness-audit.ts.
+ *
+ * Constants are the deliverable: the audit measured trombones at 4.90× (user)
+ * / 5.19× (fixture) the horn reference median, decomposed as cc7 2.00 × cc11
+ * 1.27–1.60 × pitch 1.12–1.22 × vel 1.03–1.13. Trim ×0.21 lands trombones at
+ * 103% (user) / 109% (fixture) — both inside the ±10% band. doubleBass
+ * (170%/227%) was also flagged by the audit; ×0.60 centers the user project
+ * at 102% (the fixture residual 136% is documented — no single constant
+ * satisfies both projects, and the user project is primary). Trumpets take
+ * the same ×0.21 as the closest measured brass profile EXTRAPOLATED: the
+ * role is silent in both projects' generate() output (0 notes across all
+ * seeds, guest share 0% — see the audit report), so no median exists to
+ * measure; report this limitation. Horns, strings, woodwinds and tuba are
+ * UNTOUCHED (audit reference/within band). Preview-only; generate() and
+ * export are untouched, so every instrument's final notes stay byte-identical.
+ */
+export const ROLE_PREVIEW_GAIN_TRIM: Record<string, number> = {
+  trumpets: 0.21, // extrapolated — role silent in generate() output (see audit)
+  trombones: 0.21,
+  doubleBass: 0.60,
+};
+
 function createMasterBus(ctx: AudioContext): MasterBus {
   const input = ctx.createGain();
   const compressor = ctx.createDynamicsCompressor();
@@ -149,7 +171,8 @@ export function usePlayback(
           const cc7Gain = acousticWeightForTrack(t);
           const cc11Gain = n.dynamics ? (n.dynamics.cc11Value / 127) : 1;
           // Module 8.7 B4: base per-note peak 0.035 → 0.05 (headroom now handled by the master bus compressor).
-          const peak = 0.05 * (n.velocity / 127) * cc7Gain * cc11Gain * (t.family === "percussion" ? 1.6 : 1);
+          // Module 8.8 B1: per-role preview trim (brass taming; see ROLE_PREVIEW_GAIN_TRIM).
+          const peak = 0.05 * (ROLE_PREVIEW_GAIN_TRIM[t.role] ?? 1) * (n.velocity / 127) * cc7Gain * cc11Gain * (t.family === "percussion" ? 1.6 : 1);
           const atk = t.family === "strings" ? 0.04 : t.family === "percussion" ? 0.005 : 0.015;
           const when = Math.max(ctx.currentTime, startSec);
           gain.gain.setValueAtTime(0, when);
