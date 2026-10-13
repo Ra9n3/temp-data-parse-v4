@@ -1,0 +1,23 @@
+{
+  "id": "uvi-orchestral-suite",
+  "profileName": "UVI Orchestral Suite",
+  "vendor": "UVI",
+  "triggerMode": "KEY_SWITCH",
+  "preTriggerOffsetMs": 15,
+  "ccMappings": {
+    "dynamicCc": 1,
+    "expressionCc": 11,
+    "filterCutoffCc": 74,
+    "sustainCc": 64
+  },
+  "articulationMap": {
+    "LEGATO": { "triggerType": "KEY_SWITCH", "keySwitchNote": 12, "isLatching": true },
+    "DETACHE": { "triggerType": "KEY_SWITCH", "keySwitchNote": 13, "isLatching": true },
+    "SPICCATO": { "triggerType": "KEY_SWITCH", "keySwitchNote": 14, "isLatching": true },
+    "MARTELE": { "triggerType": "KEY_SWITCH", "keySwitchNote": 15, "isLatching": true },
+    "PIZZICATO_STD": { "triggerType": "KEY_SWITCH", "keySwitchNote": 16, "isLatching": true },
+    "BOWED_TREMOLO": { "triggerType": "KEY_SWITCH", "keySwitchNote": 17, "isLatching": true },
+    "SUL_PONTICELLO": { "triggerType": "KEY_SWITCH", "keySwitchNote": 18, "isLatching": true }
+  },
+  "_note": "Key-switch notes 12–18 with sustainCc 64 are the authoritative addendum data. The technique→note ASSIGNMENT order (LEGATO=12 … SUL_PONTICELLO=18) is PROVISIONAL — the addendum shipped the note numbers without a verified per-technique table; verify against UVI Orchestral Suite documentation before production use (tunable data, no code change needed). Offsets are 15 ms per the addendum."
+}

@@ -1,4 +1,5 @@
 import { parseChord } from "./chords";
+import { builtInProfileById } from "../../plugins/expressionMaps";
 import {
   DEFAULT_EXPRESSION_MAPPING,
   DEFAULT_GENERATION_SETTINGS,
@@ -401,6 +402,12 @@ export function validateProject(input: unknown): ValidationResult {
       }
       if (g && g.preTriggerDelayMs !== undefined && (!isNum(g.preTriggerDelayMs) || g.preTriggerDelayMs < 0 || g.preTriggerDelayMs > 1000)) {
         errors.push(`libraryGroups[${i}].preTriggerDelayMs must be between 0 and 1000`);
+      }
+      if (g && g.profileId !== undefined) {
+        if (typeof g.profileId !== "string" || !g.profileId) errors.push(`libraryGroup profileId must be a non-empty string`);
+        else if (!builtInProfileById(g.profileId)) {
+          errors.push(`libraryGroup profile ${JSON.stringify(g.profileId)} does not resolve to a built-in expression map`);
+        }
       }
     });
   }

@@ -1,0 +1,14 @@
+{
+  "id": "vsl-synchron",
+  "profileName": "VSL Synchron (placeholder)",
+  "vendor": "Vienna Symphonic Library",
+  "triggerMode": "KEY_SWITCH",
+  "preTriggerOffsetMs": 0,
+  "ccMappings": {
+    "dynamicCc": 1,
+    "expressionCc": 11,
+    "filterCutoffCc": 74
+  },
+  "articulationMap": {},
+  "_note": "placeholder — author before use"
+}

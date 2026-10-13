@@ -423,6 +423,19 @@ export default function App() {
           setPluginLabels((p) => ({ ...p, [vstTrackId]: name }));
           toast("ok", `Assigned ${name}`);
         }}
+        onPickProfile={(profileId, name) => {
+          if (!vstTrackId) return;
+          // Module 9: built-in expression maps create the group with profileId
+          // set (no scanned plugin); the exporter then takes the profile path.
+          const g = { id: makeId("lg"), name, pluginId: null, pluginState: null, profileId };
+          commit({
+            ...project,
+            libraryGroups: [...project.libraryGroups, g],
+            tracks: project.tracks.map((t) => (t.id === vstTrackId ? { ...t, libraryGroupId: g.id } : t)),
+          });
+          setPluginLabels((p) => ({ ...p, [vstTrackId]: name }));
+          toast("ok", `Assigned ${name} (expression map)`);
+        }}
       />
       <ExportDialog
         open={exportOpen}

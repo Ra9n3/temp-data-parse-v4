@@ -393,6 +393,11 @@ export interface LibraryGroup {
   keySwitchMap?: Record<string, number>;
   /** Module 4 (VST3-forward): ms a key-switch must precede its note (default 15). */
   preTriggerDelayMs?: number;
+  /** Module 9 (VST3 expression-map profile): id resolving in
+   * plugins/expressionMaps BUILT_IN_PROFILES. Present ⇒ the PROFILE export path
+   * (profile.preTriggerOffsetMs owns the pre-trigger, reconciliation #2);
+   * set both profileId and keySwitchMap ⇒ profileId wins (exporter warns). */
+  profileId?: string;
 }
 
 export interface Project {

@@ -9,9 +9,92 @@ import { PITCH_CLASS_NAMES, type ModeName, type Project, type Track } from "../s
 import { barToTick, msToTicks, projectEndTick } from "../shared/schema/time";
 import { CC74_OFFSETS } from "../generation/articulation";
 import { acousticWeightForTrack, cc7ForWeight } from "../generation/balance";
+import { builtInProfileById, vst3EventAdapter, type PhysicalMidiStreamEvent } from "../plugins/expressionMaps";
 
 function isInstrument(track: Track): boolean {
   return track.family !== "structure" && track.family !== "audio";
+}
+
+/** Module 9 decision #1 — track → group → profileId. Group has BOTH profileId
+ * and legacy keySwitchMap ⇒ profileId wins (warn once, deterministic). Groups
+ * with only keySwitchMap keep the byte-identical legacy path below. */
+function profileForTrack(track: Track, libraryGroups: Project["libraryGroups"]): string | null {
+  const group = libraryGroups.find((g) => g.id === track.libraryGroupId);
+  if (!group?.profileId) return null;
+  if (group.keySwitchMap) console.warn(`[scorch] profile overrides legacy keySwitchMap`, group.id);
+  if (!builtInProfileById(group.profileId)) {
+    console.warn(`[scorch] libraryGroup profile "${group.profileId}" not found — falling back to legacy writer`, group.id);
+    return null;
+  }
+  return group.profileId;
+}
+
+interface PhysicalWriterOptions {
+  trackName: string;
+  endTick: number;
+  /** 0–1 normalized CC#7 written at tick 0 on EVERY emitted channel-track. */
+  cc7Value: number;
+}
+
+/** Module 9 reconciliation #9 — write a physical event stream via @tonejs.
+ * One track's physical events split into one tonejs track per USED channel
+ * (named "trackName · ch n" when more than one); a single-channel profile
+ * keeps the plain legacy track name. Note pairs are matched FIFO per pitch.
+ * Returns the number of tonejs tracks created so the merged exporter can
+ * advance its channel index correctly. */
+function physicalToTonejs(midi: MidiInstance, events: PhysicalMidiStreamEvent[], opts: PhysicalWriterOptions): number {
+  const byChannel = new Map<number, PhysicalMidiStreamEvent[]>();
+  for (const event of events) {
+    const list = byChannel.get(event.channel);
+    if (list) list.push(event);
+    else byChannel.set(event.channel, [event]);
+  }
+  const used = [...byChannel.keys()].sort((a, b) => a - b);
+  for (const channel of used) {
+    const mt = midi.addTrack();
+    mt.name = used.length > 1 ? `${opts.trackName} · ch ${channel}` : opts.trackName;
+    mt.channel = channel - 1; // @tonejs uses 0–15
+    mt.endOfTrackTicks = opts.endTick;
+    // CC#7 at tick 0 (acoustic balance) applies to BOTH export paths (#1).
+    mt.addCC({ number: 7, value: opts.cc7Value, ticks: 0 });
+    const openOns = new Map<number, Array<{ tick: number; velocity: number }>>(); // pitch → ordered note-ons
+    for (const event of byChannel.get(channel)!) {
+      const ticks = Math.max(0, event.timestampTicks);
+      if (event.eventType === "NOTE_ON") {
+        const stack = openOns.get(event.data1);
+        if (stack) stack.push({ tick: ticks, velocity: event.data2 });
+        else openOns.set(event.data1, [{ tick: ticks, velocity: event.data2 }]);
+      } else if (event.eventType === "NOTE_OFF") {
+        const stack = openOns.get(event.data1);
+        const on = stack?.shift();
+        if (on !== undefined) {
+          // Velocity comes from the NOTE_ON (the adapter sends NOTE_OFF with data2 = 0).
+          mt.addNote({ midi: event.data1, ticks: on.tick, durationTicks: Math.max(1, Math.round(ticks - on.tick)), velocity: Math.max(0, Math.min(127, on.velocity || 64)) / 127 });
+          if (stack && stack.length === 0) openOns.delete(event.data1);
+        }
+        // An unmatched NOTE_OFF (defensive; the adapter always pairs) is dropped.
+      } else if (event.eventType === "CONTROL_CHANGE") {
+        mt.addCC({ number: event.data1, value: Math.max(0, Math.min(127, event.data2)) / 127, ticks });
+      } else if (event.eventType === "PITCH_BEND") {
+        mt.addPitchBend({ value: (Math.max(0, Math.min(127, event.data2)) - 64) / 64, ticks });
+      } else if (event.eventType === "PROGRAM_CHANGE") {
+        // Reconciliation #8 — feature-detect @tonejs/midi program-change support.
+        const writeProgram = (mt as unknown as { addProgramChange?: (args: { value: number; ticks: number }) => unknown }).addProgramChange;
+        if (typeof writeProgram === "function") {
+          writeProgram.call(mt, { value: event.data1, ticks });
+        } else {
+          console.warn("[scorch] program change not renderable by @tonejs/midi; consumed by adapter stream only");
+        }
+      }
+    }
+    // Close any still-open note at the end of track (pairing safety net).
+    for (const [pitch, stack] of openOns) {
+      for (const on of stack) {
+        mt.addNote({ midi: pitch, ticks: on.tick, durationTicks: Math.max(1, opts.endTick - on.tick), velocity: 0.5 });
+      }
+    }
+  }
+  return used.length;
 }
 
 function relativeMajorPc(key: number, mode: ModeName): number {
@@ -163,7 +246,20 @@ export function exportMergedMidi(
   const endTick = projectEndTick(project);
   applyHeader(midi, project, endTick);
   const tracks = selectedTracks(project, mode, selectedIds);
-  tracks.forEach((t, i) => writeInstrumentTrack(midi, t, endTick, i % 16, project.libraryGroups, project.bpm));
+  // Module 9: profile tracks emit one-or-more tonejs tracks (channel split), so
+  // the legacy channel index advances per emitted tonejs track, not per input.
+  let nextChannel = 0;
+  for (const t of tracks) {
+    const profileId = profileForTrack(t, project.libraryGroups);
+    if (profileId) {
+      const profile = builtInProfileById(profileId)!;
+      const events = vst3EventAdapter(t.notes, profile, project.bpm, { endTick });
+      nextChannel += physicalToTonejs(midi, events, { trackName: t.name, endTick, cc7Value: cc7ForWeight(acousticWeightForTrack(t)) / 127 });
+    } else {
+      writeInstrumentTrack(midi, t, endTick, nextChannel % 16, project.libraryGroups, project.bpm);
+      nextChannel += 1;
+    }
+  }
   return midi.toArray();
 }
 
@@ -174,11 +270,20 @@ export function exportPerTrackMidi(
 ): { filename: string; data: Uint8Array }[] {
   const endTick = projectEndTick(project);
   const tracks = selectedTracks(project, mode, selectedIds);
-  return tracks.map((t, i) => {
+  let nextChannel = 0;
+  return tracks.map((t) => {
     const midi = new Midi();
     applyHeader(midi, project, endTick);
-    writeInstrumentTrack(midi, t, endTick, 0, project.libraryGroups, project.bpm);
-    const idx = String(i + 1).padStart(2, "0");
+    const profileId = profileForTrack(t, project.libraryGroups);
+    if (profileId) {
+      const profile = builtInProfileById(profileId)!;
+      const events = vst3EventAdapter(t.notes, profile, project.bpm, { endTick });
+      physicalToTonejs(midi, events, { trackName: t.name, endTick, cc7Value: cc7ForWeight(acousticWeightForTrack(t)) / 127 });
+    } else {
+      writeInstrumentTrack(midi, t, endTick, 0, project.libraryGroups, project.bpm);
+    }
+    const idx = String(nextChannel + 1).padStart(2, "0");
+    nextChannel += 1;
     const safe = t.name.replace(/[\\/:*?"<>|]/g, "_");
     return { filename: `${idx} ${safe}.mid`, data: midi.toArray() };
   });

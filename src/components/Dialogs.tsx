@@ -8,6 +8,7 @@ import {
   pluginDisplayName,
   type PluginScanState,
 } from "../plugins/mockService";
+import { BUILT_IN_PROFILES } from "../plugins/expressionMaps";
 import type { ExportTrackMode } from "../export/midi";
 import { exportMergedMidi, exportPerTrackMidi } from "../export/midi";
 import { exportProjectJson } from "../export/json";
@@ -54,12 +55,16 @@ export function VstBrowser({
   state,
   onClose,
   onPick,
+  onPickProfile,
   onState,
 }: {
   open: boolean;
   state: PluginScanState;
   onClose: () => void;
   onPick: (id: string, name: string) => void;
+  /** Module 9: picking a built-in expression map creates the group with
+   * profileId set (instead of a scanned pluginId) and assigns the track. */
+  onPickProfile: (profileId: string, name: string) => void;
   onState: (s: PluginScanState) => void;
 }) {
   const [query, setQuery] = useState("");
@@ -170,6 +175,26 @@ export function VstBrowser({
               <li key={p.id} className="flex items-center gap-2 px-2 py-1 text-xs text-red-400">
                 <Ph name="warning" className="h-3.5 w-3.5" />
                 Failed: {pluginDisplayName(p.rawName)}
+              </li>
+            ))}
+            <li className="pt-2 text-[11px] uppercase tracking-wide text-stone-500">Built-in expression maps</li>
+            {BUILT_IN_PROFILES.map((profile) => (
+              <li key={profile.id}>
+                <button
+                  type="button"
+                  title={typeof (profile.articulationMap as Record<string, unknown>)._note === "string"
+                    ? (profile.articulationMap as unknown as Record<string, string>)._note
+                    : "expression map profile"}
+                  onClick={() => {
+                    onPickProfile(profile.id, profile.profileName);
+                    onClose();
+                  }}
+                  className="flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-left text-sm hover:bg-white/5"
+                >
+                  <Ph name="sparkle" className="h-4 w-4 text-sky-300" />
+                  <span className="flex-1">{profile.profileName}</span>
+                  <span className="text-[11px] text-stone-500">{profile.vendor}</span>
+                </button>
               </li>
             ))}
           </ul>
