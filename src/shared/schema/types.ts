@@ -265,6 +265,9 @@ export interface RotationConfigPartial {
 export interface OrchestrationSettings {
   enabledGroups: { woodwinds: boolean; brass: boolean; strings: boolean; percussion: boolean; rhythm: boolean };
   woodwindsSize: "Pairs" | "Threes + Auxiliaries" | "Chamber Ensemble";
+  /** Module 11: virtual woodwind chair ensemble (data layer over section
+   * profiles); default THREES_LARGE. */
+  woodwindEnsemble?: "THREES_LARGE" | "PAIRS_CHAMBER";
   brassSize: "Standard" | "Cinematic Double Brass";
   stringsSize: "Full Symphonic (16/14/12/10/8)" | "Medium Studio" | "Chamber";
   voicingStyle: VoicingStyle;
@@ -358,6 +361,11 @@ export interface Note {
   /** Module 8.5: semantic role of the source event, stamped at the bake ONLY when
    * the rotation engine is enabled (rotation-off output stays byte-identical). */
   role?: string;
+  /** Module 11: aux instrument the woodwind chair switched to for this note
+   * (e.g. "piccolo"). The note itself lives on the chair's SECTION track at
+   * SOUNDING pitch; the tag drives the native engine's patch switch. Playback
+   * ignores the tag (same family wave). */
+  auxInstrumentId?: string;
   /** Module 6: additive brightness-CC offset from the anti-flanging filter. */
   cc74Offset?: number;
   /** Module 7 deterministic balance output; absent on manually-authored notes. */

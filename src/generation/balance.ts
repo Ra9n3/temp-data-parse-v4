@@ -208,12 +208,34 @@ export function calculateNoteDynamics<T extends EvaluatedNote & BalanceEvent>(ev
     const technique = event.articulation.primaryTechnique;
     const muteScale = MUTE_ATTENUATION[technique] ?? 1;
     cc11Value = clamp(Math.round(cc11Value * muteScale), ctx.config.cc11Floor, 127);
+    // Module 11 (Task 11.5c) — flute high-register recede: flute notes ≥ 88
+    // overlapping a soft string pad (string event ≤ 0.4 dynamic in the same
+    // window — M7's attenuation-context pattern, no new pass) pull CC11 ×0.88
+    // so the sparkle sits behind the pad instead of blazing over it.
+    if ((profile?.role === "flutes" || profile?.id === "flute") && event.pitchConcert >= 88) {
+      const overSoftPad = events.some((other) => {
+        if (other === event) return false;
+        const otherProfile = profileById.get(other.instrumentId);
+        if (otherProfile?.family !== "strings" || otherProfile.role === "harp") return false;
+        if (other.normalizedDynamic > 0.4) return false;
+        return other.startTime < event.startTime + event.duration && event.startTime < other.startTime + other.duration;
+      });
+      if (overSoftPad) cc11Value = clamp(Math.round(cc11Value * 0.88), ctx.config.cc11Floor, 127);
+    }
     const cc74Value = clamp(64 + (CC74_OFFSETS[technique] ?? 0) + register.brightnessModifier + Math.round(cc11Value * 0.4) + (event.cc74Offset ?? 0), 0, 127);
+    // Module 11 (Task 11.5a) — oboe low-register lift: velocity ≤ p (≤ 0.4
+    // normalized) in 58–65 sits thin on real libraries; +10 % velocity (clamp
+    // at the bake). The spec's mid-track CC7 −10 % is DEFERRED — CC7 is our
+    // static per-track balance; CC automation is native-engine territory.
+    const oboeLowLift = (profile?.role === "oboes" || profile?.id === "oboe") &&
+      event.pitchConcert >= 58 && event.pitchConcert <= 65 && event.normalizedDynamic <= 0.4
+      ? Math.round((20 + event.normalizedDynamic * 107) * 0.10)
+      : 0;
     event.dynamics = {
       cc11Value,
       cc74Value,
       attenuationActive: (event.accompanimentAttenuationActive ?? false) || register.requiresAccompanimentAttenuation || muteScale < 1,
-      velocityModifier: register.velocityModifier,
+      velocityModifier: register.velocityModifier + oboeLowLift,
     };
   }
   return events;

@@ -24,7 +24,10 @@ export interface DoublingRule {
   intervalSemitones: number;      // 0 unison, +12 above, -12 below
   minDynamicLevel: number;        // only trigger at/above this normalizedDynamic
   maxDynamicLevel: number;
-  condition: "LOW_REGISTER_PROTECTION" | "TUTTI_PEAK" | "ALWAYS";
+  condition: "LOW_REGISTER_PROTECTION" | "TUTTI_PEAK" | "ALWAYS" | "THROAT_TONE";
+  /** Module 11 — blend factor for the guest's velocity (e.g. oboe guest at ×0.92).
+   * Data-driven; ledger semantics unchanged. Consumed at the bake. */
+  guestVelocityFactor?: number;
 }
 
 export interface AntiFlangingConfig {
@@ -54,7 +57,8 @@ export const DEFAULT_ANTI_FLANGING: AntiFlangingConfig = {
 
 export const DEFAULT_DOUBLING_RULES: DoublingRule[] = [
   // Unison hybrid timbres (matrix §2) — all roles exist in current profiles
-  { primaryRole: "flutes", doublingRole: "oboes", intervalSemitones: 0, minDynamicLevel: 0.6, maxDynamicLevel: 1, condition: "ALWAYS" },
+  { primaryRole: "flutes", doublingRole: "oboes", intervalSemitones: 0, minDynamicLevel: 0.6, maxDynamicLevel: 1, condition: "ALWAYS", guestVelocityFactor: 0.92 }, // Module 11 — oboe sits under the flute blend
+  { primaryRole: "clarinets", doublingRole: "oboes", intervalSemitones: 0, minDynamicLevel: 0, maxDynamicLevel: 1, condition: "THROAT_TONE", guestVelocityFactor: 0.92 }, // Module 11 — clarinet LEAD throat tones gain an oboe shadow (ledger-gated)
   { primaryRole: "flutes", doublingRole: "clarinets", intervalSemitones: 0, minDynamicLevel: 0.6, maxDynamicLevel: 1, condition: "ALWAYS" },
   { primaryRole: "oboes", doublingRole: "clarinets", intervalSemitones: 0, minDynamicLevel: 0.6, maxDynamicLevel: 1, condition: "ALWAYS" },
   { primaryRole: "bassoons", doublingRole: "cellos", intervalSemitones: 0, minDynamicLevel: 0.5, maxDynamicLevel: 1, condition: "ALWAYS" },
@@ -125,6 +129,12 @@ function conditionMet(rule: DoublingRule, event: AbstractNoteEvent, profile: Ins
     if (BASS_ACTING_ROLES.has(profile?.role ?? "")) return event.pitchConcert < 36;
     return false;
   }
+  if (rule.condition === "THROAT_TONE") {
+    // Module 11 — clarinet throat tones (66–70): the spec's own alternative —
+    // an oboe unison double for the note instead of moving pitches
+    // (pitch-class/timing invariance preserved). Only for LEAD carriers.
+    return event.role === "LEAD" && event.pitchConcert >= 66 && event.pitchConcert <= 70;
+  }
   if (rule.condition === "TUTTI_PEAK") return event.normalizedDynamic >= (ctx?.tuttiPeakFloor ?? 0.8) && event.normalizedDynamic >= rule.minDynamicLevel && event.normalizedDynamic <= rule.maxDynamicLevel;
   return event.normalizedDynamic >= rule.minDynamicLevel && event.normalizedDynamic <= rule.maxDynamicLevel;
 }
@@ -161,7 +171,7 @@ export class OccupancyLedger {
 
 /** Rule priority when multiple rules target the same note: LOW_REGISTER_PROTECTION
  * > TUTTI_PEAK > ALWAYS; the first winner takes the slot (hotfix Phase 1). */
-const CONDITION_RANK: Record<DoublingRule["condition"], number> = { LOW_REGISTER_PROTECTION: 0, TUTTI_PEAK: 1, ALWAYS: 2 };
+const CONDITION_RANK: Record<DoublingRule["condition"], number> = { LOW_REGISTER_PROTECTION: 0, THROAT_TONE: 1, TUTTI_PEAK: 1, ALWAYS: 2 };
 
 /** Apply the doubling matrix; events arrive sorted, iteration order is the RNG order.
  * Generic so upstream metadata (articulation/bends) survives the stage untouched.
@@ -236,6 +246,7 @@ export function applyDoublings<T extends AbstractNoteEvent>(events: T[], ctx: Do
         pitchWritten,
         startTime: primary.startTime + delayOffsetTicks,
         isDoubling: true,
+        ...(rule.guestVelocityFactor !== undefined ? { guestVelocityFactor: rule.guestVelocityFactor } : {}),
         // the double follows the line: same role, same articulation, flagged for bake/export
       });
       doubles.add(out.length - 1);

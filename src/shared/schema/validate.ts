@@ -118,6 +118,7 @@ function validateTrack(track: Track, index: number, errors: string[]): void {
     }
     if (note.isKeySwitch !== undefined && typeof note.isKeySwitch !== "boolean") errors.push(`${np}.isKeySwitch must be a boolean`);
     if (note.isDoubling !== undefined && typeof note.isDoubling !== "boolean") errors.push(`${np}.isDoubling must be a boolean`);
+    if (note.auxInstrumentId !== undefined && (typeof note.auxInstrumentId !== "string" || note.auxInstrumentId.length === 0 || note.auxInstrumentId.length > 32)) errors.push(`${np}.auxInstrumentId must be a string of at most 32 characters`);
     if (note.cc74Offset !== undefined && (typeof note.cc74Offset !== "number" || !Number.isFinite(note.cc74Offset))) errors.push(`${np}.cc74Offset must be a finite number`);
     if (note.dynamics !== undefined) {
       if (!note.dynamics || typeof note.dynamics !== "object"
@@ -185,6 +186,7 @@ export function validateProject(input: unknown): ValidationResult {
         if (!["Standard", "Cinematic Double Brass"].includes(settings.orchestration.brassSize)) errors.push("generationSettings.orchestration.brassSize is invalid");
         if (!["Full Symphonic (16/14/12/10/8)", "Medium Studio", "Chamber"].includes(settings.orchestration.stringsSize)) errors.push("generationSettings.orchestration.stringsSize is invalid");
         if (!["OVERTONE_SPREAD", "DROP_2", "SEMI_OPEN", "CLOSED", "OPEN_SPREAD", "CLUSTER"].includes(settings.orchestration.voicingStyle)) errors.push("generationSettings.orchestration.voicingStyle is invalid");
+        if (settings.orchestration.woodwindEnsemble !== undefined && !["THREES_LARGE", "PAIRS_CHAMBER"].includes(settings.orchestration.woodwindEnsemble)) errors.push("woodwind ensemble config: generationSettings.orchestration.woodwindEnsemble is invalid");
       if (settings.themes !== undefined) {
         if (!settings.themes || typeof settings.themes !== "object") errors.push("generationSettings.themes must be an object");
         else for (const flag of ["germ", "nct", "counterline"] as const) {
