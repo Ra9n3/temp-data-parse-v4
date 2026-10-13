@@ -137,16 +137,18 @@ export function applyMonophonyGuard<N extends { startTick: number; durationTicks
   return { notes: kept, dropped, truncated };
 }
 
-/** Track-level entry: resolve by the track's family via the fixture role key.
- * Returns the resolved note list alongside the resolution stats so the caller
- * can adopt the guarded notes in one call. */
+/** Track-level entry: capability resolves from the RECEIVING TRACK's family
+ * (Module 8.6 B1 fix — the rotation engine remaps event-level instrumentIds, so
+ * capability must never depend on a string-keyed role→family map). The legacy
+ * role-key lookup stays as a fallback so existing callers keep working. */
 export function guardTrackNotes<N extends { startTick: number; durationTicks: number }>(
   trackId: string,
   role: string,
   notes: N[],
   noteRoles?: string[],
+  trackFamily?: string,
 ): GuardResolution & { notes: N[] } {
-  const family = familyOfRole(role);
+  const family = trackFamily ?? familyOfRole(role);
   const max = maxSimultaneousFor(family);
   const result = applyMonophonyGuard(notes, max, noteRoles);
   if (result.dropped || result.truncated) {

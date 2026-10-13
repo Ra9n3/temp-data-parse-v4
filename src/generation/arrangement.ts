@@ -75,13 +75,14 @@ export type ArrangementSectionType = "Intro" | "Verse" | "PreChorus" | "Chorus" 
 /** Reuse the EXISTING config.ts normalization (no second mapper). */
 export function sectionTypeFor(name: string): ArrangementSectionType {
   const normalized = normalizeSectionName(name);
-  if (normalized.includes("pre-chorus") || normalized.includes("prechorus")) return "PreChorus";
-  if (normalized.includes("chorus") || normalized.includes("climax")) return "Chorus";
+  if (normalized.includes("pre-chorus") || normalized.includes("prechorus") || normalized.includes("pre chorus")) return "PreChorus";
+  if (normalized.includes("chorus") || normalized.includes("climax") || normalized.includes("hook")) return "Chorus"; // Module 8.6 B3
   if (normalized.includes("intro")) return "Intro";
   if (normalized.includes("build") || normalized.includes("rise")) return "Build";
-  if (normalized.includes("break")) return "Breakdown";
-  if (normalized.includes("outro") || normalized.includes("coda")) return "Outro";
-  return "Verse";
+  if (normalized.includes("break") || normalized.includes("drop")) return "Breakdown"; // Module 8.6 B3: "drop" is EDM breakdown
+  if (normalized.includes("outro") || normalized.includes("coda") || normalized.includes("fade")) return "Outro"; // Module 8.6 B3
+  if (normalized.includes("verse")) return "Verse";
+  return "Verse"; // unknown-name fallback stays Verse (docs/ASSUMPTIONS)
 }
 
 interface ChordInfo { rootPc: number; colorTones: number; hasSeventh: boolean }

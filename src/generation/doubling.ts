@@ -72,6 +72,12 @@ export const DEFAULT_DOUBLING_RULES: DoublingRule[] = [
   // wiring strips this rule when rotation is disabled for byte-identity). The
   // occupancy ledger + sparse gates govern insertion as for every other rule.
   { primaryRole: "violins1", doublingRole: "trumpets", intervalSemitones: 12, minDynamicLevel: 0.85, maxDynamicLevel: 1, condition: "TUTTI_PEAK" },
+  // Module 8.6 B5 — chorus weight: the violins1 tutti peak picks up a violins2
+  // unison to thicken the section. Ledger-gated like every double: it lands ONLY
+  // where violins2 is actually resting, and the wiring strips this rule when the
+  // rotation engine is disabled so the engines-off + rotor-off golden digests stay
+  // byte-identical (same pattern as the violins1→trumpets 8.5 rule above).
+  { primaryRole: "violins1", doublingRole: "violins2", intervalSemitones: 0, minDynamicLevel: 0.85, maxDynamicLevel: 1, condition: "TUTTI_PEAK" },
 ];
 
 export const DEFAULT_DOUBLING_CONFIG: DoublingConfig = {
@@ -96,6 +102,12 @@ export interface DoublingContext {
   profiles: InstrumentProfile[];
   rng: () => number;
   config: DoublingConfig;
+  /** Module 8.6 B5: when set (rotation-enabled runs only), the TUTTI_PEAK global
+   * dynamic floor drops from 0.8 so the tutti picks fire more often — the raised
+   * gate rate. ALWAYS keeps its seeded 35% sparse gate untouched. Undefined
+   * (rotation disabled) = the pre-8.6 floor of 0.8, byte-identical for the golden
+   * digests: no extra draws, purely a threshold change gated in the wiring. */
+  tuttiPeakFloor?: number;
 }
 
 function profileForEvent(event: AbstractNoteEvent, profiles: InstrumentProfile[]): InstrumentProfile | undefined {
@@ -105,7 +117,7 @@ function profileForEvent(event: AbstractNoteEvent, profiles: InstrumentProfile[]
 const BASS_ACTING_ROLES = new Set(["cellos", "bassoons"]);
 
 /** whether the rule's condition holds for this event. */
-function conditionMet(rule: DoublingRule, event: AbstractNoteEvent, profile: InstrumentProfile | undefined): boolean {
+function conditionMet(rule: DoublingRule, event: AbstractNoteEvent, profile: InstrumentProfile | undefined, ctx?: DoublingContext): boolean {
   if (rule.condition === "LOW_REGISTER_PROTECTION") {
     // Mandatory register protection: flutes below G4 (concert 67),
     // and bass-acting cellos/bassoons below C2 (concert 36). Dynamic ignored.
@@ -113,7 +125,7 @@ function conditionMet(rule: DoublingRule, event: AbstractNoteEvent, profile: Ins
     if (BASS_ACTING_ROLES.has(profile?.role ?? "")) return event.pitchConcert < 36;
     return false;
   }
-  if (rule.condition === "TUTTI_PEAK") return event.normalizedDynamic >= 0.8 && event.normalizedDynamic >= rule.minDynamicLevel && event.normalizedDynamic <= rule.maxDynamicLevel;
+  if (rule.condition === "TUTTI_PEAK") return event.normalizedDynamic >= (ctx?.tuttiPeakFloor ?? 0.8) && event.normalizedDynamic >= rule.minDynamicLevel && event.normalizedDynamic <= rule.maxDynamicLevel;
   return event.normalizedDynamic >= rule.minDynamicLevel && event.normalizedDynamic <= rule.maxDynamicLevel;
 }
 
@@ -170,7 +182,7 @@ export function applyDoublings<T extends AbstractNoteEvent>(events: T[], ctx: Do
     const primary = out[index]!;
     const primaryProfile = profileForEvent(primary, profiles);
     if (!primaryProfile) continue;
-    const applicable = rules.filter((rule) => rule.primaryRole === primaryProfile.role && conditionMet(rule, primary, primaryProfile));
+    const applicable = rules.filter((rule) => rule.primaryRole === primaryProfile.role && conditionMet(rule, primary, primaryProfile, ctx));
     // Hotfix Phase 1: LOW_REGISTER_PROTECTION > TUTTI_PEAK > ALWAYS — first winner
     // takes the slot; ties break back to the interval-width order.
     const prioritized = [...applicable].sort((a, b) => CONDITION_RANK[a.condition] - CONDITION_RANK[b.condition]

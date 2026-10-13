@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import type { Note, Project, Track } from "../shared/schema/types";
 import { projectEndTick, secondsToTicks, ticksPerBar, ticksPerBeat, ticksToSeconds } from "../shared/schema/time";
+import { acousticWeightForTrack } from "../generation/balance";
 
 export interface PlaybackState {
   playheadTick: number;
@@ -113,7 +114,15 @@ export function usePlayback(
           osc.detune.value = n.detuneCents ?? 0; // intonation + anti-flanging detune audible in preview
           filter.type = "lowpass";
           filter.frequency.value = t.family === "strings" ? 2200 : t.family === "brass" ? 2800 : 4200;
-          const peak = 0.035 * (n.velocity / 127) * (t.family === "percussion" ? 1.6 : 1);
+          // Module 8.6 B4 — preview CC honesty: MIDI export sends CC7 as a static
+          // per-track acoustic-carrying fader and CC11 as per-note expression;
+          // the oscillator preview applies the same two factors as plain gains so
+          // the chorus audibly opens up in-app (louder track weight × louder
+          // balance-stage CC11). Manually authored notes without balance metadata
+          // fall back to neutral unity. Export is untouched.
+          const cc7Gain = acousticWeightForTrack(t);
+          const cc11Gain = n.dynamics ? (n.dynamics.cc11Value / 127) : 1;
+          const peak = 0.035 * (n.velocity / 127) * cc7Gain * cc11Gain * (t.family === "percussion" ? 1.6 : 1);
           const atk = t.family === "strings" ? 0.04 : t.family === "percussion" ? 0.005 : 0.015;
           const when = Math.max(ctx.currentTime, startSec);
           gain.gain.setValueAtTime(0, when);

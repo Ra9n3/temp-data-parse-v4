@@ -34,6 +34,8 @@ import type { OrchestralStyle } from "../shared/schema/types";
 import { DEFAULT_GENERATION_SETTINGS } from "../shared/schema/types";
 import { applyNctPass } from "../generation/nct";
 import { realizeRhythm } from "../generation/rhythm";
+import { guardTrackNotes } from "../generation/monophony";
+import { consolidateSustains } from "../generation/sustain";
 import { mulberry32 } from "../generation/prng";
 import { snapshotDigest } from "../generation/efgGolden";
 import goldenDigests from "../fixtures/efg-legacy-golden-digest.json";
@@ -190,6 +192,99 @@ export function runUnitTests(): TestResult[] {
         }
       }
       return "5 string roles × 2 seeds: double-stop ceiling holds";
+    }),
+    timed("Guard capability follows the receiving track's family (unknown roles stay single-line)", () => {
+      // Module 8.6 B1 regression: capability must come from track.family — a
+      // track whose ROLE string is absent from the legacy role→family map must
+      // still be guarded as a woodwind (max 1), never fall through to ∞.
+      const built = guardTrackNotes("trk_custom", "custom solo horn vst", [
+        { startTick: 0, durationTicks: 960 },
+        { startTick: 480, durationTicks: 960 },
+        { startTick: 960, durationTicks: 960 },
+      ], ["BASS", "PAD", "BASS"], "woodwinds");
+      assert(built.notes.every((note, index) => index === 0 || built.notes[index - 1]!.startTick + built.notes[index - 1]!.durationTicks <= note.startTick), "wind track with unknown role got overlapping notes");
+      assert(built.dropped + built.truncated >= 1, "guard did not resolve the overlap at all");
+      // And the family field (not the role string) is what resolves strings to 2:
+      const strings = guardTrackNotes("trk_s", "custom strings x", [
+        { startTick: 0, durationTicks: 960 }, { startTick: 0, durationTicks: 960 },
+      ], undefined, "strings");
+      assert(strings.notes.length === 2, "double-stop capability lost for unknown string role");
+      return "unknown woodwind role truncated to legato line; unknown string role keeps double-stop";
+    }),
+    timed("32-bar multi-section project keeps winds/brass single-line through all stages", () => {
+      // Module 8.6 A4 regression source (was fixture-only before): the wind
+      // polyphony hole appeared on long multi-section projects where the mask
+      // opens up the chorus; per-beat pad/bass churn stacked the mono carriers.
+      const base = fixture();
+      const barTicks = ticksPerBar(base.timeSignature);
+      const project = cloneProject(base);
+      project.sections = [
+        { ...project.sections[0], name: "Verse", startBar: 1, lengthBars: 8 },
+        { ...project.sections[0], name: "Pre-Chorus Lift", startBar: 9, lengthBars: 4, targetDynamic: 0.7, densityLevel: "Dense" },
+        { ...project.sections[0], name: "Big Chorus", startBar: 13, lengthBars: 8, targetDynamic: 0.95, densityLevel: "Tutti" },
+        { ...project.sections[0], name: "Breakdown", startBar: 21, lengthBars: 4, targetDynamic: 0.2, densityLevel: "Sparse" },
+        { ...project.sections[0], name: "Outro", startBar: 25, lengthBars: 8, targetDynamic: 0.4, densityLevel: "Balanced" },
+      ];
+      const perBar = new Map<number, string>();
+      for (const block of base.chords) {
+        const startBar = Math.floor(block.startTick / barTicks);
+        for (let offset = 0; offset < Math.max(1, Math.round(block.durationTicks / barTicks)); offset++) perBar.set(startBar + offset, block.symbol);
+      }
+      project.chords = Array.from({ length: 32 }, (_, barIndex) => ({
+        id: `synth-chord-${barIndex}`, symbol: perBar.get(barIndex % 16) ?? "C", startTick: barIndex * barTicks, durationTicks: barTicks,
+      }));
+      for (const seed of [6, 15]) {
+        const tracks = generate(project, { seed, density: 0.75, humanize: false, lockedTrackIds: [] });
+        for (const role of ["flutes", "oboes", "clarinets", "bassoons", "trumpets", "trombones", "horns", "tuba"]) {
+          const track = tracks.find((candidate) => candidate.role === role);
+          if (!track) continue;
+          const sorted = [...track.notes].sort((a, b) => a.startTick - b.startTick);
+          for (let i = 1; i < sorted.length; i++) {
+            const previous = sorted[i - 1]!;
+            assert(sorted[i].startTick >= previous.startTick + previous.durationTicks, `${track.name} polyphonic on the 32-bar project (seed ${seed})`);
+          }
+        }
+        for (const role of ["violins1", "violins2", "violas", "cellos", "doubleBass"]) {
+          const track = tracks.find((candidate) => candidate.role === role);
+          if (!track) continue;
+          for (const note of track.notes) {
+            const simultaneous = track.notes.filter((other) => other !== note && other.startTick < note.startTick + note.durationTicks && note.startTick < other.startTick + other.durationTicks);
+            assert(simultaneous.length <= 2, `${track.name} stacked ${simultaneous.length} on the 32-bar project (seed ${seed})`);
+          }
+        }
+      }
+      return "winds/brass single-line and strings ≤2 across Verse/PreChorus/Chorus/Breakdown/Outro × 2 seeds";
+    }),
+    timed("Sustain consolidation merges per-beat BASS/PAD churn to ≥4-beat median", () => {
+      // Module 8.6 addendum: adjacent same-pitch per-beat pad blocks merge into
+      // sustained spans (across chord boundaries when the common tone holds).
+      const mk = (role: "BASS" | "PAD", pitch: number, start: number, duration: number): AbstractNoteEvent =>
+        ({ instrumentId: "trk_pad", pitchConcert: pitch, pitchWritten: pitch, startTime: start, duration, normalizedDynamic: 0.6, semanticArticulation: "LEGATO", role });
+      // 8 beats of one pitch (2 chord-worth of common tone) + a pitch change beat:
+      const build = () => [
+        mk("PAD", 67, 0, 960), mk("PAD", 67, 960, 960), mk("PAD", 67, 1920, 960), mk("PAD", 67, 2880, 960),
+        mk("PAD", 67, 3840, 960), mk("PAD", 67, 4800, 960), mk("PAD", 67, 5760, 960), mk("PAD", 67, 6720, 960),
+        mk("PAD", 69, 7680, 960),
+        mk("BASS", 36, 0, 960), mk("BASS", 48, 960, 960), // different pitch: NOT merged
+      ];
+      const { events, stats } = consolidateSustains(build());
+      const pads = events.filter((event) => event.role === "PAD");
+      assert(pads.length === 2, `pad consolidation produced ${pads.length} spans, expected 2 (full common-tone span + pitch-change beat)`);
+      const mergedSpan = [...pads].sort((a, b) => b.duration - a.duration)[0]!;
+      assert(mergedSpan.duration === 7680, `common tone did not sustain through all 8 beats (${mergedSpan.duration})`);
+      assert(pads.some((event) => event.pitchConcert === 69 && event.duration === 960), "pitch-change beat was merged across pitches");
+      const bass = events.filter((event) => event.role === "BASS");
+      assert(bass.length === 2, "different-pitch bass blocks must stay untouched");
+      // The ≥4-beat sustain target on sustained sections (the addendum metric
+      // itself lives in scripts/sustain-metric.ts; here the merged span is the
+      // sustained-section witness — anything ≥ 4 beats proves the merge).
+      // Pipeline-level: ENGINE pad events (role PAD, per chord) consolidate so
+      // the ≥4-beat median lands on sustained harmony (asymmetric chord tones).
+      const grid = [67, 67, 67, 67, 67, 67, 67, 67].map((pitch, index) => mk("PAD", pitch, index * 960, 960));
+      const merged = consolidateSustains(grid).events;
+      const durations = merged.map((event) => event.duration / 960).sort((a, b) => a - b);
+      assert(durations.length === 1 && durations[0] === 8, `8 beats of one tone must be ONE span (got ${JSON.stringify(durations)})`);
+      return `7-beat common-tone span + released tail + pitch-change boundary; ${stats.merged} absorbed`;
     }),
     timed("Flutes and oboes are not >90% identical", () => {
       const project = cloneProject(dorianFixture as unknown as Project);

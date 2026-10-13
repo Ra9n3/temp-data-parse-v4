@@ -39,6 +39,7 @@ import { applyAccompanimentAttenuation, applyAntiphonalWindowing, calculateNoteD
 import { applyArrangementGestures, applyBreakdownDrop, arrangementContext, DEFAULT_ARRANGEMENT_CONFIG, expandSectionsForStaggering, truncateNotesAtBreakdownBoundaries } from "./arrangement";
 import { guardTrackNotes } from "./monophony";
 import { applyActiveMask, applyRoleRotation, divideChorusRoles, exposedBreakdownRoles, planRotation, resolveRotationConfig, type RotationPlan } from "./rotation";
+import { consolidateSustains } from "./sustain";
 
 export interface ProjectConfig {
   keyRoot: number;
@@ -662,7 +663,10 @@ export class InstrumentRangeFilter {
         if (stringPads.length) {
           const roundRobin = stringPads[padCursor % stringPads.length]!;
           // String pads accept at most 2 tones each (double-stop); overflow → keyboards.
-          const assigned = events.filter((event) => event.role === "PAD" && event.instrumentId === roundRobin.id
+          // Module 8.6 B2: the receiver's OTHER roles are part of its existing line —
+          // same ledger rule as doubling: a carrier playing its own line in the window
+          // never receives a completion tone on top (count any role). Overflow → keys → drop.
+          const assigned = events.filter((event) => event.instrumentId === roundRobin.id
             && event.startTime < harmony.startTime + harmony.duration && harmony.startTime < event.startTime + event.duration).length;
           chosen = assigned < 2 ? roundRobin : keyboardPads[0];
           padCursor++;
@@ -950,6 +954,12 @@ export function applyEfgEngines(
   if (ctx.rotation) {
     current = applyRoleRotation(current, ctx.rotation.plan, ctx.profiles);
     current = applyActiveMask(current, ctx.rotation.plan, ctx.rotation.measures, ctx.rotation.config, ctx.profiles, ctx.rotation.exposedRoles);
+    // Module 8.6 addendum — sustain consolidation: adjacent same-pitch BASS/PAD
+    // per-beat blocks merge into sustained spans on the FINAL carriers, so
+    // realizeRhythm's ≥2-beat rearticulation branch finally fires. Deterministic
+    // (no RNG); gated by the same rotation switch as the whole arrangement path
+    // so the engines-off + rotation-off golden digests stay byte-identical.
+    current = consolidateSustains(current).events;
   }
 
   return { events: current, applied: { ...switches, leadReplaced: switches.germ } };
@@ -1106,10 +1116,14 @@ export function generate(project: Project, options: GenerateOptions): Track[] {
   // Module 8.5 §4 — chorus lead brass color ships as ONE data rule in
   // DEFAULT_DOUBLING_RULES; with the rotation engine disabled it is stripped
   // again so the disabled path stays byte-identical to the pre-8.5 build.
+  // Module 8.6 B5 — the violins1→violins2 unison tutti rule is rotation-gated
+  // the same way, and the raised TUTTI_PEAK floor (0.8 → 0.75) rides the same
+  // gate: the pre-8.6 doubling behavior is untouched when rotation is off.
   if (rotationPlan === undefined) {
     doublingCfg.rules = (doublingCfg.rules ?? DEFAULT_DOUBLING_RULES).filter((rule) =>
-      !(rule.primaryRole === "violins1" && rule.doublingRole === "trumpets" && rule.intervalSemitones === 12 && rule.condition === "TUTTI_PEAK"));
+      !(rule.primaryRole === "violins1" && ((rule.doublingRole === "trumpets" && rule.intervalSemitones === 12) || (rule.doublingRole === "violins2" && rule.intervalSemitones === 0)) && rule.condition === "TUTTI_PEAK"));
   }
+  const tuttiPeakFloor = rotationPlan ? 0.75 : undefined;
   const doublingTargets = buildPipelineProfiles().filter((profile) => ["piccolo", "doubleBass", "bassTrombone"].includes(profile.role ?? ""));
   const balanceProfiles = [...compositionProfiles, ...doublingTargets];
   // Deterministic Stage 10 windowing precedes doubling so every generated double follows the shifted melody.
@@ -1117,8 +1131,8 @@ export function generate(project: Project, options: GenerateOptions): Track[] {
   const windowed = applyAntiphonalWindowing(evaluated, { profiles: balanceProfiles, config: balanceConfig, bpm: project.bpm });
   const doubled = doublingCfg.enabled
     ? applyAntiFlanging(
-      applyDoublings(windowed, { profiles: balanceProfiles, rng: mulberry32(options.seed + 0xd0b1), config: doublingCfg }),
-      { profiles: balanceProfiles, rng: mulberry32(options.seed + 0xd0b1 + 1), config: doublingCfg, bpm: project.bpm },
+      applyDoublings(windowed, { profiles: balanceProfiles, rng: mulberry32(options.seed + 0xd0b1), config: doublingCfg, tuttiPeakFloor }),
+      { profiles: balanceProfiles, rng: mulberry32(options.seed + 0xd0b1 + 1), config: doublingCfg, bpm: project.bpm, tuttiPeakFloor },
     )
     : windowed;
   // Module 8 POST-score: breakdown drop runs AFTER doubling/anti-flanging and
@@ -1204,11 +1218,14 @@ export function generate(project: Project, options: GenerateOptions): Track[] {
   // Polyphony hotfix Phase 4 — MonophonyGuard is the FINAL invariant: it runs LAST
   // (after humanization, breakdown truncation and any Module 8 gestures) so that
   // timing shifts from those stages can never re-stack a monophonic track.
+  // Module 8.6 B1: capability resolves from the receiving TRACK's family field —
+  // rotation remaps event-level instrumentIds, so the guard must never depend on
+  // a string-keyed role→family map (unknown roles used to fall through to ∞).
   // Deterministic: truncation to a legato handoff, drops only for tied onsets;
   // pitch is never modified. Expected resolutions after Phases 1–3: zero.
   return divided.map((track) => {
     if (track.family === "structure" || track.family === "audio") return track;
-    const guarded = guardTrackNotes(track.id, track.role, track.notes);
+    const guarded = guardTrackNotes(track.id, track.role, track.notes, undefined, track.family);
     return { ...track, notes: guarded.notes };
   });
 }
