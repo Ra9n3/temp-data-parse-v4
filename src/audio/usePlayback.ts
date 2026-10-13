@@ -23,7 +23,23 @@ interface MasterBus {
   input: GainNode;
   compressor: DynamicsCompressorNode;
   makeup: GainNode;
+  master: GainNode;
 }
+
+/** Module 8.10 M2 — absolute master level. Constant SOLVED by
+ * scripts/level-solve.ts (M1 before-table: user tutti peaks −19.3…−21.1 dBFS,
+ * RMS ≈ −36; the relative-only v2 chain ratcheted absolute level down). Target
+ * set: full-mix tutti peaks ≈ −6 dBFS (PRIORITY on conflict) and solo mf
+ * viola/horn ≈ −24 dBFS — the solo targets conflict (viola +19.8 dB, horn
+ * +10.9 dB needed vs tutti's +13.9), so the tutti peak wins: MEAN user tutti
+ * peak −19.94 → +13.94 dB ⇒ MASTER_GAIN = 10^(13.94/20) = 4.99. Predicted
+ * after: user tutti −5.4/−5.5/−7.1 dBFS; fixture −4.0 (≈ 4 dB headroom, no
+ * clipping); solo viola ≈ −29.9 dBFS (≈ 6 dB above the −24 target — documented
+ * conflict; re-judge the RELATIVE side via a viola trim if the ear disagrees).
+ * Applied POST-compressor so it cannot re-trigger pumping; deterministic, no
+ * runtime adaptation. M3 guard: +13.9 dB > +3 dB → the level was genuinely low.
+ */
+export const MASTER_GAIN = 4.99;
 
 /** Module 8.8 B1 / Module 8.9 v2 — per-ROLE preview gain trims.
  *
@@ -61,10 +77,13 @@ function createMasterBus(ctx: AudioContext): MasterBus {
   compressor.ratio.value = 3;
   const makeup = ctx.createGain();
   makeup.gain.value = Math.pow(10, 4 / 20); // ~+4 dB makeup
+  const master = ctx.createGain();
+  master.gain.value = MASTER_GAIN; // Module 8.10 M2 — absolute master level (post-compressor)
   input.connect(compressor);
   compressor.connect(makeup);
-  makeup.connect(ctx.destination);
-  return { input, compressor, makeup };
+  makeup.connect(master);
+  master.connect(ctx.destination);
+  return { input, compressor, makeup, master };
 }
 
 function familyWave(family: string): OscillatorType {
