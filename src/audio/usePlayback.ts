@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import type { Note, Project, Track } from "../shared/schema/types";
-import { projectEndTick, secondsToTicks, ticksPerBar, ticksPerBeat, ticksToSeconds } from "../shared/schema/time";
+import { projectEndTick, secondsToTicks, secondsToTicksAlongMap, ticksPerBar, ticksPerBeat, ticksToSeconds, ticksToSecondsAlongMap } from "../shared/schema/time";
+import { buildConductorTempoEvents } from "../generation/humanizeV2";
 import { acousticWeightForTrack } from "../generation/balance";
 import { readMixOverrides } from "../state/persistence";
 
@@ -118,6 +119,17 @@ export function usePlayback(
   const sourceRef = useRef<AudioBufferSourceNode | null>(null);
   const projectRef = useRef(project);
   const bufferRef = useRef(audioBuffer);
+  // Module 10 conductor map: tempo-map-aware tick conversion is used ONLY when
+  // the computed map has >1 event; otherwise the exact existing constant-BPM
+  // path runs (numerically identical by construction). The map is computed,
+  // never persisted.
+  const conductorRef = useRef<{ tick: number; bpm: number }[]>([]);
+  const singleTempoRef = useRef(true);
+  useEffect(() => {
+    const events = buildConductorTempoEvents(project);
+    conductorRef.current = events;
+    singleTempoRef.current = events.length <= 1;
+  }, [project]);
   const lastMetroRef = useRef(-1);
   const masterRef = useRef<MasterBus | null>(null);
 
@@ -185,7 +197,9 @@ export function usePlayback(
           const key = `${t.id}:${n.startTick}:${n.pitch}:${n.durationTicks}`;
           if (scheduledRef.current.has(key)) continue;
           scheduledRef.current.add(key);
-          const startSec = origin.ctxTime + ticksToSeconds(n.startTick - origin.tick, bpm);
+          const startSec = singleTempoRef.current
+            ? origin.ctxTime + ticksToSeconds(n.startTick - origin.tick, bpm) // exact pre-M10 path
+            : origin.ctxTime + ticksToSecondsAlongMap(origin.tick, n.startTick, conductorRef.current, bpm);
           const durSec = Math.max(0.03, ticksToSeconds(n.durationTicks, bpm));
           if (startSec + durSec < ctx.currentTime - 0.02) continue;
           const osc = ctx.createOscillator();
@@ -258,7 +272,9 @@ export function usePlayback(
     const p = projectRef.current;
     if (!ctx || !playingRef.current) return;
     const elapsed = ctx.currentTime - originRef.current.ctxTime;
-    let current = originRef.current.tick + secondsToTicks(elapsed, p.bpm);
+    let current = singleTempoRef.current
+      ? originRef.current.tick + secondsToTicks(elapsed, p.bpm) // exact pre-M10 path
+      : secondsToTicksAlongMap(originRef.current.tick, elapsed, conductorRef.current, p.bpm);
     const end = projectEndTick(p);
     const loopEnd = end;
     const loopStart = 0;

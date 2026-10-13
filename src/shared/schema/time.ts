@@ -42,6 +42,69 @@ export function msToTicks(ms: number, bpm: number): number {
   return (ms / 60000) * bpm * PPQ;
 }
 
+/** Module 10 conductor-map tempo helpers (pure; constant map ⇒ numerically
+ * identical to the existing constant-BPM formulas). A point is { tick, bpm };
+ * bpm at t = last point with point.tick ≤ t, else fallbackBpm. */
+export interface TempoMapPoint {
+  tick: number;
+  bpm: number;
+}
+
+function sortedPoints(points: TempoMapPoint[]): TempoMapPoint[] {
+  return [...points].sort((a, b) => a.tick - b.tick);
+}
+
+export function tempoAtTick(points: TempoMapPoint[], tick: number, fallbackBpm: number): number {
+  let bpm = fallbackBpm;
+  for (const point of sortedPoints(points)) {
+    if (point.tick <= tick) bpm = point.bpm;
+    else break;
+  }
+  return bpm;
+}
+
+/** Piecewise seconds between two ticks along a tempo map (constant map ⇒ the
+ * exact existing ticksToSeconds difference — verified in m10-check). */
+export function ticksToSecondsAlongMap(fromTick: number, toTick: number, points: TempoMapPoint[], fallbackBpm: number): number {
+  if (fromTick === toTick) return 0;
+  const low = Math.min(fromTick, toTick);
+  const high = Math.max(fromTick, toTick);
+  const sorted = sortedPoints(points);
+  let seconds = 0;
+  let cursor = low;
+  let bpm = fallbackBpm;
+  for (const point of sorted) {
+    if (point.tick <= cursor) {
+      bpm = point.bpm; // in effect at or before the query point
+      continue;
+    }
+    if (point.tick >= high) break;
+    seconds += ((point.tick - cursor) / PPQ) * (60 / bpm);
+    cursor = point.tick;
+    bpm = point.bpm;
+  }
+  seconds += ((high - cursor) / PPQ) * (60 / bpm);
+  return fromTick <= toTick ? seconds : -seconds;
+}
+
+/** Inverse conversion: ticks advanced from startTick after `seconds` along the
+ * tempo map (constant map ⇒ secondsToTicks). Linear walk is fine — maps are tiny. */
+export function secondsToTicksAlongMap(startTick: number, seconds: number, points: TempoMapPoint[], fallbackBpm: number): number {
+  const sorted = sortedPoints(points);
+  let cursor = Math.max(0, startTick);
+  let bpm = tempoAtTick(sorted, cursor, fallbackBpm);
+  let remaining = seconds;
+  for (const point of sorted) {
+    if (point.tick <= cursor) continue;
+    const segSeconds = ((point.tick - cursor) / PPQ) * (60 / bpm);
+    if (remaining < segSeconds) break;
+    remaining -= segSeconds;
+    cursor = point.tick;
+    bpm = point.bpm;
+  }
+  return cursor + (remaining / 60) * bpm * PPQ;
+}
+
 export function projectEndTick(project: Project): number {
   const tpBar = ticksPerBar(project.timeSignature);
   let end = 0;

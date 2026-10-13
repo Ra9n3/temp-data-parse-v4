@@ -10,6 +10,7 @@ import { barToTick, msToTicks, projectEndTick } from "../shared/schema/time";
 import { CC74_OFFSETS } from "../generation/articulation";
 import { acousticWeightForTrack, cc7ForWeight } from "../generation/balance";
 import { builtInProfileById, vst3EventAdapter, type PhysicalMidiStreamEvent } from "../plugins/expressionMaps";
+import { buildConductorTempoEvents } from "../generation/humanizeV2";
 
 function isInstrument(track: Track): boolean {
   return track.family !== "structure" && track.family !== "audio";
@@ -151,6 +152,20 @@ function selectedTracks(project: Project, mode: ExportTrackMode, selectedIds: st
 
 export type ExportTrackMode = "all" | "selected" | "unlocked";
 
+/** Module 10 conductor map — when the computed tempo events are non-empty the
+ * header writes ALL of them (ramps at section boundaries, rubato-scaled);
+ * otherwise the pre-M10 single-tempo header is byte-identical. The map is a
+ * pure computed function — NOT persisted on the project (patch/persistence
+ * untouched). */
+function conductorTempos(project: Project): Array<{ ticks: number; bpm: number }> {
+  const events = buildConductorTempoEvents(project);
+  if (events.length === 0) return [{ ticks: 0, bpm: project.bpm }];
+  // Baseline at tick 0 is required — without it a DAW would fall back to its
+  // default 120 BPM for everything before the first boundary ramp. The carried
+  // level after the last ramp persists to the end (consistent with the map).
+  return [{ ticks: 0, bpm: project.bpm }, ...events.map((event) => ({ ticks: event.tick, bpm: event.bpm }))];
+}
+
 function applyHeader(midi: MidiInstance, project: Project, endTick: number): void {
   const ks = keySignatureFor(project);
   midi.header.fromJSON({
@@ -164,7 +179,7 @@ function applyHeader(midi: MidiInstance, project: Project, endTick: number): voi
       })),
       { type: "marker", text: "End", ticks: endTick },
     ],
-    tempos: [{ ticks: 0, bpm: project.bpm }],
+    tempos: conductorTempos(project),
     timeSignatures: [
       {
         ticks: 0,

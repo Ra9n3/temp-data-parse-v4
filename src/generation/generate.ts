@@ -22,6 +22,7 @@ import type { RegisterBand } from "./instrumentDB";
 import { applyThemeEngine, type ThemeContext, type ResolvedChordBlock } from "./theme";
 import { applyNctPass } from "./nct";
 import { applyCounterlineEngine } from "./counterline";
+import { INTONATION_JITTER_CENTS, latencyShiftMs, metricalVelocityMultiplier, roleTimingOffsetMs, staticDetuneForRole, velocityPitchDriftCents } from "./humanizeV2";
 import { applyAccompanimentAttenuation, applyAntiphonalWindowing, calculateNoteDynamics, resolveBalanceConfig } from "./balance";
 
 // Balance/windowing is deterministic and pure; it does not consume an RNG salt.
@@ -35,6 +36,11 @@ import { applyAccompanimentAttenuation, applyAntiphonalWindowing, calculateNoteD
 // NCT engine (passing/neighbor probability draws). Addendum G: 0x6066 counterline
 // + ostinato cell engine (window detection randomness, cell picks, approach-tone
 // eligibility). All three are consumed only in their own modules; never reuse.
+// Module 10 humanization V2: NO new salt — its only randomness (the ±2 cent
+// intonation jitter) extends the EXISTING per-note humanization stream
+// mulberry32(seed + midiChannel + note.startTick + note.pitch) consumed inside
+// transformGeneratedNotes' detune block; all other V2 terms are deterministic
+// pure functions from ./humanizeV2.
 // Module 8 arrangement/gestures: deterministic, no salt.
 import { applyArrangementGestures, applyBreakdownDrop, arrangementContext, DEFAULT_ARRANGEMENT_CONFIG, expandSectionsForStaggering, truncateNotesAtBreakdownBoundaries } from "./arrangement";
 import { guardTrackNotes, verifyMonophonyInvariant } from "./monophony";
@@ -783,19 +789,60 @@ function densityForSection(type: SectionType): StructureSection["densityLevel"] 
   return type === "Chorus" ? "Tutti" : type === "Build" || type === "PreChorus" ? "Dense" : type === "Intro" || type === "Breakdown" ? "Sparse" : "Balanced";
 }
 function transformGeneratedNotes(notes: Note[], track: Track, project: Project, options: GenerateOptions, humanization: HumanizationSettings): Note[] {
-  const intensity = clamp((options.humanizeIntensity ?? humanization.intensity) / 100, 0, 1);
+  const intensityPct = options.humanizeIntensity ?? humanization.intensity;
+  const intensity = clamp(intensityPct / 100, 0, 1);
   const applyHumanize = options.humanize && (intensity > 0 || (options.rubato ?? humanization.rubato) > 0);
   const transformed = applyHumanize ? humanizeNotes(notes, project.bpm, options.seed + track.midiChannel, intensity, options.rubato ?? humanization.rubato) : notes;
+  // Module 10 — V2 deterministic terms ride the SAME humanization pass (no
+  // second engine walk, same stream, no new salts; pure helpers in humanizeV2).
+  const tpBar = ticksPerBar(project.timeSignature);
   return transformed.map((note) => {
     let startTick = note.startTick;
+    if (applyHumanize) {
+      const offsetMs = roleTimingOffsetMs(track.role, note.technique, note.velocity, intensityPct);
+      const offsetTicks = msToTicks(offsetMs, project.bpm);
+      let shifted = startTick + offsetTicks;
+      // ASSUMPTIONS cap upheld: startTick stays ≥ 0 AND inside the original bar
+      // (the authored/generated home bar of the pre-humanized note — stable
+      // under the AMG jitter), so section players never cross a barline.
+      if (offsetTicks > 0) {
+        const barEnd = (Math.floor(startTick / tpBar) + 1) * tpBar;
+        if (shifted >= barEnd) shifted = barEnd - 1;
+      } else if (offsetTicks < 0) {
+        const barStart = Math.floor(startTick / tpBar) * tpBar;
+        if (shifted < barStart) shifted = barStart;
+      }
+      startTick = shifted;
+    }
     if (humanization.latencyCompensation && (options.latencyCompensation ?? true)) {
-      const ms = options.latencyCompensationMs?.[track.role] ?? options.latencyCompensationMs?.[track.family] ?? options.latencyCompensationMs?.custom ?? humanization.latencyCompensationMs?.[track.role] ?? humanization.latencyCompensationMs?.[track.family] ?? humanization.latencyCompensationMs?.custom ?? 0;
+      const explicit = options.latencyCompensationMs?.[track.role] ?? options.latencyCompensationMs?.[track.family] ?? options.latencyCompensationMs?.custom ?? humanization.latencyCompensationMs?.[track.role] ?? humanization.latencyCompensationMs?.[track.family] ?? humanization.latencyCompensationMs?.custom;
+      // Module 10: explicit entries ALWAYS win (pinned); the family matrix
+      // (strings −40 … keys −10) applies only when the role is absent, with the
+      // short-attack articulation refinement to 8 ms baked in per note.
+      const ms = explicit !== undefined ? explicit : latencyShiftMs(track.role, track.family, note.technique);
       startTick = Math.max(0, startTick - msToTicks(ms, project.bpm));
     }
-    const rng = mulberry32(options.seed + track.midiChannel + note.startTick + note.pitch);
+    // Module 10 metrical weighting: deterministic downbeat accents × intensity,
+    // applied multiplicatively at the bake; SKIPs role OSTINATO (cell engine
+    // 0x6066 owns those accents — no double-accent) via the note-level semantic
+    // role tag (stamped when rotation is enabled — the pre-8.5 rotation-off
+    // byte-identity contract keeps note roles unstamped there).
+    const meterMult = applyHumanize ? 1 + (metricalVelocityMultiplier(note.startTick, project.timeSignature, note.role ?? track.role) - 1) * intensity : 1;
+    const velocity = meterMult === 1 ? note.velocity : clamp(Math.round(note.velocity * meterMult), 1, 127);
+    const rng = mulberry32(options.seed + track.midiChannel + note.startTick + note.pitch); // EXISTING humanization stream (seed + channel + start + pitch — no salt)
     const cents = Math.max(0, Math.min(15, options.intonationCents ?? humanization.intonationCents));
-    const detuneCents = cents ? Math.round((rng() * 2 - 1) * cents * 100) / 100 : 0;
-    return { ...note, detuneCents, startTick: Math.max(0, Math.round(startTick)) };
+    let detuneCents = 0;
+    if (cents > 0) {
+      // Module 10 intonation budget: EXISTING drift term + static section
+      // spread + velocity drift + small ±2 jitter on the SAME stream; the SUM
+      // is then budget-normalized so |total| ≤ intonationCents (clamp ±15).
+      // M6 anti-flange composes AFTER this as shipped (additive field).
+      const u = rng() * 2 - 1;
+      const u2 = rng() * 2 - 1;
+      const raw = u * cents + staticDetuneForRole(track.role) + velocityPitchDriftCents(velocity) + u2 * INTONATION_JITTER_CENTS;
+      detuneCents = Math.abs(raw) <= cents ? Math.round(raw * 100) / 100 : Math.round(Math.sign(raw) * cents * 100) / 100;
+    }
+    return { ...note, detuneCents, startTick: Math.max(0, Math.round(startTick)), velocity };
   });
 }
 
