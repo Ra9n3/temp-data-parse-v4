@@ -11,6 +11,8 @@ import {
 import type { ExportTrackMode } from "../export/midi";
 import { exportMergedMidi, exportPerTrackMidi } from "../export/midi";
 import { exportProjectJson } from "../export/json";
+import { MASTER_GAIN, ROLE_PREVIEW_GAIN_TRIM } from "../audio/usePlayback";
+import { type MixOverrides, clearMixOverrides, readMixOverrides, saveMixOverrides } from "../state/persistence";
 import type { Note, Project, Track } from "../shared/schema/types";
 import { projectEndTick, ticksPerBar, ticksPerBeat } from "../shared/schema/time";
 import { midiName } from "../generation/generate";
@@ -318,6 +320,119 @@ export function TestsPanel({
             <div className="mt-0.5 pl-10 text-stone-500">{r.detail}</div>
           </div>
         ))}
+      </div>
+    </Modal>
+  );
+}
+
+const MIX_TRIM_ROLES = ["trumpets", "trombones", "tuba", "bassTrombone", "doubleBass", "cellos", "clarinets", "bassoons"] as const;
+
+/** Module 8.11 P7 — Mix panel (Dev menu → Mix…): read/write display of the
+ * preview-only mix constants (MASTER_GAIN and ROLE_PREVIEW_GAIN_TRIM). Values
+ * persist to localStorage ("scorch.mix.v1") and take effect on the next
+ * playback; generation behavior is untouched (out of scope by design).
+ * Reset-to-code-defaults clears the record. */
+export function MixDialog({
+  open,
+  onClose,
+  toast,
+}: {
+  open: boolean;
+  onClose: () => void;
+  toast: (kind: "ok" | "error" | "info", message: string) => void;
+}) {
+  const codeDefaults = useMemo(() => ({ masterGain: MASTER_GAIN, trims: ROLE_PREVIEW_GAIN_TRIM }), []);
+  const [record, setRecord] = useState<MixOverrides>(() => readMixOverrides() ?? {});
+  useEffect(() => {
+    if (open) setRecord(readMixOverrides() ?? {});
+  }, [open]);
+  if (!open) return null;
+  const currentGain = record.masterGain ?? codeDefaults.masterGain;
+  const mutate = (next: MixOverrides) => {
+    setRecord(next);
+    const saved = saveMixOverrides(next);
+    if (saved.ok) toast("info", "Mix overrides saved — applies on next playback");
+    else toast("error", `Mix override save failed: ${saved.error ?? "storage unavailable"}`);
+  };
+  const trimRow = (label: string, role: string) => {
+    const value = record.trims?.[role] ?? codeDefaults.trims[role];
+    const codeDefault = codeDefaults.trims[role];
+    const overridden = record.trims?.[role] !== undefined;
+    return (
+      <div key={role} className="grid grid-cols-[110px_1fr_auto] items-center gap-2 text-xs text-stone-300">
+        <label className="text-right" title={overridden ? "overridden (persists in localStorage)" : "code default"}>
+          {label}{overridden ? " *" : ""}
+        </label>
+        <input
+          aria-label={`${label} preview trim`}
+          type="number"
+          step={0.01}
+          min={0.05}
+          max={1.5}
+          className="rounded border border-white/10 bg-black/40 px-1.5 py-0.5 text-stone-100"
+          value={value}
+          onChange={(e) => {
+            const parsed = Number(e.target.value);
+            if (!Number.isFinite(parsed) || parsed <= 0) return;
+            mutate({ masterGain: record.masterGain, trims: { ...record.trims, [role]: parsed } });
+          }}
+        />
+        <span className="text-stone-500">dflt {codeDefault}
+          {overridden && (
+            <button type="button" className="ml-1 underline hover:text-stone-300" title="restore code default"
+              onClick={() => { const trims = { ...record.trims }; delete trims[role]; mutate({ masterGain: record.masterGain, trims }); }}>
+              ↺
+            </button>
+          )
+        }</span>
+      </div>
+    );
+  };
+  return (
+    <Modal title="Mix — preview levels" onClose={onClose}>
+      <div className="grid grid-cols-1 gap-2 text-sm text-stone-300">
+        <div className="text-xs text-stone-500">Preview-only constants from usePlayback. Edits persist locally and apply on the next playback; generation and export are untouched.</div>
+        <div className="grid grid-cols-[110px_1fr_auto] items-center gap-2 text-xs text-stone-300">
+          <label className="text-right" title={record.masterGain !== undefined ? "overridden (persists in localStorage)" : "code default"}>
+            Master gain{record.masterGain !== undefined ? " *" : ""}
+          </label>
+          <input
+            aria-label="Master gain"
+            type="number"
+            step={0.05}
+            min={0.1}
+            max={40}
+            className="rounded border border-white/10 bg-black/40 px-1.5 py-0.5 text-stone-100"
+            value={currentGain}
+            onChange={(e) => {
+              const parsed = Number(e.target.value);
+              if (!Number.isFinite(parsed) || parsed <= 0) return;
+              mutate({ masterGain: parsed, trims: record.trims });
+            }}
+          />
+          <span className="text-stone-500">dflt {codeDefaults.masterGain}
+            {record.masterGain !== undefined && (
+              <button type="button" className="ml-1 underline hover:text-stone-300" title="restore code default"
+                onClick={() => mutate({ trims: record.trims })}>
+                ↺
+              </button>
+            )}
+          </span>
+        </div>
+        <div className="mt-1 border-t border-white/10 pt-2">
+          {MIX_TRIM_ROLES.map((role) => trimRow(role, role))}
+        </div>
+        <button
+          type="button"
+          className="mt-2 w-full rounded border border-white/10 bg-white/5 px-2 py-1.5 text-xs text-stone-200 hover:bg-white/10"
+          onClick={() => {
+            clearMixOverrides();
+            setRecord({});
+            toast("info", "Mix reset to code defaults");
+          }}
+        >
+          Reset to code defaults
+        </button>
       </div>
     </Modal>
   );

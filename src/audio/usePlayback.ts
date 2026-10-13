@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import type { Note, Project, Track } from "../shared/schema/types";
 import { projectEndTick, secondsToTicks, ticksPerBar, ticksPerBeat, ticksToSeconds } from "../shared/schema/time";
 import { acousticWeightForTrack } from "../generation/balance";
+import { readMixOverrides } from "../state/persistence";
 
 export interface PlaybackState {
   playheadTick: number;
@@ -78,7 +79,9 @@ function createMasterBus(ctx: AudioContext): MasterBus {
   const makeup = ctx.createGain();
   makeup.gain.value = Math.pow(10, 4 / 20); // ~+4 dB makeup
   const master = ctx.createGain();
-  master.gain.value = MASTER_GAIN; // Module 8.10 M2 — absolute master level (post-compressor)
+  // Module 8.11 P7 — mix-panel overrides take precedence over the code default;
+  // also applied per schedule() below so edits are audible from the next playback.
+  master.gain.value = readMixOverrides()?.masterGain ?? MASTER_GAIN;
   input.connect(compressor);
   compressor.connect(makeup);
   makeup.connect(master);
@@ -169,6 +172,11 @@ export function usePlayback(
       const p = projectRef.current;
       const bpm = p.bpm;
       const origin = originRef.current;
+      // Module 8.11 P7 — mix-panel overrides re-read each schedule pass so a
+      // panel edit is audible from the NEXT playback (task semantics) without
+      // touching generation or export.
+      const mix = readMixOverrides();
+      if (masterRef.current) masterRef.current.master.gain.value = mix?.masterGain ?? MASTER_GAIN;
       const tracks = audibleTracks(p);
       for (const t of tracks) {
         for (const n of t.notes) {
@@ -198,7 +206,8 @@ export function usePlayback(
           const cc11Gain = n.dynamics ? (n.dynamics.cc11Value / 127) : 1;
           // Module 8.7 B4: base per-note peak 0.035 → 0.05 (headroom now handled by the master bus compressor).
           // Module 8.8 B1: per-role preview trim (brass taming; see ROLE_PREVIEW_GAIN_TRIM).
-          const peak = 0.05 * (ROLE_PREVIEW_GAIN_TRIM[t.role] ?? 1) * (n.velocity / 127) * cc7Gain * cc11Gain * (t.family === "percussion" ? 1.6 : 1);
+          const roleTrim = mix?.trims?.[t.role] ?? ROLE_PREVIEW_GAIN_TRIM[t.role] ?? 1; // P7: override → code default
+          const peak = 0.05 * roleTrim * (n.velocity / 127) * cc7Gain * cc11Gain * (t.family === "percussion" ? 1.6 : 1);
           const atk = t.family === "strings" ? 0.04 : t.family === "percussion" ? 0.005 : 0.015;
           const when = Math.max(ctx.currentTime, startSec);
           gain.gain.setValueAtTime(0, when);

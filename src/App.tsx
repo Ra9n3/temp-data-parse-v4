@@ -7,6 +7,7 @@ import { GenerationSettingsPanel } from "./components/GenerationSettingsPanel";
 import {
   AboutDialog,
   ExportDialog,
+  MixDialog,
   PianoRoll,
   TestsPanel,
   Toasts,
@@ -31,13 +32,43 @@ import {
 } from "./shared/schema";
 import { generate, fillRandomNotes, generationSummary } from "./generation/generate";
 import { importProjectJson } from "./export/json";
+import { loadAutosave, saveAutosave } from "./state/persistence";
 import { runAlignmentTest, runUnitTests, type TestResult } from "./tests/runTests";
 import type { PluginScanState } from "./plugins/mockService";
 
-function loadStartup(): Project {
-  const v = validateProject(dorianFixture);
-  if (v.ok) return v.project;
+/** P2 — the FIXTURE path only (Dev → Reload Dorian fixture uses this; it must
+ * NOT consult the autosave, otherwise "reload fixture" would resurrect saved
+ * state instead of the fixture). */
+function loadFixture(): Project {
+  const fallback = validateProject(dorianFixture);
+  if (fallback.ok) return fallback.project;
   return createDefaultProject("Dorian 16 Bars");
+}
+
+function loadStartup(): Project {
+  // Module 8.11 P2/P3 — startup restore chain: localStorage → validateProject →
+  // ok ? saved project : fixture fallback. Corrupt/garbage saves never crash:
+  // payload parse/schema/version failures land on the fixture and surface a
+  // one-shot toast after mount ("saved project was invalid, loaded default").
+  // P2 version guard: a payload whose schemaVersion ≠ 1 is DISCARDED (future-
+  // schema safeness). P5: no save present = plain fixture boot, no warning.
+  // P6: undo/redo history is deliberately NOT persisted (documented in
+  // persistence.ts) — the project is; restoring edit-history stacks across
+  // reloads invites stack bugs with no user value.
+  const result = loadAutosave();
+  if (result.ok && result.project) return result.project;
+  if (result.reason === "validate" || result.reason === "version") {
+    startupNotice = "saved project was invalid, loaded default";
+  }
+  return loadFixture();
+}
+
+/** One-shot P3 toast surfaced after mount (initializer can be setter-only). */
+let startupNotice: string | null = null;
+function takeStartupNoticeOnce(): string | null {
+  const message = startupNotice;
+  startupNotice = null;
+  return message;
 }
 
 let toastSeq = 0;
@@ -48,6 +79,13 @@ export default function App() {
   const [redo, setRedo] = useState<Project[]>([]);
   const [ppt, setPpt] = useState(DEFAULT_PPT);
   const composeSeedRef = useRef(Math.floor(Math.random() * 100_000));
+  // Module 8.11 P4 — hydration guard: the autosave effect's FIRST run is the
+  // mount itself; writing there would clobber the saved project with whatever
+  // the initializer produced before the user ever sees it. The flag is set on
+  // that first run and every later project change (commit/patch/import/
+  // compose/Dev-menu) autosaves (P1/P5).
+  const hydratedRef = useRef(false);
+  const [mixOpen, setMixOpen] = useState(false);
   const [generationSettingsOpen, setGenerationSettingsOpen] = useState(false);
   const generationSettings = project.generationSettings ?? createDefaultProject().generationSettings!;
   const [pluginLabels, setPluginLabels] = useState<Record<string, string>>({});
@@ -76,6 +114,20 @@ export default function App() {
     setToasts((t) => [...t, { id, kind, message }]);
     window.setTimeout(() => setToasts((t) => t.filter((x) => x.id !== id)), 4200);
   }, []);
+
+  // P1/P5 — autosave: debounced ~800 ms after ANY project change (the effect
+  // fires for commit(), patch(), JSON import, compose and the Dev-menu
+  // project swaps — they all funnel through setProject).
+  useEffect(() => {
+    if (!hydratedRef.current) { hydratedRef.current = true; return; }
+    const timer = window.setTimeout(() => saveAutosave(project), 800);
+    return () => window.clearTimeout(timer);
+  }, [project]);
+  // P3 — one-shot corrupt-save toast after mount.
+  useEffect(() => {
+    const notice = takeStartupNoticeOnce();
+    if (notice) toast("error", notice);
+  }, [toast]);
 
   const commit = useCallback(
     (next: Project) => {
@@ -327,7 +379,7 @@ export default function App() {
               toast("info", "Filled 5,000 random notes");
             }}
             onFixture={() => {
-              setProject(loadStartup());
+              setProject(loadFixture()); // P5: reload fixture loads THE FIXTURE (not saved state)
               setUndo([]);
               setRedo([]);
               toast("ok", "Loaded Dorian 16 Bars fixture");
@@ -350,6 +402,7 @@ export default function App() {
               setHarness(generationSummary(p));
             }}
             onAbout={() => setAboutOpen(true)}
+            onMix={() => setMixOpen(true)}
           />
         </div>
       </footer>
@@ -386,6 +439,7 @@ export default function App() {
         onRun={() => void runTests()}
       />
       <AboutDialog open={aboutOpen} onClose={() => setAboutOpen(false)} />
+      <MixDialog open={mixOpen} onClose={() => setMixOpen(false)} toast={toast} />
       <Toasts items={toasts} onDismiss={(id) => setToasts((t) => t.filter((x) => x.id !== id))} />
 
       {harness && (
@@ -453,6 +507,7 @@ function DevMenu({
   onTests,
   onHarness,
   onAbout,
+  onMix,
 }: {
   onFill: () => void;
   onFixture: () => void;
@@ -460,6 +515,7 @@ function DevMenu({
   onTests: () => void;
   onHarness: () => void;
   onAbout: () => void;
+  onMix: () => void;
 }) {
   const [open, setOpen] = useState(false);
   return (
@@ -470,6 +526,14 @@ function DevMenu({
       </button>
       {open && (
         <div className="absolute bottom-7 right-0 z-50 w-52 rounded-md border border-white/10 bg-[#1a1d27] py-1 text-xs text-stone-200 shadow-xl">
+          <MenuItem
+            onClick={() => {
+              onMix();
+              setOpen(false);
+            }}
+          >
+            Mix…
+          </MenuItem>
           <MenuItem
             onClick={() => {
               onFill();
