@@ -178,7 +178,10 @@ export function applyAuxSwitches<T extends AuxSwitchEventLike & { auxInstrumentI
     const chair = chairs.find((candidate) => candidate.auxiliaryInstrumentIds.includes(aux));
     if (!chair) continue; // no virtual chair owns this aux — keep today's bake-drop behavior
     const primaryTrackId = config.trackIdForInstrument(chair.primaryInstrumentId);
-    if (primaryTrackId === undefined) continue;
+    if (primaryTrackId === undefined) {
+      console.warn("[scorch] unmatchable aux guest dropped", guest.instrumentId, "chair primary has no section track");
+      continue;
+    }
     const interval = AUX_INTERVAL_SEMITONES[aux] ?? 0;
     // locate the exact source primary the double was layered on (one player, one instrument)
     const sourceIndex = events.findIndex((candidate, candidateIndex) =>
@@ -187,7 +190,10 @@ export function applyAuxSwitches<T extends AuxSwitchEventLike & { auxInstrumentI
       candidate.startTime === guest.startTime &&
       candidate.pitchConcert === guest.pitchConcert - interval,
     );
-    if (sourceIndex === -1) continue; // orphan guest — today's silent drop, byte-identical
+    if (sourceIndex === -1) {
+      console.warn("[scorch] unmatchable aux guest dropped", guest.instrumentId, "no source primary to hand off");
+      continue; // orphan guest — today's silent drop, byte-identical
+    }
     const window: SwitchWindow = { startTick: guest.startTime, endTick: guest.startTime + guest.duration };
     const validation = validateAuxSwitch(chair, events, window, { bpm, timeSignature, trackIdForInstrument: config.trackIdForInstrument });
     const stabilized = guest.startTime > (lastSwingEnd.get(chair.chairId) ?? -Infinity);
