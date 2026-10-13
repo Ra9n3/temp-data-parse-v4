@@ -34,8 +34,10 @@ import type { OrchestralStyle } from "../shared/schema/types";
 import { DEFAULT_GENERATION_SETTINGS } from "../shared/schema/types";
 import { applyNctPass } from "../generation/nct";
 import { realizeRhythm } from "../generation/rhythm";
-import { guardTrackNotes } from "../generation/monophony";
+import { guardTrackNotes, verifyMonophonyInvariant } from "../generation/monophony";
 import { consolidateSustains } from "../generation/sustain";
+import { cc7ForWeight, DEFAULT_BALANCE_CONFIG } from "../generation/balance";
+import userProjectJson from "../fixtures/user-project.json";
 import { mulberry32 } from "../generation/prng";
 import { snapshotDigest } from "../generation/efgGolden";
 import goldenDigests from "../fixtures/efg-legacy-golden-digest.json";
@@ -622,6 +624,55 @@ export function runUnitTests(): TestResult[] {
       const result = importProjectJson(exportProjectJson(project));
       assert(result.ok && projectsEqual(project, result.project), result.ok ? "round-trip differs" : result.errors.join("; "));
       return "project round-trips without data loss";
+    }),
+    timed("User 32-bar project: winds/brass single-line, strings ≤2, guard verifier 0", () => {
+      // Module 8.7 B3 — the user's real 32-bar multi-section project as a
+      // PERMANENT regression source (pre-8.7 it stacked 20–47 guard
+      // resolutions/seed and 548–669 completion-in-span overlaps).
+      const loaded = importProjectJson(JSON.stringify(userProjectJson));
+      assert(loaded.ok, loaded.ok ? "user project fixture unexpectedly invalid" : loaded.errors.join("; "));
+      const userProject = cloneProject(loaded.project);
+      const winds = new Set(["flutes", "oboes", "clarinets", "bassoons", "piccolo", "englishHorn", "bassClarinet"]);
+      const brass = new Set(["trumpets", "trombones", "horns", "tuba", "bassTrombone"]);
+      const strgs = new Set(["violins1", "violins2", "violas", "cellos", "doubleBass"]);
+      let worstWind = 0, worstBrass = 0, worstString = 0;
+      for (const seed of [6, 15, 42]) {
+        const tracks = generate(cloneProject(userProject), { seed, density: 0.75, humanize: false, lockedTrackIds: [] });
+        const violations = verifyMonophonyInvariant(tracks);
+        assert(violations.length === 0, `seed ${seed}: guard verifier found ${violations.length} violation(s): ${violations.map((v) => `${v.trackId} ${v.simultaneous}>${v.cap}`).join(", ")}`);
+        for (const track of tracks) {
+          if (track.family === "structure" || track.family === "audio") continue;
+          let worst = 0;
+          for (const note of track.notes) {
+            let overlapping = 0;
+            for (const other of track.notes) {
+              if (other !== note && note.startTick < other.startTick + other.durationTicks && other.startTick < note.startTick + note.durationTicks) overlapping++;
+            }
+            if (overlapping > worst) worst = overlapping;
+          }
+          if (winds.has(track.role)) worstWind = Math.max(worstWind, worst);
+          else if (brass.has(track.role)) worstBrass = Math.max(worstBrass, worst);
+          else if (strgs.has(track.role)) worstString = Math.max(worstString, worst);
+        }
+      }
+      assert(worstWind === 0, `winds reached ${worstWind + 1} simultaneous (max 1)`);
+      assert(worstBrass === 0, `brass reached ${worstBrass + 1} simultaneous (max 1)`);
+      assert(worstString <= 1, `strings reached ${worstString + 1} simultaneous (max 2)`);
+      return `3 seeds: verifier 0; wind/brass single-line; strings ≤${worstString + 1} simultaneous`;
+    }),
+    timed("Mix rebalance: cc7 band [78,108] inverted spread, CC11 floor 40", () => {
+      // Module 8.7 B4 — direction pinned here because no earlier pinned test
+      // covers the mix path: heavier carriers ride LOWER and the band clamps.
+      assert(cc7ForWeight(1.2) === 78, `tuba extreme clamps to band low, got ${cc7ForWeight(1.2)}`);
+      assert(cc7ForWeight(0.35) === 99, `strings weight 0.35 should give 99, got ${cc7ForWeight(0.35)}`);
+      assert(cc7ForWeight(1.0) === 81, `brass weight 1.0 should give 81, got ${cc7ForWeight(1.0)}`);
+      assert(cc7ForWeight(0.35) > cc7ForWeight(1.0), "spread no longer inverted (heavier must ride lower)");
+      for (const weight of [0, 0.2, 0.5, 0.8, 1.2]) {
+        const cc7 = cc7ForWeight(weight);
+        assert(cc7 >= 78 && cc7 <= 108, `cc7 ${cc7} out of band [78,108] at weight ${weight}`);
+      }
+      assert(DEFAULT_BALANCE_CONFIG.cc11Floor === 40, `CC11 floor should be 40, got ${DEFAULT_BALANCE_CONFIG.cc11Floor}`);
+      return "cc7 band [78,108] inverted (strings 99 > brass 81 > tuba 78), cc11 floor 40";
     }),
   ];
 }

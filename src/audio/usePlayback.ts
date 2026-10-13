@@ -16,6 +16,28 @@ interface Voices {
   stopAt: number;
 }
 
+// Module 8.7 B4 — master bus: voices sum into one GainNode → DynamicsCompressor
+// (threshold −18 dB, ratio 3:1) → makeup gain (~+4 dB) → destination. DynamicsCom-
+// pressorNode has no makeup parameter, so the ~+4 dB rides a post-compressor gain.
+interface MasterBus {
+  input: GainNode;
+  compressor: DynamicsCompressorNode;
+  makeup: GainNode;
+}
+
+function createMasterBus(ctx: AudioContext): MasterBus {
+  const input = ctx.createGain();
+  const compressor = ctx.createDynamicsCompressor();
+  compressor.threshold.value = -18;
+  compressor.ratio.value = 3;
+  const makeup = ctx.createGain();
+  makeup.gain.value = Math.pow(10, 4 / 20); // ~+4 dB makeup
+  input.connect(compressor);
+  compressor.connect(makeup);
+  makeup.connect(ctx.destination);
+  return { input, compressor, makeup };
+}
+
 function familyWave(family: string): OscillatorType {
   if (family === "strings") return "sawtooth";
   if (family === "brass") return "sawtooth";
@@ -46,6 +68,7 @@ export function usePlayback(
   const projectRef = useRef(project);
   const bufferRef = useRef(audioBuffer);
   const lastMetroRef = useRef(-1);
+  const masterRef = useRef<MasterBus | null>(null);
 
   projectRef.current = project;
   bufferRef.current = audioBuffer;
@@ -55,7 +78,10 @@ export function usePlayback(
   metroRef.current = metronome;
 
   const getCtx = useCallback(async () => {
-    if (!ctxRef.current) ctxRef.current = new AudioContext();
+    if (!ctxRef.current) {
+      ctxRef.current = new AudioContext();
+      masterRef.current = createMasterBus(ctxRef.current); // Module 8.7 B4 master bus
+    }
     if (ctxRef.current.state === "suspended") await ctxRef.current.resume();
     return ctxRef.current;
   }, []);
@@ -122,7 +148,8 @@ export function usePlayback(
           // fall back to neutral unity. Export is untouched.
           const cc7Gain = acousticWeightForTrack(t);
           const cc11Gain = n.dynamics ? (n.dynamics.cc11Value / 127) : 1;
-          const peak = 0.035 * (n.velocity / 127) * cc7Gain * cc11Gain * (t.family === "percussion" ? 1.6 : 1);
+          // Module 8.7 B4: base per-note peak 0.035 → 0.05 (headroom now handled by the master bus compressor).
+          const peak = 0.05 * (n.velocity / 127) * cc7Gain * cc11Gain * (t.family === "percussion" ? 1.6 : 1);
           const atk = t.family === "strings" ? 0.04 : t.family === "percussion" ? 0.005 : 0.015;
           const when = Math.max(ctx.currentTime, startSec);
           gain.gain.setValueAtTime(0, when);
@@ -131,7 +158,7 @@ export function usePlayback(
           gain.gain.linearRampToValueAtTime(0, when + durSec);
           osc.connect(filter);
           filter.connect(gain);
-          gain.connect(ctx.destination);
+          gain.connect(masterRef.current!.input); // through the master bus, not straight to destination
           try {
             osc.start(when);
             osc.stop(when + durSec + 0.02);

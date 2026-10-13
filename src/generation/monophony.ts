@@ -22,11 +22,14 @@ import type { AbstractNoteEvent } from "./generate";
 
 export type MonophonyFamily = "monophonic" | "double-stop" | "polyphonic";
 
-/** Capability table (hotfix Phase 4). */
+/** Capability table (hotfix Phase 4). Module 8.7 B2: the table now FAILS
+ * CLOSED — an unknown or missing family resolves monophonic (1) instead of
+ * unbounded, so no role/family combination can ever slip past the guard
+ * through a lookup miss. Only the known polyphonic families stay unlimited. */
 export function maxSimultaneousFor(family: string | undefined): number {
-  if (family === "woodwinds" || family === "brass") return 1;
+  if (family === "keys" || family === "percussion") return Number.POSITIVE_INFINITY;
   if (family === "strings") return 2; // double-stops
-  return Number.POSITIVE_INFINITY; // keys/percussion/others
+  return 1; // woodwinds/brass AND anything unknown/undefined: fail closed
 }
 
 export const ROLE_PRIORITY: Record<string, number> = { LEAD: 0, COUNTERLINE: 1, OSTINATO: 2, BASS: 3, PAD: 4 };
@@ -109,7 +112,12 @@ export function applyMonophonyGuard<N extends { startTick: number; durationTicks
     let excess: N | undefined;
     for (const note of ordered) {
       const count = active.filter((entry) => entry.note !== note && overlaps(entry.note, note)).length;
-      if (count > maxSimultaneous) { excess = note; break; }
+      // Module 8.7 B2 — the bound is now the exact capability: worst = count
+      // others-overlapping must stay ≤ cap−1 (concurrency ≤ cap). The old
+      // trigger count > cap allowed one extra overlap per note on
+      // double-stop families, which the B3 verifier caught as a 3-way on
+      // strings. Monophonic families are unchanged (any pair is already cut).
+      if (count > maxSimultaneous - 1) { excess = note; break; }
     }
     if (!excess) break;
     const others = active
@@ -155,6 +163,51 @@ export function guardTrackNotes<N extends { startTick: number; durationTicks: nu
     console.warn(`[scorch] monophony guard resolved on ${trackId} (${role}): ${result.dropped} dropped, ${result.truncated} truncated`);
   }
   return { trackId, dropped: result.dropped, truncated: result.truncated, notes: result.notes };
+}
+
+/** Module 8.7 B2 — the "global rule" made provable. Re-checks the WHOLE
+ * project after the guard: every track's worst pairwise-overlap depth must
+ * respect the family cap (winds/brass/tuba: 1 simultaneous; strings: 2;
+ * keys/percussion: unbounded). Anything above means a track slipped past the
+ * guard — generate() logs `[scorch] monophony invariant violated` loudly.
+ * Expected count: 0. Deterministic; no side effects. */
+export interface InvariantViolation {
+  trackId: string;
+  family: string;
+  simultaneous: number;
+  cap: number;
+  sample?: string;
+}
+
+export interface GuardableTrack {
+  id: string;
+  family: string;
+  notes: Array<{ startTick: number; durationTicks: number }>;
+}
+
+export function verifyMonophonyInvariant(tracks: readonly GuardableTrack[]): InvariantViolation[] {
+  const violations: InvariantViolation[] = [];
+  for (const track of tracks) {
+    if (track.family === "structure" || track.family === "audio") continue;
+    const cap = maxSimultaneousFor(track.family);
+    if (cap === Number.POSITIVE_INFINITY || track.notes.length < 2) continue;
+    let worst = 0;
+    let worstNote: { startTick: number; durationTicks: number } | undefined;
+    for (const note of track.notes) {
+      let overlaps = 0;
+      for (const other of track.notes) {
+        if (other !== note && note.startTick < other.startTick + other.durationTicks
+          && other.startTick < note.startTick + note.durationTicks) overlaps++;
+      }
+      if (overlaps > worst) { worst = overlaps; worstNote = note; }
+    }
+    // Worst = others-overlapping count; +1 counts the note itself.
+    if (worst > cap - 1) {
+      violations.push({ trackId: track.id, family: track.family, simultaneous: worst + 1, cap,
+        sample: worstNote ? `note @${worstNote.startTick}+${worstNote.durationTicks}` : undefined });
+    }
+  }
+  return violations;
 }
 
 export type { AbstractNoteEvent };

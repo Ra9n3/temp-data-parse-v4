@@ -37,9 +37,9 @@ import { applyAccompanimentAttenuation, applyAntiphonalWindowing, calculateNoteD
 // eligibility). All three are consumed only in their own modules; never reuse.
 // Module 8 arrangement/gestures: deterministic, no salt.
 import { applyArrangementGestures, applyBreakdownDrop, arrangementContext, DEFAULT_ARRANGEMENT_CONFIG, expandSectionsForStaggering, truncateNotesAtBreakdownBoundaries } from "./arrangement";
-import { guardTrackNotes } from "./monophony";
+import { guardTrackNotes, verifyMonophonyInvariant } from "./monophony";
 import { applyActiveMask, applyRoleRotation, divideChorusRoles, exposedBreakdownRoles, planRotation, resolveRotationConfig, type RotationPlan } from "./rotation";
-import { consolidateSustains } from "./sustain";
+import { consolidateSustains, reconcileConsolidatedPads } from "./sustain";
 
 export interface ProjectConfig {
   keyRoot: number;
@@ -960,6 +960,15 @@ export function applyEfgEngines(
     // (no RNG); gated by the same rotation switch as the whole arrangement path
     // so the engines-off + rotation-off golden digests stay byte-identical.
     current = consolidateSustains(current).events;
+    // Module 8.7 B1 — pad-completion ledger re-check AFTER consolidation: a
+    // scattered completion note may never straddle a consolidated span on the
+    // same instrument. Overflow re-homes to other pad carriers or drops, so
+    // the final guard never "resolves" this by truncating a long pad span.
+    const reconciled = reconcileConsolidatedPads(current, ctx.profiles);
+    if (reconciled.stats.reRouted || reconciled.stats.dropped) {
+      console.log(`[scorch] pad ledger after consolidation: ${reconciled.stats.reRouted} re-routed, ${reconciled.stats.dropped} dropped`);
+    }
+    current = reconciled.events;
   }
 
   return { events: current, applied: { ...switches, leadReplaced: switches.germ } };
@@ -1223,11 +1232,23 @@ export function generate(project: Project, options: GenerateOptions): Track[] {
   // a string-keyed role→family map (unknown roles used to fall through to ∞).
   // Deterministic: truncation to a legato handoff, drops only for tied onsets;
   // pitch is never modified. Expected resolutions after Phases 1–3: zero.
-  return divided.map((track) => {
+  const guardedTracks = divided.map((track) => {
     if (track.family === "structure" || track.family === "audio") return track;
     const guarded = guardTrackNotes(track.id, track.role, track.notes, undefined, track.family);
     return { ...track, notes: guarded.notes };
   });
+  // Module 8.7 B2 — the "global rule" made provable: after the guard runs, a
+  // verifier re-checks the whole project (all paths — rotation on AND off).
+  // Expected count: 0; anything above is logged loudly and means a track
+  // slipped past the guard through some un-audited stage.
+  const violations = verifyMonophonyInvariant(guardedTracks);
+  if (violations.length) {
+    console.error(`[scorch] monophony invariant violated: ${violations.length} track(s) — expected 0`);
+    for (const violation of violations.slice(0, 8)) {
+      console.error(`  ${violation.trackId} (${violation.family}): ${violation.simultaneous} simultaneous > cap ${violation.cap}${violation.sample ? ` (${violation.sample})` : ""}`);
+    }
+  }
+  return guardedTracks;
 }
 function humanizeNotes(notes: Note[], bpm: number, seed: number, intensity: number, rubato: number): Note[] {
   const rng = mulberry32(seed);

@@ -27,9 +27,97 @@
  * breakdown truncation still clamps spans at boundaries, and windowing/doubling
  * see identical time-windows.
  */
-import type { AbstractNoteEvent } from "./generate";
+import type { AbstractNoteEvent, InstrumentProfile } from "./generate";
 
 export interface ConsolidationStats { merged: number; before: number; after: number }
+
+/** Module 8.7 B1 — pad-completion ledger re-check AFTER consolidation.
+ *
+ * Invariant: a scattered completion note may NEVER overlap a consolidated
+ * span on the same instrument. The stage-6 ledger granted each bounce-tone a
+ * slot against per-beat carriers, but consolidation later welds those beats
+ * into multi-beat spans — stranding the completion tone under the span. Left
+ * alone, the final guard would "resolve" the stack by truncating the LONG pad
+ * span (eating the sustain); this pass moves the overflow upstream instead:
+ *
+ *  - victims: role-PAD events overlapping a strictly longer BASS/PAD span of
+ *    a different pitch on the SAME instrument (merged spans are ≥ 2 beats;
+ *    completion tones are one harmony window, so the shorter event is the
+ *    scatter — equal-length co-existence (a legal string double-stop) is left
+ *    untouched);
+ *  - re-route: another EXISTING pad carrier (same instrument family first,
+ *    then lighter live load, then id — fully deterministic, no RNG) whose
+ *    whole-line ledger is COMPLETELY CLEAN over the victim's window: zero
+ *    overlapping notes of any role. The invariant is strict — a within-cap
+ *    straddle would still park a completion tone against a consolidated
+ *    span on the new home (the A2 real-pipeline probe caught exactly that:
+ *    a lenient cap-based slot test left 2/6/1 residuals).
+ *  - drop: only when no carrier anywhere is clean over the window.
+ *
+ * Runs inside the rotation block right after consolidateSustains (and only
+ * there), so the engines-off + rotation-off golden digests stay byte-identical.
+ * The sustain metric is untouched — spans keep their full merged durations. */
+
+export interface ReconciliationStats { reRouted: number; dropped: number }
+
+const overlaps = (a: { startTime: number; duration: number }, b: { startTime: number; duration: number }): boolean =>
+  a.startTime < b.startTime + b.duration - 1e-9 && b.startTime < a.startTime + a.duration - 1e-9;
+
+export function reconcileConsolidatedPads(events: AbstractNoteEvent[], profiles: InstrumentProfile[]): { events: AbstractNoteEvent[]; stats: ReconciliationStats } {
+  const profileById = new Map(profiles.map((profile) => [profile.id, profile] as const));
+  // 1) Detect victims on the CONSOLIDATED stream (index-keyed; values below are
+  // edited on working copies of those indexes).
+  const victimIndexes = new Set<number>();
+  for (let index = 0; index < events.length; index++) {
+    const candidate = events[index]!;
+    if (candidate.role !== "PAD") continue;
+    for (const other of [...events]) {
+      if (other === candidate) continue;
+      if (other.role !== "BASS" && other.role !== "PAD") continue;
+      if (other.instrumentId !== candidate.instrumentId) continue;
+      if (other.pitchConcert === candidate.pitchConcert) continue; // part of the candidate's own chain
+      if (other.duration <= candidate.duration) continue; // only longer (consolidated) spans host scatter
+      if (!overlaps(candidate, other)) continue;
+      victimIndexes.add(index);
+      break;
+    }
+  }
+  if (!victimIndexes.size) return { events, stats: { reRouted: 0, dropped: 0 } };
+
+  // 2) Live ledger over working copies; re-route or drop each victim once.
+  const copies = events.map((event) => ({ ...event }));
+  const indexByCopy = new Map(copies.map((copy, index) => [copy, index] as const));
+  const removed = new Set<number>();
+  const slotCount = (id: string, window: { startTime: number; duration: number }): number =>
+    copies.reduce((count, other) => other.instrumentId === id
+      && !removed.has(indexByCopy.get(other) ?? -1) && overlaps(other, window) ? count + 1 : count, 0);
+  const padCarriers = [...new Set(events.filter((event) => event.role === "PAD").map((event) => event.instrumentId))];
+  let reRouted = 0;
+  let dropped = 0;
+  for (const index of [...victimIndexes].sort((a, b) => a - b)) {
+    const victim = copies[index]!;
+    const selfFamily = profileById.get(victim.instrumentId)?.family ?? "";
+    const candidates = padCarriers.filter((id) => id !== victim.instrumentId).sort((a, b) => {
+      const sameFamilyA = (profileById.get(a)?.family ?? "") === selfFamily;
+      const sameFamilyB = (profileById.get(b)?.family ?? "") === selfFamily;
+      if (sameFamilyA !== sameFamilyB) return sameFamilyA ? -1 : 1;
+      const loadA = slotCount(a, victim);
+      const loadB = slotCount(b, victim);
+      if (loadA !== loadB) return loadA - loadB;
+      return a.localeCompare(b);
+    });
+    // Strict invariant (Module 8.7 B1): a fully clean window on the new home.
+    const target = candidates.find((id) => slotCount(id, victim) === 0);
+    if (target) {
+      victim.instrumentId = target;
+      reRouted++;
+    } else {
+      removed.add(index);
+      dropped++;
+    }
+  }
+  return { events: copies.filter((_, index) => !removed.has(index)), stats: { reRouted, dropped } };
+}
 
 const CONSOLIDATION_ROLES = new Set(["BASS", "PAD"]);
 const ONE_BAR_TICKS = 960 * 4;

@@ -1,0 +1,6006 @@
+{
+  "schemaVersion": 1,
+  "name": "Dorian 16 Bars",
+  "bpm": 100,
+  "tempoMap": [
+    {
+      "tick": 0,
+      "bpm": 100
+    }
+  ],
+  "timeSignature": {
+    "numerator": 4,
+    "denominator": 4
+  },
+  "key": 2,
+  "mode": "dorian",
+  "sections": [
+    {
+      "id": "sec_verse",
+      "name": "Verse",
+      "startBar": 1,
+      "lengthBars": 8
+    },
+    {
+      "id": "sec_chorus",
+      "name": "Chorus",
+      "startBar": 9,
+      "lengthBars": 8
+    },
+    {
+      "id": "sec_75d3756d",
+      "name": "Pre-Chorus",
+      "startBar": 17,
+      "lengthBars": 3
+    },
+    {
+      "id": "sec_2adbed21",
+      "name": "Chorus",
+      "startBar": 20,
+      "lengthBars": 8
+    }
+  ],
+  "chords": [
+    {
+      "id": "ch_01",
+      "symbol": "Dm7",
+      "startTick": 0,
+      "durationTicks": 3840
+    },
+    {
+      "id": "ch_02",
+      "symbol": "Dm7",
+      "startTick": 3840,
+      "durationTicks": 3840
+    },
+    {
+      "id": "ch_03",
+      "symbol": "G7",
+      "startTick": 7680,
+      "durationTicks": 3840
+    },
+    {
+      "id": "ch_04",
+      "symbol": "G7",
+      "startTick": 11520,
+      "durationTicks": 3840
+    },
+    {
+      "id": "ch_05",
+      "symbol": "Dm7",
+      "startTick": 15360,
+      "durationTicks": 3840
+    },
+    {
+      "id": "ch_06",
+      "symbol": "Fmaj7",
+      "startTick": 19200,
+      "durationTicks": 3840
+    },
+    {
+      "id": "ch_07",
+      "symbol": "Cmaj7",
+      "startTick": 23040,
+      "durationTicks": 3840
+    },
+    {
+      "id": "ch_08",
+      "symbol": "Am7",
+      "startTick": 26880,
+      "durationTicks": 3840
+    },
+    {
+      "id": "ch_09a",
+      "symbol": "Dm7",
+      "startTick": 30720,
+      "durationTicks": 1920
+    },
+    {
+      "id": "ch_09b",
+      "symbol": "G7",
+      "startTick": 32640,
+      "durationTicks": 1920
+    },
+    {
+      "id": "ch_10a",
+      "symbol": "Am7",
+      "startTick": 34560,
+      "durationTicks": 1920
+    },
+    {
+      "id": "ch_10b",
+      "symbol": "Fmaj7",
+      "startTick": 36480,
+      "durationTicks": 1920
+    },
+    {
+      "id": "ch_11a",
+      "symbol": "Dm7",
+      "startTick": 38400,
+      "durationTicks": 1920
+    },
+    {
+      "id": "ch_11b",
+      "symbol": "G7",
+      "startTick": 40320,
+      "durationTicks": 1920
+    },
+    {
+      "id": "ch_12a",
+      "symbol": "Cadd9",
+      "startTick": 42240,
+      "durationTicks": 1920
+    },
+    {
+      "id": "ch_12b",
+      "symbol": "Am7",
+      "startTick": 44160,
+      "durationTicks": 1920
+    },
+    {
+      "id": "ch_13a",
+      "symbol": "Bbmaj7",
+      "startTick": 46080,
+      "durationTicks": 1920
+    },
+    {
+      "id": "ch_13b",
+      "symbol": "C7",
+      "startTick": 48000,
+      "durationTicks": 1920
+    },
+    {
+      "id": "ch_14a",
+      "symbol": "Dm7",
+      "startTick": 49920,
+      "durationTicks": 1920
+    },
+    {
+      "id": "ch_14b",
+      "symbol": "G7",
+      "startTick": 51840,
+      "durationTicks": 1920
+    },
+    {
+      "id": "ch_15",
+      "symbol": "Am7",
+      "startTick": 53760,
+      "durationTicks": 3840
+    },
+    {
+      "id": "ch_16",
+      "symbol": "Dm",
+      "startTick": 57600,
+      "durationTicks": 3840
+    },
+    {
+      "id": "ch_4b2d1fd5",
+      "symbol": "C",
+      "startTick": 61440,
+      "durationTicks": 3840
+    },
+    {
+      "id": "ch_b27591b1",
+      "symbol": "C",
+      "startTick": 65280,
+      "durationTicks": 3840
+    },
+    {
+      "id": "ch_fa870830",
+      "symbol": "C",
+      "startTick": 69120,
+      "durationTicks": 3840
+    },
+    {
+      "id": "ch_7665acda",
+      "symbol": "C",
+      "startTick": 72960,
+      "durationTicks": 7680
+    },
+    {
+      "id": "ch_c734eb32",
+      "symbol": "C",
+      "startTick": 80640,
+      "durationTicks": 7680
+    },
+    {
+      "id": "ch_9344adf0",
+      "symbol": "C",
+      "startTick": 88320,
+      "durationTicks": 7680
+    },
+    {
+      "id": "ch_86237cdf",
+      "symbol": "C",
+      "startTick": 96000,
+      "durationTicks": 7680
+    }
+  ],
+  "referenceAudio": {
+    "path": "",
+    "offsetMs": 0
+  },
+  "libraryGroups": [],
+  "tracks": [
+    {
+      "id": "trk_structure",
+      "name": "Structure",
+      "family": "structure",
+      "color": "#6b7280",
+      "role": "structure",
+      "lowestNote": 0,
+      "highestNote": 127,
+      "locked": false,
+      "muted": false,
+      "soloed": false,
+      "libraryGroupId": null,
+      "midiChannel": 1,
+      "frozen": false,
+      "notes": []
+    },
+    {
+      "id": "trk_chords",
+      "name": "Chords",
+      "family": "structure",
+      "color": "#6b7280",
+      "role": "chords",
+      "lowestNote": 0,
+      "highestNote": 127,
+      "locked": false,
+      "muted": false,
+      "soloed": false,
+      "libraryGroupId": null,
+      "midiChannel": 1,
+      "frozen": false,
+      "notes": []
+    },
+    {
+      "id": "trk_audio",
+      "name": "Reference Audio",
+      "family": "audio",
+      "color": "#6b7280",
+      "role": "audio",
+      "lowestNote": 0,
+      "highestNote": 127,
+      "locked": false,
+      "muted": false,
+      "soloed": false,
+      "libraryGroupId": null,
+      "midiChannel": 1,
+      "frozen": false,
+      "notes": []
+    },
+    {
+      "id": "trk_violins_i",
+      "name": "Violins I",
+      "family": "strings",
+      "color": "#3b82f6",
+      "role": "violins1",
+      "lowestNote": 55,
+      "highestNote": 91,
+      "locked": false,
+      "muted": false,
+      "soloed": false,
+      "libraryGroupId": null,
+      "midiChannel": 1,
+      "frozen": false,
+      "notes": [
+        {
+          "pitch": 62,
+          "startTick": 30721,
+          "durationTicks": 981,
+          "velocity": 21,
+          "role": "LEAD",
+          "dynamics": {
+            "cc11Value": 17,
+            "cc74Value": 39,
+            "attenuationActive": false
+          },
+          "technique": "SUL_TASTO",
+          "bowDirection": "DOWN_BOW",
+          "detuneCents": 0
+        },
+        {
+          "pitch": 64,
+          "startTick": 31686,
+          "durationTicks": 954,
+          "velocity": 33,
+          "role": "LEAD",
+          "dynamics": {
+            "cc11Value": 15,
+            "cc74Value": 46,
+            "attenuationActive": false
+          },
+          "technique": "SUL_TASTO",
+          "bowDirection": "UP_BOW",
+          "detuneCents": 0
+        },
+        {
+          "pitch": 62,
+          "startTick": 31702,
+          "durationTicks": 403,
+          "velocity": 26,
+          "role": "LEAD",
+          "detuneCents": 0,
+          "cc74Offset": -5,
+          "dynamics": {
+            "cc11Value": 15,
+            "cc74Value": 57,
+            "attenuationActive": false
+          },
+          "technique": "DETACHE",
+          "bowDirection": "UP_BOW"
+        },
+        {
+          "pitch": 64,
+          "startTick": 32649,
+          "durationTicks": 399,
+          "velocity": 39,
+          "role": "LEAD",
+          "dynamics": {
+            "cc11Value": 17,
+            "cc74Value": 71,
+            "attenuationActive": false
+          },
+          "technique": "DETACHE",
+          "bowDirection": "DOWN_BOW",
+          "detuneCents": 0
+        },
+        {
+          "pitch": 67,
+          "startTick": 33125,
+          "durationTicks": 403,
+          "velocity": 37,
+          "role": "LEAD",
+          "dynamics": {
+            "cc11Value": 17,
+            "cc74Value": 71,
+            "attenuationActive": false
+          },
+          "technique": "DETACHE",
+          "bowDirection": "UP_BOW",
+          "detuneCents": 0
+        },
+        {
+          "pitch": 65,
+          "startTick": 33605,
+          "durationTicks": 955,
+          "velocity": 33,
+          "role": "LEAD",
+          "dynamics": {
+            "cc11Value": 17,
+            "cc74Value": 47,
+            "attenuationActive": false
+          },
+          "technique": "SUL_TASTO",
+          "bowDirection": "UP_BOW",
+          "detuneCents": 0
+        },
+        {
+          "pitch": 64,
+          "startTick": 34085,
+          "durationTicks": 403,
+          "velocity": 28,
+          "role": "LEAD",
+          "dynamics": {
+            "cc11Value": 15,
+            "cc74Value": 70,
+            "attenuationActive": false
+          },
+          "technique": "DETACHE",
+          "bowDirection": "DOWN_BOW",
+          "detuneCents": 0
+        },
+        {
+          "pitch": 64,
+          "startTick": 34569,
+          "durationTicks": 1911,
+          "velocity": 34,
+          "role": "LEAD",
+          "dynamics": {
+            "cc11Value": 17,
+            "cc74Value": 47,
+            "attenuationActive": false
+          },
+          "technique": "SUL_TASTO",
+          "bowDirection": "DOWN_BOW",
+          "detuneCents": 0
+        },
+        {
+          "pitch": 62,
+          "startTick": 36482,
+          "durationTicks": 963,
+          "velocity": 22,
+          "role": "LEAD",
+          "dynamics": {
+            "cc11Value": 15,
+            "cc74Value": 38,
+            "attenuationActive": false
+          },
+          "technique": "SUL_TASTO",
+          "bowDirection": "DOWN_BOW",
+          "detuneCents": 0
+        },
+        {
+          "pitch": 65,
+          "startTick": 36489,
+          "durationTicks": 399,
+          "velocity": 35,
+          "role": "LEAD",
+          "dynamics": {
+            "cc11Value": 17,
+            "cc74Value": 71,
+            "attenuationActive": false
+          },
+          "technique": "DETACHE",
+          "bowDirection": "DOWN_BOW",
+          "detuneCents": 0
+        },
+        {
+          "pitch": 69,
+          "startTick": 36967,
+          "durationTicks": 401,
+          "velocity": 29,
+          "role": "LEAD",
+          "dynamics": {
+            "cc11Value": 17,
+            "cc74Value": 71,
+            "attenuationActive": false
+          },
+          "technique": "DETACHE",
+          "bowDirection": "UP_BOW",
+          "detuneCents": 0
+        },
+        {
+          "pitch": 67,
+          "startTick": 37445,
+          "durationTicks": 955,
+          "velocity": 26,
+          "role": "LEAD",
+          "dynamics": {
+            "cc11Value": 17,
+            "cc74Value": 47,
+            "attenuationActive": false
+          },
+          "technique": "SUL_TASTO",
+          "bowDirection": "UP_BOW",
+          "detuneCents": 0
+        },
+        {
+          "pitch": 62,
+          "startTick": 37456,
+          "durationTicks": 401,
+          "velocity": 24,
+          "role": "LEAD",
+          "detuneCents": 0,
+          "cc74Offset": -5,
+          "dynamics": {
+            "cc11Value": 15,
+            "cc74Value": 57,
+            "attenuationActive": false
+          },
+          "technique": "DETACHE",
+          "bowDirection": "DOWN_BOW"
+        },
+        {
+          "pitch": 65,
+          "startTick": 39365,
+          "durationTicks": 403,
+          "velocity": 27,
+          "role": "LEAD",
+          "dynamics": {
+            "cc11Value": 15,
+            "cc74Value": 70,
+            "attenuationActive": false
+          },
+          "technique": "DETACHE",
+          "bowDirection": "UP_BOW",
+          "detuneCents": 0
+        },
+        {
+          "pitch": 64,
+          "startTick": 42241,
+          "durationTicks": 3842,
+          "velocity": 41,
+          "role": "LEAD",
+          "dynamics": {
+            "cc11Value": 27,
+            "cc74Value": 79,
+            "attenuationActive": false
+          },
+          "technique": "LEGATO",
+          "bowDirection": "DOWN_BOW",
+          "detuneCents": 0
+        },
+        {
+          "pitch": 62,
+          "startTick": 43201,
+          "durationTicks": 407,
+          "velocity": 26,
+          "role": "LEAD",
+          "dynamics": {
+            "cc11Value": 15,
+            "cc74Value": 62,
+            "attenuationActive": false
+          },
+          "technique": "DETACHE",
+          "bowDirection": "UP_BOW",
+          "detuneCents": 0
+        },
+        {
+          "pitch": 65,
+          "startTick": 44168,
+          "durationTicks": 1912,
+          "velocity": 36,
+          "role": "LEAD",
+          "dynamics": {
+            "cc11Value": 23,
+            "cc74Value": 49,
+            "attenuationActive": false
+          },
+          "technique": "SUL_TASTO",
+          "bowDirection": "DOWN_BOW",
+          "detuneCents": 0
+        },
+        {
+          "pitch": 62,
+          "startTick": 46083,
+          "durationTicks": 1917,
+          "velocity": 30,
+          "role": "LEAD",
+          "dynamics": {
+            "cc11Value": 22,
+            "cc74Value": 41,
+            "attenuationActive": false
+          },
+          "technique": "SUL_TASTO",
+          "bowDirection": "DOWN_BOW",
+          "detuneCents": 0
+        },
+        {
+          "pitch": 64,
+          "startTick": 47043,
+          "durationTicks": 957,
+          "velocity": 26,
+          "role": "LEAD",
+          "dynamics": {
+            "cc11Value": 18,
+            "cc74Value": 47,
+            "attenuationActive": false
+          },
+          "technique": "SUL_TASTO",
+          "bowDirection": "UP_BOW",
+          "detuneCents": 0
+        },
+        {
+          "pitch": 64,
+          "startTick": 48006,
+          "durationTicks": 402,
+          "velocity": 42,
+          "role": "LEAD",
+          "dynamics": {
+            "cc11Value": 22,
+            "cc74Value": 73,
+            "attenuationActive": false
+          },
+          "technique": "DETACHE",
+          "bowDirection": "DOWN_BOW",
+          "detuneCents": 0
+        },
+        {
+          "pitch": 67,
+          "startTick": 48484,
+          "durationTicks": 404,
+          "velocity": 33,
+          "role": "LEAD",
+          "dynamics": {
+            "cc11Value": 22,
+            "cc74Value": 73,
+            "attenuationActive": false
+          },
+          "technique": "DETACHE",
+          "bowDirection": "UP_BOW",
+          "detuneCents": 0
+        },
+        {
+          "pitch": 65,
+          "startTick": 48962,
+          "durationTicks": 958,
+          "velocity": 34,
+          "role": "LEAD",
+          "dynamics": {
+            "cc11Value": 22,
+            "cc74Value": 49,
+            "attenuationActive": false
+          },
+          "technique": "SUL_TASTO",
+          "bowDirection": "UP_BOW",
+          "detuneCents": 0
+        },
+        {
+          "pitch": 65,
+          "startTick": 49921,
+          "durationTicks": 1919,
+          "velocity": 35,
+          "role": "LEAD",
+          "dynamics": {
+            "cc11Value": 17,
+            "cc74Value": 47,
+            "attenuationActive": false
+          },
+          "technique": "SUL_TASTO",
+          "bowDirection": "DOWN_BOW",
+          "detuneCents": 0
+        },
+        {
+          "pitch": 64,
+          "startTick": 50888,
+          "durationTicks": 952,
+          "velocity": 26,
+          "role": "LEAD",
+          "dynamics": {
+            "cc11Value": 15,
+            "cc74Value": 46,
+            "attenuationActive": false
+          },
+          "technique": "SUL_TASTO",
+          "bowDirection": "UP_BOW",
+          "detuneCents": 0
+        },
+        {
+          "pitch": 67,
+          "startTick": 51840,
+          "durationTicks": 408,
+          "velocity": 31,
+          "role": "LEAD",
+          "dynamics": {
+            "cc11Value": 17,
+            "cc74Value": 71,
+            "attenuationActive": false
+          },
+          "technique": "DETACHE",
+          "bowDirection": "DOWN_BOW",
+          "detuneCents": 0
+        },
+        {
+          "pitch": 59,
+          "startTick": 52326,
+          "durationTicks": 402,
+          "velocity": 25,
+          "role": "LEAD",
+          "dynamics": {
+            "cc11Value": 17,
+            "cc74Value": 63,
+            "attenuationActive": false
+          },
+          "technique": "DETACHE",
+          "bowDirection": "UP_BOW",
+          "detuneCents": 0
+        },
+        {
+          "pitch": 57,
+          "startTick": 52806,
+          "durationTicks": 954,
+          "velocity": 20,
+          "role": "LEAD",
+          "dynamics": {
+            "cc11Value": 17,
+            "cc74Value": 39,
+            "attenuationActive": false
+          },
+          "technique": "SUL_TASTO",
+          "bowDirection": "UP_BOW",
+          "detuneCents": 0
+        },
+        {
+          "pitch": 62,
+          "startTick": 57610,
+          "durationTicks": 3830,
+          "velocity": 24,
+          "role": "LEAD",
+          "dynamics": {
+            "cc11Value": 17,
+            "cc74Value": 39,
+            "attenuationActive": false
+          },
+          "technique": "SUL_TASTO",
+          "bowDirection": "DOWN_BOW",
+          "detuneCents": 0
+        },
+        {
+          "pitch": 72,
+          "startTick": 61441,
+          "durationTicks": 5763,
+          "velocity": 81,
+          "role": "PAD",
+          "dynamics": {
+            "cc11Value": 94,
+            "cc74Value": 106,
+            "attenuationActive": false
+          },
+          "technique": "LEGATO",
+          "bowDirection": "DOWN_BOW",
+          "detuneCents": 0
+        },
+        {
+          "pitch": 67,
+          "startTick": 61443,
+          "durationTicks": 5872,
+          "velocity": 86,
+          "role": "PAD",
+          "dynamics": {
+            "cc11Value": 98,
+            "cc74Value": 107,
+            "attenuationActive": false
+          },
+          "technique": "LEGATO",
+          "bowDirection": "DOWN_BOW",
+          "detuneCents": 0
+        },
+        {
+          "pitch": 67,
+          "startTick": 67204,
+          "durationTicks": 5871,
+          "velocity": 87,
+          "role": "PAD",
+          "dynamics": {
+            "cc11Value": 98,
+            "cc74Value": 107,
+            "attenuationActive": false
+          },
+          "technique": "LEGATO",
+          "bowDirection": "DOWN_BOW",
+          "detuneCents": 0
+        }
+      ]
+    },
+    {
+      "id": "trk_violins_ii",
+      "name": "Violins II",
+      "family": "strings",
+      "color": "#3b82f6",
+      "role": "violins2",
+      "lowestNote": 55,
+      "highestNote": 91,
+      "locked": false,
+      "muted": false,
+      "soloed": false,
+      "libraryGroupId": null,
+      "midiChannel": 2,
+      "frozen": false,
+      "notes": [
+        {
+          "pitch": 57,
+          "startTick": 0,
+          "durationTicks": 979,
+          "velocity": 78,
+          "role": "OSTINATO",
+          "dynamics": {
+            "cc11Value": 80,
+            "cc74Value": 92,
+            "attenuationActive": false
+          },
+          "technique": "LEGATO",
+          "bowDirection": "DOWN_BOW",
+          "detuneCents": 0
+        },
+        {
+          "pitch": 60,
+          "startTick": 968,
+          "durationTicks": 400,
+          "velocity": 62,
+          "role": "OSTINATO",
+          "dynamics": {
+            "cc11Value": 38,
+            "cc74Value": 71,
+            "attenuationActive": true
+          },
+          "technique": "DETACHE",
+          "bowDirection": "DOWN_BOW",
+          "detuneCents": 0
+        },
+        {
+          "pitch": 62,
+          "startTick": 1443,
+          "durationTicks": 405,
+          "velocity": 71,
+          "role": "OSTINATO",
+          "dynamics": {
+            "cc11Value": 57,
+            "cc74Value": 79,
+            "attenuationActive": true
+          },
+          "technique": "DETACHE",
+          "bowDirection": "UP_BOW",
+          "detuneCents": 0
+        },
+        {
+          "pitch": 65,
+          "startTick": 1925,
+          "durationTicks": 307,
+          "velocity": 93,
+          "role": "OSTINATO",
+          "dynamics": {
+            "cc11Value": 66,
+            "cc74Value": 84,
+            "attenuationActive": true
+          },
+          "technique": "MARTELE",
+          "bowDirection": "DOWN_BOW",
+          "detuneCents": 0
+        },
+        {
+          "pitch": 57,
+          "startTick": 2401,
+          "durationTicks": 978,
+          "velocity": 69,
+          "role": "OSTINATO",
+          "dynamics": {
+            "cc11Value": 70,
+            "cc74Value": 88,
+            "attenuationActive": false
+          },
+          "technique": "LEGATO",
+          "bowDirection": "UP_BOW",
+          "detuneCents": 0
+        },
+        {
+          "pitch": 60,
+          "startTick": 3369,
+          "durationTicks": 399,
+          "velocity": 76,
+          "role": "OSTINATO",
+          "dynamics": {
+            "cc11Value": 57,
+            "cc74Value": 79,
+            "attenuationActive": true
+          },
+          "technique": "DETACHE",
+          "bowDirection": "DOWN_BOW",
+          "detuneCents": 0
+        },
+        {
+          "pitch": 57,
+          "startTick": 3843,
+          "durationTicks": 976,
+          "velocity": 81,
+          "role": "OSTINATO",
+          "dynamics": {
+            "cc11Value": 80,
+            "cc74Value": 92,
+            "attenuationActive": false
+          },
+          "technique": "LEGATO",
+          "bowDirection": "DOWN_BOW",
+          "detuneCents": 0
+        },
+        {
+          "pitch": 60,
+          "startTick": 4810,
+          "durationTicks": 398,
+          "velocity": 63,
+          "role": "OSTINATO",
+          "dynamics": {
+            "cc11Value": 47,
+            "cc74Value": 75,
+            "attenuationActive": true
+          },
+          "technique": "DETACHE",
+          "bowDirection": "DOWN_BOW",
+          "detuneCents": 0
+        },
+        {
+          "pitch": 62,
+          "startTick": 5282,
+          "durationTicks": 406,
+          "velocity": 67,
+          "role": "OSTINATO",
+          "dynamics": {
+            "cc11Value": 57,
+            "cc74Value": 79,
+            "attenuationActive": true
+          },
+          "technique": "DETACHE",
+          "bowDirection": "UP_BOW",
+          "detuneCents": 0
+        },
+        {
+          "pitch": 65,
+          "startTick": 5761,
+          "durationTicks": 311,
+          "velocity": 100,
+          "role": "OSTINATO",
+          "dynamics": {
+            "cc11Value": 80,
+            "cc74Value": 90,
+            "attenuationActive": false
+          },
+          "technique": "MARTELE",
+          "bowDirection": "DOWN_BOW",
+          "detuneCents": 0
+        },
+        {
+          "pitch": 57,
+          "startTick": 6247,
+          "durationTicks": 972,
+          "velocity": 68,
+          "role": "OSTINATO",
+          "dynamics": {
+            "cc11Value": 70,
+            "cc74Value": 88,
+            "attenuationActive": false
+          },
+          "technique": "LEGATO",
+          "bowDirection": "UP_BOW",
+          "detuneCents": 0
+        },
+        {
+          "pitch": 60,
+          "startTick": 7202,
+          "durationTicks": 406,
+          "velocity": 66,
+          "role": "OSTINATO",
+          "dynamics": {
+            "cc11Value": 70,
+            "cc74Value": 84,
+            "attenuationActive": false
+          },
+          "technique": "DETACHE",
+          "bowDirection": "DOWN_BOW",
+          "detuneCents": 0
+        },
+        {
+          "pitch": 55,
+          "startTick": 7683,
+          "durationTicks": 976,
+          "velocity": 83,
+          "role": "OSTINATO",
+          "dynamics": {
+            "cc11Value": 80,
+            "cc74Value": 92,
+            "attenuationActive": false
+          },
+          "technique": "LEGATO",
+          "bowDirection": "DOWN_BOW",
+          "detuneCents": 0
+        },
+        {
+          "pitch": 59,
+          "startTick": 8645,
+          "durationTicks": 403,
+          "velocity": 64,
+          "role": "OSTINATO",
+          "dynamics": {
+            "cc11Value": 57,
+            "cc74Value": 79,
+            "attenuationActive": false
+          },
+          "technique": "DETACHE",
+          "bowDirection": "DOWN_BOW",
+          "detuneCents": 0
+        },
+        {
+          "pitch": 62,
+          "startTick": 9125,
+          "durationTicks": 403,
+          "velocity": 70,
+          "role": "OSTINATO",
+          "dynamics": {
+            "cc11Value": 70,
+            "cc74Value": 84,
+            "attenuationActive": false
+          },
+          "technique": "DETACHE",
+          "bowDirection": "UP_BOW",
+          "detuneCents": 0
+        },
+        {
+          "pitch": 65,
+          "startTick": 9605,
+          "durationTicks": 307,
+          "velocity": 90,
+          "role": "OSTINATO",
+          "dynamics": {
+            "cc11Value": 80,
+            "cc74Value": 90,
+            "attenuationActive": false
+          },
+          "technique": "MARTELE",
+          "bowDirection": "DOWN_BOW",
+          "detuneCents": 0
+        },
+        {
+          "pitch": 55,
+          "startTick": 10081,
+          "durationTicks": 978,
+          "velocity": 76,
+          "role": "OSTINATO",
+          "dynamics": {
+            "cc11Value": 70,
+            "cc74Value": 88,
+            "attenuationActive": false
+          },
+          "technique": "LEGATO",
+          "bowDirection": "UP_BOW",
+          "detuneCents": 0
+        },
+        {
+          "pitch": 59,
+          "startTick": 11042,
+          "durationTicks": 406,
+          "velocity": 69,
+          "role": "OSTINATO",
+          "dynamics": {
+            "cc11Value": 70,
+            "cc74Value": 84,
+            "attenuationActive": false
+          },
+          "technique": "DETACHE",
+          "bowDirection": "DOWN_BOW",
+          "detuneCents": 0
+        },
+        {
+          "pitch": 55,
+          "startTick": 11529,
+          "durationTicks": 970,
+          "velocity": 77,
+          "role": "OSTINATO",
+          "dynamics": {
+            "cc11Value": 80,
+            "cc74Value": 92,
+            "attenuationActive": false
+          },
+          "technique": "LEGATO",
+          "bowDirection": "DOWN_BOW",
+          "detuneCents": 0
+        },
+        {
+          "pitch": 59,
+          "startTick": 12484,
+          "durationTicks": 404,
+          "velocity": 62,
+          "role": "OSTINATO",
+          "dynamics": {
+            "cc11Value": 57,
+            "cc74Value": 79,
+            "attenuationActive": false
+          },
+          "technique": "DETACHE",
+          "bowDirection": "DOWN_BOW",
+          "detuneCents": 0
+        },
+        {
+          "pitch": 62,
+          "startTick": 12968,
+          "durationTicks": 400,
+          "velocity": 69,
+          "role": "OSTINATO",
+          "dynamics": {
+            "cc11Value": 70,
+            "cc74Value": 84,
+            "attenuationActive": false
+          },
+          "technique": "DETACHE",
+          "bowDirection": "UP_BOW",
+          "detuneCents": 0
+        },
+        {
+          "pitch": 65,
+          "startTick": 13446,
+          "durationTicks": 306,
+          "velocity": 97,
+          "role": "OSTINATO",
+          "dynamics": {
+            "cc11Value": 66,
+            "cc74Value": 84,
+            "attenuationActive": true
+          },
+          "technique": "MARTELE",
+          "bowDirection": "DOWN_BOW",
+          "detuneCents": 0
+        },
+        {
+          "pitch": 55,
+          "startTick": 13926,
+          "durationTicks": 973,
+          "velocity": 74,
+          "role": "OSTINATO",
+          "dynamics": {
+            "cc11Value": 70,
+            "cc74Value": 88,
+            "attenuationActive": false
+          },
+          "technique": "LEGATO",
+          "bowDirection": "UP_BOW",
+          "detuneCents": 0
+        },
+        {
+          "pitch": 59,
+          "startTick": 14883,
+          "durationTicks": 405,
+          "velocity": 76,
+          "role": "OSTINATO",
+          "dynamics": {
+            "cc11Value": 70,
+            "cc74Value": 84,
+            "attenuationActive": false
+          },
+          "technique": "DETACHE",
+          "bowDirection": "DOWN_BOW",
+          "detuneCents": 0
+        },
+        {
+          "pitch": 57,
+          "startTick": 15365,
+          "durationTicks": 974,
+          "velocity": 80,
+          "role": "OSTINATO",
+          "dynamics": {
+            "cc11Value": 80,
+            "cc74Value": 92,
+            "attenuationActive": false
+          },
+          "technique": "LEGATO",
+          "bowDirection": "DOWN_BOW",
+          "detuneCents": 0
+        },
+        {
+          "pitch": 60,
+          "startTick": 16323,
+          "durationTicks": 405,
+          "velocity": 59,
+          "role": "OSTINATO",
+          "dynamics": {
+            "cc11Value": 57,
+            "cc74Value": 79,
+            "attenuationActive": false
+          },
+          "technique": "DETACHE",
+          "bowDirection": "UP_BOW",
+          "detuneCents": 0
+        },
+        {
+          "pitch": 62,
+          "startTick": 16803,
+          "durationTicks": 405,
+          "velocity": 67,
+          "role": "OSTINATO",
+          "dynamics": {
+            "cc11Value": 70,
+            "cc74Value": 84,
+            "attenuationActive": false
+          },
+          "technique": "DETACHE",
+          "bowDirection": "DOWN_BOW",
+          "detuneCents": 0
+        },
+        {
+          "pitch": 65,
+          "startTick": 17282,
+          "durationTicks": 310,
+          "velocity": 93,
+          "role": "OSTINATO",
+          "dynamics": {
+            "cc11Value": 80,
+            "cc74Value": 90,
+            "attenuationActive": false
+          },
+          "technique": "MARTELE",
+          "bowDirection": "DOWN_BOW",
+          "detuneCents": 0
+        },
+        {
+          "pitch": 57,
+          "startTick": 17761,
+          "durationTicks": 978,
+          "velocity": 70,
+          "role": "OSTINATO",
+          "dynamics": {
+            "cc11Value": 70,
+            "cc74Value": 88,
+            "attenuationActive": false
+          },
+          "technique": "LEGATO",
+          "bowDirection": "UP_BOW",
+          "detuneCents": 0
+        },
+        {
+          "pitch": 60,
+          "startTick": 18730,
+          "durationTicks": 398,
+          "velocity": 73,
+          "role": "OSTINATO",
+          "dynamics": {
+            "cc11Value": 70,
+            "cc74Value": 84,
+            "attenuationActive": false
+          },
+          "technique": "DETACHE",
+          "bowDirection": "DOWN_BOW",
+          "detuneCents": 0
+        },
+        {
+          "pitch": 57,
+          "startTick": 19203,
+          "durationTicks": 976,
+          "velocity": 80,
+          "role": "OSTINATO",
+          "dynamics": {
+            "cc11Value": 80,
+            "cc74Value": 92,
+            "attenuationActive": false
+          },
+          "technique": "LEGATO",
+          "bowDirection": "DOWN_BOW",
+          "detuneCents": 0
+        },
+        {
+          "pitch": 60,
+          "startTick": 20166,
+          "durationTicks": 402,
+          "velocity": 56,
+          "role": "OSTINATO",
+          "dynamics": {
+            "cc11Value": 57,
+            "cc74Value": 79,
+            "attenuationActive": false
+          },
+          "technique": "DETACHE",
+          "bowDirection": "UP_BOW",
+          "detuneCents": 0
+        },
+        {
+          "pitch": 64,
+          "startTick": 20650,
+          "durationTicks": 398,
+          "velocity": 77,
+          "role": "OSTINATO",
+          "dynamics": {
+            "cc11Value": 70,
+            "cc74Value": 92,
+            "attenuationActive": false
+          },
+          "technique": "DETACHE",
+          "bowDirection": "DOWN_BOW",
+          "detuneCents": 0
+        },
+        {
+          "pitch": 65,
+          "startTick": 21122,
+          "durationTicks": 310,
+          "velocity": 98,
+          "role": "OSTINATO",
+          "dynamics": {
+            "cc11Value": 80,
+            "cc74Value": 90,
+            "attenuationActive": false
+          },
+          "technique": "MARTELE",
+          "bowDirection": "DOWN_BOW",
+          "detuneCents": 0
+        },
+        {
+          "pitch": 57,
+          "startTick": 21605,
+          "durationTicks": 974,
+          "velocity": 75,
+          "role": "OSTINATO",
+          "dynamics": {
+            "cc11Value": 70,
+            "cc74Value": 88,
+            "attenuationActive": false
+          },
+          "technique": "LEGATO",
+          "bowDirection": "UP_BOW",
+          "detuneCents": 0
+        },
+        {
+          "pitch": 60,
+          "startTick": 22560,
+          "durationTicks": 408,
+          "velocity": 70,
+          "role": "OSTINATO",
+          "dynamics": {
+            "cc11Value": 70,
+            "cc74Value": 84,
+            "attenuationActive": false
+          },
+          "technique": "DETACHE",
+          "bowDirection": "DOWN_BOW",
+          "detuneCents": 0
+        },
+        {
+          "pitch": 55,
+          "startTick": 23044,
+          "durationTicks": 975,
+          "velocity": 79,
+          "role": "OSTINATO",
+          "dynamics": {
+            "cc11Value": 80,
+            "cc74Value": 92,
+            "attenuationActive": false
+          },
+          "technique": "LEGATO",
+          "bowDirection": "DOWN_BOW",
+          "detuneCents": 0
+        },
+        {
+          "pitch": 59,
+          "startTick": 24007,
+          "durationTicks": 401,
+          "velocity": 57,
+          "role": "OSTINATO",
+          "dynamics": {
+            "cc11Value": 57,
+            "cc74Value": 79,
+            "attenuationActive": false
+          },
+          "technique": "DETACHE",
+          "bowDirection": "UP_BOW",
+          "detuneCents": 0
+        },
+        {
+          "pitch": 60,
+          "startTick": 24488,
+          "durationTicks": 400,
+          "velocity": 70,
+          "role": "OSTINATO",
+          "dynamics": {
+            "cc11Value": 70,
+            "cc74Value": 84,
+            "attenuationActive": false
+          },
+          "technique": "DETACHE",
+          "bowDirection": "DOWN_BOW",
+          "detuneCents": 0
+        },
+        {
+          "pitch": 64,
+          "startTick": 24966,
+          "durationTicks": 306,
+          "velocity": 99,
+          "role": "OSTINATO",
+          "dynamics": {
+            "cc11Value": 80,
+            "cc74Value": 90,
+            "attenuationActive": false
+          },
+          "technique": "MARTELE",
+          "bowDirection": "DOWN_BOW",
+          "detuneCents": 0
+        },
+        {
+          "pitch": 55,
+          "startTick": 25441,
+          "durationTicks": 978,
+          "velocity": 68,
+          "role": "OSTINATO",
+          "dynamics": {
+            "cc11Value": 70,
+            "cc74Value": 88,
+            "attenuationActive": false
+          },
+          "technique": "LEGATO",
+          "bowDirection": "UP_BOW",
+          "detuneCents": 0
+        },
+        {
+          "pitch": 59,
+          "startTick": 26400,
+          "durationTicks": 408,
+          "velocity": 71,
+          "role": "OSTINATO",
+          "dynamics": {
+            "cc11Value": 70,
+            "cc74Value": 84,
+            "attenuationActive": false
+          },
+          "technique": "DETACHE",
+          "bowDirection": "DOWN_BOW",
+          "detuneCents": 0
+        },
+        {
+          "pitch": 55,
+          "startTick": 26880,
+          "durationTicks": 979,
+          "velocity": 78,
+          "role": "OSTINATO",
+          "dynamics": {
+            "cc11Value": 80,
+            "cc74Value": 92,
+            "attenuationActive": false
+          },
+          "technique": "LEGATO",
+          "bowDirection": "DOWN_BOW",
+          "detuneCents": 0
+        },
+        {
+          "pitch": 57,
+          "startTick": 27840,
+          "durationTicks": 408,
+          "velocity": 55,
+          "role": "OSTINATO",
+          "dynamics": {
+            "cc11Value": 57,
+            "cc74Value": 79,
+            "attenuationActive": false
+          },
+          "technique": "DETACHE",
+          "bowDirection": "DOWN_BOW",
+          "detuneCents": 0
+        },
+        {
+          "pitch": 60,
+          "startTick": 28327,
+          "durationTicks": 401,
+          "velocity": 70,
+          "role": "OSTINATO",
+          "dynamics": {
+            "cc11Value": 57,
+            "cc74Value": 79,
+            "attenuationActive": true
+          },
+          "technique": "DETACHE",
+          "bowDirection": "UP_BOW",
+          "detuneCents": 0
+        },
+        {
+          "pitch": 64,
+          "startTick": 28800,
+          "durationTicks": 312,
+          "velocity": 95,
+          "role": "OSTINATO",
+          "dynamics": {
+            "cc11Value": 54,
+            "cc74Value": 80,
+            "attenuationActive": true
+          },
+          "technique": "MARTELE",
+          "bowDirection": "DOWN_BOW",
+          "detuneCents": 0
+        },
+        {
+          "pitch": 55,
+          "startTick": 29286,
+          "durationTicks": 973,
+          "velocity": 76,
+          "role": "OSTINATO",
+          "dynamics": {
+            "cc11Value": 70,
+            "cc74Value": 88,
+            "attenuationActive": false
+          },
+          "technique": "LEGATO",
+          "bowDirection": "UP_BOW",
+          "detuneCents": 0
+        },
+        {
+          "pitch": 57,
+          "startTick": 30246,
+          "durationTicks": 402,
+          "velocity": 69,
+          "role": "OSTINATO",
+          "dynamics": {
+            "cc11Value": 70,
+            "cc74Value": 84,
+            "attenuationActive": false
+          },
+          "technique": "DETACHE",
+          "bowDirection": "DOWN_BOW",
+          "detuneCents": 0
+        },
+        {
+          "pitch": 57,
+          "startTick": 30723,
+          "durationTicks": 93,
+          "velocity": 91,
+          "role": "OSTINATO",
+          "dynamics": {
+            "cc11Value": 96,
+            "cc74Value": 94,
+            "attenuationActive": false
+          },
+          "technique": "SPICCATO",
+          "bowDirection": "DOWN_BOW",
+          "detuneCents": 0
+        },
+        {
+          "pitch": 60,
+          "startTick": 30969,
+          "durationTicks": 87,
+          "velocity": 88,
+          "role": "OSTINATO",
+          "dynamics": {
+            "cc11Value": 55,
+            "cc74Value": 78,
+            "attenuationActive": true
+          },
+          "technique": "SPICCATO",
+          "bowDirection": "UP_BOW",
+          "detuneCents": 0
+        },
+        {
+          "pitch": 62,
+          "startTick": 31202,
+          "durationTicks": 94,
+          "velocity": 84,
+          "role": "OSTINATO",
+          "dynamics": {
+            "cc11Value": 55,
+            "cc74Value": 78,
+            "attenuationActive": true
+          },
+          "technique": "SPICCATO",
+          "bowDirection": "DOWN_BOW",
+          "detuneCents": 0
+        },
+        {
+          "pitch": 65,
+          "startTick": 31450,
+          "durationTicks": 86,
+          "velocity": 98,
+          "role": "OSTINATO",
+          "dynamics": {
+            "cc11Value": 55,
+            "cc74Value": 86,
+            "attenuationActive": true
+          },
+          "technique": "SPICCATO",
+          "bowDirection": "UP_BOW",
+          "detuneCents": 0
+        },
+        {
+          "pitch": 57,
+          "startTick": 31689,
+          "durationTicks": 87,
+          "velocity": 76,
+          "role": "OSTINATO",
+          "dynamics": {
+            "cc11Value": 73,
+            "cc74Value": 85,
+            "attenuationActive": false
+          },
+          "technique": "SPICCATO",
+          "bowDirection": "DOWN_BOW",
+          "detuneCents": 0
+        },
+        {
+          "pitch": 60,
+          "startTick": 31926,
+          "durationTicks": 90,
+          "velocity": 90,
+          "role": "OSTINATO",
+          "dynamics": {
+            "cc11Value": 55,
+            "cc74Value": 78,
+            "attenuationActive": true
+          },
+          "technique": "SPICCATO",
+          "bowDirection": "DOWN_BOW",
+          "detuneCents": 0
+        },
+        {
+          "pitch": 62,
+          "startTick": 32163,
+          "durationTicks": 93,
+          "velocity": 84,
+          "role": "OSTINATO",
+          "dynamics": {
+            "cc11Value": 55,
+            "cc74Value": 78,
+            "attenuationActive": true
+          },
+          "technique": "SPICCATO",
+          "bowDirection": "UP_BOW",
+          "detuneCents": 0
+        },
+        {
+          "pitch": 57,
+          "startTick": 32401,
+          "durationTicks": 95,
+          "velocity": 89,
+          "role": "OSTINATO",
+          "dynamics": {
+            "cc11Value": 86,
+            "cc74Value": 90,
+            "attenuationActive": false
+          },
+          "technique": "SPICCATO",
+          "bowDirection": "DOWN_BOW",
+          "detuneCents": 0
+        },
+        {
+          "pitch": 55,
+          "startTick": 34566,
+          "durationTicks": 90,
+          "velocity": 96,
+          "role": "OSTINATO",
+          "dynamics": {
+            "cc11Value": 96,
+            "cc74Value": 94,
+            "attenuationActive": false
+          },
+          "technique": "SPICCATO",
+          "bowDirection": "DOWN_BOW",
+          "detuneCents": 0
+        },
+        {
+          "pitch": 57,
+          "startTick": 34804,
+          "durationTicks": 92,
+          "velocity": 88,
+          "role": "OSTINATO",
+          "dynamics": {
+            "cc11Value": 86,
+            "cc74Value": 90,
+            "attenuationActive": false
+          },
+          "technique": "SPICCATO",
+          "bowDirection": "UP_BOW",
+          "detuneCents": 0
+        },
+        {
+          "pitch": 60,
+          "startTick": 35045,
+          "durationTicks": 91,
+          "velocity": 82,
+          "role": "OSTINATO",
+          "dynamics": {
+            "cc11Value": 51,
+            "cc74Value": 76,
+            "attenuationActive": true
+          },
+          "technique": "SPICCATO",
+          "bowDirection": "DOWN_BOW",
+          "detuneCents": 0
+        },
+        {
+          "pitch": 64,
+          "startTick": 35285,
+          "durationTicks": 91,
+          "velocity": 89,
+          "role": "OSTINATO",
+          "dynamics": {
+            "cc11Value": 51,
+            "cc74Value": 84,
+            "attenuationActive": true
+          },
+          "technique": "SPICCATO",
+          "bowDirection": "UP_BOW",
+          "detuneCents": 0
+        },
+        {
+          "pitch": 55,
+          "startTick": 35529,
+          "durationTicks": 87,
+          "velocity": 80,
+          "role": "OSTINATO",
+          "dynamics": {
+            "cc11Value": 73,
+            "cc74Value": 85,
+            "attenuationActive": false
+          },
+          "technique": "SPICCATO",
+          "bowDirection": "DOWN_BOW",
+          "detuneCents": 0
+        },
+        {
+          "pitch": 57,
+          "startTick": 35764,
+          "durationTicks": 92,
+          "velocity": 84,
+          "role": "OSTINATO",
+          "dynamics": {
+            "cc11Value": 86,
+            "cc74Value": 90,
+            "attenuationActive": false
+          },
+          "technique": "SPICCATO",
+          "bowDirection": "UP_BOW",
+          "detuneCents": 0
+        },
+        {
+          "pitch": 60,
+          "startTick": 36006,
+          "durationTicks": 90,
+          "velocity": 91,
+          "role": "OSTINATO",
+          "dynamics": {
+            "cc11Value": 51,
+            "cc74Value": 76,
+            "attenuationActive": true
+          },
+          "technique": "SPICCATO",
+          "bowDirection": "DOWN_BOW",
+          "detuneCents": 0
+        },
+        {
+          "pitch": 64,
+          "startTick": 36242,
+          "durationTicks": 94,
+          "velocity": 93,
+          "role": "OSTINATO",
+          "dynamics": {
+            "cc11Value": 51,
+            "cc74Value": 84,
+            "attenuationActive": true
+          },
+          "technique": "SPICCATO",
+          "bowDirection": "UP_BOW",
+          "detuneCents": 0
+        },
+        {
+          "pitch": 57,
+          "startTick": 38403,
+          "durationTicks": 93,
+          "velocity": 96,
+          "role": "OSTINATO",
+          "dynamics": {
+            "cc11Value": 96,
+            "cc74Value": 94,
+            "attenuationActive": false
+          },
+          "technique": "SPICCATO",
+          "bowDirection": "DOWN_BOW",
+          "detuneCents": 0
+        },
+        {
+          "pitch": 60,
+          "startTick": 38646,
+          "durationTicks": 90,
+          "velocity": 90,
+          "role": "OSTINATO",
+          "dynamics": {
+            "cc11Value": 55,
+            "cc74Value": 78,
+            "attenuationActive": true
+          },
+          "technique": "SPICCATO",
+          "bowDirection": "UP_BOW",
+          "detuneCents": 0
+        },
+        {
+          "pitch": 62,
+          "startTick": 38885,
+          "durationTicks": 91,
+          "velocity": 82,
+          "role": "OSTINATO",
+          "dynamics": {
+            "cc11Value": 55,
+            "cc74Value": 78,
+            "attenuationActive": true
+          },
+          "technique": "SPICCATO",
+          "bowDirection": "DOWN_BOW",
+          "detuneCents": 0
+        },
+        {
+          "pitch": 65,
+          "startTick": 39121,
+          "durationTicks": 95,
+          "velocity": 91,
+          "role": "OSTINATO",
+          "dynamics": {
+            "cc11Value": 55,
+            "cc74Value": 86,
+            "attenuationActive": true
+          },
+          "technique": "SPICCATO",
+          "bowDirection": "UP_BOW",
+          "detuneCents": 0
+        },
+        {
+          "pitch": 57,
+          "startTick": 39365,
+          "durationTicks": 91,
+          "velocity": 72,
+          "role": "OSTINATO",
+          "dynamics": {
+            "cc11Value": 73,
+            "cc74Value": 85,
+            "attenuationActive": false
+          },
+          "technique": "SPICCATO",
+          "bowDirection": "DOWN_BOW",
+          "detuneCents": 0
+        },
+        {
+          "pitch": 60,
+          "startTick": 39603,
+          "durationTicks": 93,
+          "velocity": 88,
+          "role": "OSTINATO",
+          "dynamics": {
+            "cc11Value": 55,
+            "cc74Value": 78,
+            "attenuationActive": true
+          },
+          "technique": "SPICCATO",
+          "bowDirection": "DOWN_BOW",
+          "detuneCents": 0
+        },
+        {
+          "pitch": 62,
+          "startTick": 39847,
+          "durationTicks": 89,
+          "velocity": 81,
+          "role": "OSTINATO",
+          "dynamics": {
+            "cc11Value": 55,
+            "cc74Value": 78,
+            "attenuationActive": true
+          },
+          "technique": "SPICCATO",
+          "bowDirection": "UP_BOW",
+          "detuneCents": 0
+        },
+        {
+          "pitch": 57,
+          "startTick": 40082,
+          "durationTicks": 94,
+          "velocity": 90,
+          "role": "OSTINATO",
+          "dynamics": {
+            "cc11Value": 86,
+            "cc74Value": 90,
+            "attenuationActive": false
+          },
+          "technique": "SPICCATO",
+          "bowDirection": "DOWN_BOW",
+          "detuneCents": 0
+        },
+        {
+          "pitch": 55,
+          "startTick": 42249,
+          "durationTicks": 87,
+          "velocity": 90,
+          "role": "OSTINATO",
+          "dynamics": {
+            "cc11Value": 96,
+            "cc74Value": 94,
+            "attenuationActive": false
+          },
+          "technique": "SPICCATO",
+          "bowDirection": "DOWN_BOW",
+          "detuneCents": 0
+        },
+        {
+          "pitch": 60,
+          "startTick": 42480,
+          "durationTicks": 96,
+          "velocity": 82,
+          "role": "OSTINATO",
+          "dynamics": {
+            "cc11Value": 55,
+            "cc74Value": 78,
+            "attenuationActive": true
+          },
+          "technique": "SPICCATO",
+          "bowDirection": "UP_BOW",
+          "detuneCents": 0
+        },
+        {
+          "pitch": 62,
+          "startTick": 42726,
+          "durationTicks": 90,
+          "velocity": 86,
+          "role": "OSTINATO",
+          "dynamics": {
+            "cc11Value": 55,
+            "cc74Value": 78,
+            "attenuationActive": true
+          },
+          "technique": "SPICCATO",
+          "bowDirection": "DOWN_BOW",
+          "detuneCents": 0
+        },
+        {
+          "pitch": 64,
+          "startTick": 42967,
+          "durationTicks": 89,
+          "velocity": 96,
+          "role": "OSTINATO",
+          "dynamics": {
+            "cc11Value": 55,
+            "cc74Value": 86,
+            "attenuationActive": true
+          },
+          "technique": "SPICCATO",
+          "bowDirection": "UP_BOW",
+          "detuneCents": 0
+        },
+        {
+          "pitch": 55,
+          "startTick": 43203,
+          "durationTicks": 93,
+          "velocity": 73,
+          "role": "OSTINATO",
+          "dynamics": {
+            "cc11Value": 73,
+            "cc74Value": 85,
+            "attenuationActive": false
+          },
+          "technique": "SPICCATO",
+          "bowDirection": "DOWN_BOW",
+          "detuneCents": 0
+        },
+        {
+          "pitch": 60,
+          "startTick": 43445,
+          "durationTicks": 91,
+          "velocity": 83,
+          "role": "OSTINATO",
+          "dynamics": {
+            "cc11Value": 55,
+            "cc74Value": 78,
+            "attenuationActive": true
+          },
+          "technique": "SPICCATO",
+          "bowDirection": "DOWN_BOW",
+          "detuneCents": 0
+        },
+        {
+          "pitch": 62,
+          "startTick": 43687,
+          "durationTicks": 89,
+          "velocity": 81,
+          "role": "OSTINATO",
+          "dynamics": {
+            "cc11Value": 55,
+            "cc74Value": 78,
+            "attenuationActive": true
+          },
+          "technique": "SPICCATO",
+          "bowDirection": "UP_BOW",
+          "detuneCents": 0
+        },
+        {
+          "pitch": 64,
+          "startTick": 43926,
+          "durationTicks": 90,
+          "velocity": 89,
+          "role": "OSTINATO",
+          "dynamics": {
+            "cc11Value": 55,
+            "cc74Value": 86,
+            "attenuationActive": true
+          },
+          "technique": "SPICCATO",
+          "bowDirection": "DOWN_BOW",
+          "detuneCents": 0
+        },
+        {
+          "pitch": 57,
+          "startTick": 46085,
+          "durationTicks": 91,
+          "velocity": 99,
+          "role": "OSTINATO",
+          "dynamics": {
+            "cc11Value": 96,
+            "cc74Value": 94,
+            "attenuationActive": false
+          },
+          "technique": "SPICCATO",
+          "bowDirection": "DOWN_BOW",
+          "detuneCents": 0
+        },
+        {
+          "pitch": 58,
+          "startTick": 46327,
+          "durationTicks": 89,
+          "velocity": 81,
+          "role": "OSTINATO",
+          "dynamics": {
+            "cc11Value": 86,
+            "cc74Value": 90,
+            "attenuationActive": false
+          },
+          "technique": "SPICCATO",
+          "bowDirection": "UP_BOW",
+          "detuneCents": 0
+        },
+        {
+          "pitch": 62,
+          "startTick": 46566,
+          "durationTicks": 90,
+          "velocity": 89,
+          "role": "OSTINATO",
+          "dynamics": {
+            "cc11Value": 55,
+            "cc74Value": 78,
+            "attenuationActive": true
+          },
+          "technique": "SPICCATO",
+          "bowDirection": "DOWN_BOW",
+          "detuneCents": 0
+        },
+        {
+          "pitch": 65,
+          "startTick": 46803,
+          "durationTicks": 93,
+          "velocity": 96,
+          "role": "OSTINATO",
+          "dynamics": {
+            "cc11Value": 55,
+            "cc74Value": 86,
+            "attenuationActive": true
+          },
+          "technique": "SPICCATO",
+          "bowDirection": "UP_BOW",
+          "detuneCents": 0
+        },
+        {
+          "pitch": 57,
+          "startTick": 47042,
+          "durationTicks": 94,
+          "velocity": 70,
+          "role": "OSTINATO",
+          "dynamics": {
+            "cc11Value": 73,
+            "cc74Value": 85,
+            "attenuationActive": false
+          },
+          "technique": "SPICCATO",
+          "bowDirection": "DOWN_BOW",
+          "detuneCents": 0
+        },
+        {
+          "pitch": 58,
+          "startTick": 47290,
+          "durationTicks": 86,
+          "velocity": 90,
+          "role": "OSTINATO",
+          "dynamics": {
+            "cc11Value": 86,
+            "cc74Value": 90,
+            "attenuationActive": false
+          },
+          "technique": "SPICCATO",
+          "bowDirection": "DOWN_BOW",
+          "detuneCents": 0
+        },
+        {
+          "pitch": 62,
+          "startTick": 47527,
+          "durationTicks": 89,
+          "velocity": 90,
+          "role": "OSTINATO",
+          "dynamics": {
+            "cc11Value": 55,
+            "cc74Value": 78,
+            "attenuationActive": true
+          },
+          "technique": "SPICCATO",
+          "bowDirection": "UP_BOW",
+          "detuneCents": 0
+        },
+        {
+          "pitch": 57,
+          "startTick": 47761,
+          "durationTicks": 95,
+          "velocity": 90,
+          "role": "OSTINATO",
+          "dynamics": {
+            "cc11Value": 86,
+            "cc74Value": 90,
+            "attenuationActive": false
+          },
+          "technique": "SPICCATO",
+          "bowDirection": "DOWN_BOW",
+          "detuneCents": 0
+        },
+        {
+          "pitch": 57,
+          "startTick": 49921,
+          "durationTicks": 95,
+          "velocity": 95,
+          "role": "OSTINATO",
+          "dynamics": {
+            "cc11Value": 96,
+            "cc74Value": 94,
+            "attenuationActive": false
+          },
+          "technique": "SPICCATO",
+          "bowDirection": "DOWN_BOW",
+          "detuneCents": 0
+        },
+        {
+          "pitch": 60,
+          "startTick": 50162,
+          "durationTicks": 94,
+          "velocity": 82,
+          "role": "OSTINATO",
+          "dynamics": {
+            "cc11Value": 51,
+            "cc74Value": 76,
+            "attenuationActive": true
+          },
+          "technique": "SPICCATO",
+          "bowDirection": "UP_BOW",
+          "detuneCents": 0
+        },
+        {
+          "pitch": 62,
+          "startTick": 50407,
+          "durationTicks": 89,
+          "velocity": 90,
+          "role": "OSTINATO",
+          "dynamics": {
+            "cc11Value": 51,
+            "cc74Value": 76,
+            "attenuationActive": true
+          },
+          "technique": "SPICCATO",
+          "bowDirection": "DOWN_BOW",
+          "detuneCents": 0
+        },
+        {
+          "pitch": 65,
+          "startTick": 50647,
+          "durationTicks": 89,
+          "velocity": 95,
+          "role": "OSTINATO",
+          "dynamics": {
+            "cc11Value": 51,
+            "cc74Value": 84,
+            "attenuationActive": true
+          },
+          "technique": "SPICCATO",
+          "bowDirection": "UP_BOW",
+          "detuneCents": 0
+        },
+        {
+          "pitch": 57,
+          "startTick": 50884,
+          "durationTicks": 92,
+          "velocity": 70,
+          "role": "OSTINATO",
+          "dynamics": {
+            "cc11Value": 73,
+            "cc74Value": 85,
+            "attenuationActive": false
+          },
+          "technique": "SPICCATO",
+          "bowDirection": "DOWN_BOW",
+          "detuneCents": 0
+        },
+        {
+          "pitch": 60,
+          "startTick": 51123,
+          "durationTicks": 93,
+          "velocity": 89,
+          "role": "OSTINATO",
+          "dynamics": {
+            "cc11Value": 51,
+            "cc74Value": 76,
+            "attenuationActive": true
+          },
+          "technique": "SPICCATO",
+          "bowDirection": "DOWN_BOW",
+          "detuneCents": 0
+        },
+        {
+          "pitch": 62,
+          "startTick": 51364,
+          "durationTicks": 92,
+          "velocity": 84,
+          "role": "OSTINATO",
+          "dynamics": {
+            "cc11Value": 51,
+            "cc74Value": 76,
+            "attenuationActive": true
+          },
+          "technique": "SPICCATO",
+          "bowDirection": "UP_BOW",
+          "detuneCents": 0
+        },
+        {
+          "pitch": 57,
+          "startTick": 51608,
+          "durationTicks": 88,
+          "velocity": 83,
+          "role": "OSTINATO",
+          "dynamics": {
+            "cc11Value": 86,
+            "cc74Value": 90,
+            "attenuationActive": false
+          },
+          "technique": "SPICCATO",
+          "bowDirection": "DOWN_BOW",
+          "detuneCents": 0
+        },
+        {
+          "pitch": 55,
+          "startTick": 53768,
+          "durationTicks": 88,
+          "velocity": 97,
+          "role": "OSTINATO",
+          "dynamics": {
+            "cc11Value": 96,
+            "cc74Value": 94,
+            "attenuationActive": false
+          },
+          "technique": "SPICCATO",
+          "bowDirection": "DOWN_BOW",
+          "detuneCents": 0
+        },
+        {
+          "pitch": 57,
+          "startTick": 54008,
+          "durationTicks": 88,
+          "velocity": 81,
+          "role": "OSTINATO",
+          "dynamics": {
+            "cc11Value": 86,
+            "cc74Value": 90,
+            "attenuationActive": false
+          },
+          "technique": "SPICCATO",
+          "bowDirection": "UP_BOW",
+          "detuneCents": 0
+        },
+        {
+          "pitch": 60,
+          "startTick": 54249,
+          "durationTicks": 87,
+          "velocity": 81,
+          "role": "OSTINATO",
+          "dynamics": {
+            "cc11Value": 68,
+            "cc74Value": 83,
+            "attenuationActive": true
+          },
+          "technique": "SPICCATO",
+          "bowDirection": "DOWN_BOW",
+          "detuneCents": 0
+        },
+        {
+          "pitch": 64,
+          "startTick": 54481,
+          "durationTicks": 95,
+          "velocity": 94,
+          "role": "OSTINATO",
+          "dynamics": {
+            "cc11Value": 68,
+            "cc74Value": 91,
+            "attenuationActive": true
+          },
+          "technique": "SPICCATO",
+          "bowDirection": "UP_BOW",
+          "detuneCents": 0
+        },
+        {
+          "pitch": 55,
+          "startTick": 54727,
+          "durationTicks": 89,
+          "velocity": 73,
+          "role": "OSTINATO",
+          "dynamics": {
+            "cc11Value": 73,
+            "cc74Value": 85,
+            "attenuationActive": false
+          },
+          "technique": "SPICCATO",
+          "bowDirection": "DOWN_BOW",
+          "detuneCents": 0
+        },
+        {
+          "pitch": 57,
+          "startTick": 54968,
+          "durationTicks": 88,
+          "velocity": 88,
+          "role": "OSTINATO",
+          "dynamics": {
+            "cc11Value": 86,
+            "cc74Value": 90,
+            "attenuationActive": false
+          },
+          "technique": "SPICCATO",
+          "bowDirection": "UP_BOW",
+          "detuneCents": 0
+        },
+        {
+          "pitch": 60,
+          "startTick": 55201,
+          "durationTicks": 95,
+          "velocity": 90,
+          "role": "OSTINATO",
+          "dynamics": {
+            "cc11Value": 68,
+            "cc74Value": 83,
+            "attenuationActive": true
+          },
+          "technique": "SPICCATO",
+          "bowDirection": "DOWN_BOW",
+          "detuneCents": 0
+        },
+        {
+          "pitch": 64,
+          "startTick": 55446,
+          "durationTicks": 90,
+          "velocity": 99,
+          "role": "OSTINATO",
+          "dynamics": {
+            "cc11Value": 68,
+            "cc74Value": 91,
+            "attenuationActive": true
+          },
+          "technique": "SPICCATO",
+          "bowDirection": "UP_BOW",
+          "detuneCents": 0
+        },
+        {
+          "pitch": 57,
+          "startTick": 57610,
+          "durationTicks": 86,
+          "velocity": 102,
+          "role": "OSTINATO",
+          "dynamics": {
+            "cc11Value": 99,
+            "cc74Value": 96,
+            "attenuationActive": false
+          },
+          "technique": "SPICCATO",
+          "bowDirection": "DOWN_BOW",
+          "detuneCents": 0
+        },
+        {
+          "pitch": 62,
+          "startTick": 57845,
+          "durationTicks": 91,
+          "velocity": 92,
+          "role": "OSTINATO",
+          "dynamics": {
+            "cc11Value": 57,
+            "cc74Value": 79,
+            "attenuationActive": true
+          },
+          "technique": "SPICCATO",
+          "bowDirection": "UP_BOW",
+          "detuneCents": 0
+        },
+        {
+          "pitch": 65,
+          "startTick": 58083,
+          "durationTicks": 93,
+          "velocity": 96,
+          "role": "OSTINATO",
+          "dynamics": {
+            "cc11Value": 57,
+            "cc74Value": 87,
+            "attenuationActive": true
+          },
+          "technique": "SPICCATO",
+          "bowDirection": "DOWN_BOW",
+          "detuneCents": 0
+        },
+        {
+          "pitch": 57,
+          "startTick": 58328,
+          "durationTicks": 88,
+          "velocity": 91,
+          "role": "OSTINATO",
+          "dynamics": {
+            "cc11Value": 89,
+            "cc74Value": 92,
+            "attenuationActive": false
+          },
+          "technique": "SPICCATO",
+          "bowDirection": "UP_BOW",
+          "detuneCents": 0
+        },
+        {
+          "pitch": 62,
+          "startTick": 58563,
+          "durationTicks": 93,
+          "velocity": 77,
+          "role": "OSTINATO",
+          "dynamics": {
+            "cc11Value": 49,
+            "cc74Value": 76,
+            "attenuationActive": true
+          },
+          "technique": "SPICCATO",
+          "bowDirection": "DOWN_BOW",
+          "detuneCents": 0
+        },
+        {
+          "pitch": 57,
+          "startTick": 58809,
+          "durationTicks": 87,
+          "velocity": 92,
+          "role": "OSTINATO",
+          "dynamics": {
+            "cc11Value": 89,
+            "cc74Value": 92,
+            "attenuationActive": false
+          },
+          "technique": "SPICCATO",
+          "bowDirection": "UP_BOW",
+          "detuneCents": 0
+        },
+        {
+          "pitch": 62,
+          "startTick": 59040,
+          "durationTicks": 96,
+          "velocity": 84,
+          "role": "OSTINATO",
+          "dynamics": {
+            "cc11Value": 57,
+            "cc74Value": 79,
+            "attenuationActive": true
+          },
+          "technique": "SPICCATO",
+          "bowDirection": "DOWN_BOW",
+          "detuneCents": 0
+        },
+        {
+          "pitch": 65,
+          "startTick": 59286,
+          "durationTicks": 90,
+          "velocity": 99,
+          "role": "OSTINATO",
+          "dynamics": {
+            "cc11Value": 57,
+            "cc74Value": 87,
+            "attenuationActive": true
+          },
+          "technique": "SPICCATO",
+          "bowDirection": "UP_BOW",
+          "detuneCents": 0
+        },
+        {
+          "pitch": 67,
+          "startTick": 72963,
+          "durationTicks": 309,
+          "velocity": 112,
+          "role": "OSTINATO",
+          "dynamics": {
+            "cc11Value": 81,
+            "cc74Value": 90,
+            "attenuationActive": true
+          },
+          "technique": "MARTELE",
+          "bowDirection": "DOWN_BOW",
+          "detuneCents": 0
+        },
+        {
+          "pitch": 60,
+          "startTick": 73444,
+          "durationTicks": 308,
+          "velocity": 95,
+          "role": "OSTINATO",
+          "dynamics": {
+            "cc11Value": 89,
+            "cc74Value": 86,
+            "attenuationActive": false
+          },
+          "technique": "MARTELE",
+          "bowDirection": "UP_BOW",
+          "detuneCents": 0
+        },
+        {
+          "pitch": 64,
+          "startTick": 73927,
+          "durationTicks": 401,
+          "velocity": 88,
+          "role": "OSTINATO",
+          "dynamics": {
+            "cc11Value": 62,
+            "cc74Value": 89,
+            "attenuationActive": true
+          },
+          "technique": "DETACHE",
+          "bowDirection": "DOWN_BOW",
+          "detuneCents": 0
+        },
+        {
+          "pitch": 67,
+          "startTick": 74402,
+          "durationTicks": 310,
+          "velocity": 98,
+          "role": "OSTINATO",
+          "dynamics": {
+            "cc11Value": 73,
+            "cc74Value": 87,
+            "attenuationActive": true
+          },
+          "technique": "MARTELE",
+          "bowDirection": "UP_BOW",
+          "detuneCents": 0
+        },
+        {
+          "pitch": 55,
+          "startTick": 76807,
+          "durationTicks": 305,
+          "velocity": 102,
+          "role": "OSTINATO",
+          "dynamics": {
+            "cc11Value": 99,
+            "cc74Value": 90,
+            "attenuationActive": false
+          },
+          "technique": "MARTELE",
+          "bowDirection": "DOWN_BOW",
+          "detuneCents": 0
+        },
+        {
+          "pitch": 60,
+          "startTick": 77281,
+          "durationTicks": 311,
+          "velocity": 91,
+          "role": "OSTINATO",
+          "dynamics": {
+            "cc11Value": 73,
+            "cc74Value": 79,
+            "attenuationActive": true
+          },
+          "technique": "MARTELE",
+          "bowDirection": "UP_BOW",
+          "detuneCents": 0
+        },
+        {
+          "pitch": 64,
+          "startTick": 77760,
+          "durationTicks": 408,
+          "velocity": 85,
+          "role": "OSTINATO",
+          "dynamics": {
+            "cc11Value": 62,
+            "cc74Value": 89,
+            "attenuationActive": true
+          },
+          "technique": "DETACHE",
+          "bowDirection": "DOWN_BOW",
+          "detuneCents": 0
+        },
+        {
+          "pitch": 67,
+          "startTick": 78244,
+          "durationTicks": 308,
+          "velocity": 107,
+          "role": "OSTINATO",
+          "dynamics": {
+            "cc11Value": 73,
+            "cc74Value": 87,
+            "attenuationActive": true
+          },
+          "technique": "MARTELE",
+          "bowDirection": "UP_BOW",
+          "detuneCents": 0
+        },
+        {
+          "pitch": 55,
+          "startTick": 80647,
+          "durationTicks": 305,
+          "velocity": 107,
+          "role": "OSTINATO",
+          "dynamics": {
+            "cc11Value": 99,
+            "cc74Value": 90,
+            "attenuationActive": false
+          },
+          "technique": "MARTELE",
+          "bowDirection": "DOWN_BOW",
+          "detuneCents": 0
+        },
+        {
+          "pitch": 60,
+          "startTick": 81127,
+          "durationTicks": 305,
+          "velocity": 99,
+          "role": "OSTINATO",
+          "dynamics": {
+            "cc11Value": 73,
+            "cc74Value": 79,
+            "attenuationActive": true
+          },
+          "technique": "MARTELE",
+          "bowDirection": "UP_BOW",
+          "detuneCents": 0
+        },
+        {
+          "pitch": 64,
+          "startTick": 81606,
+          "durationTicks": 402,
+          "velocity": 82,
+          "role": "OSTINATO",
+          "dynamics": {
+            "cc11Value": 76,
+            "cc74Value": 94,
+            "attenuationActive": false
+          },
+          "technique": "DETACHE",
+          "bowDirection": "DOWN_BOW",
+          "detuneCents": 0
+        },
+        {
+          "pitch": 67,
+          "startTick": 82089,
+          "durationTicks": 303,
+          "velocity": 102,
+          "role": "OSTINATO",
+          "dynamics": {
+            "cc11Value": 89,
+            "cc74Value": 94,
+            "attenuationActive": false
+          },
+          "technique": "MARTELE",
+          "bowDirection": "UP_BOW",
+          "detuneCents": 0
+        },
+        {
+          "pitch": 55,
+          "startTick": 84488,
+          "durationTicks": 304,
+          "velocity": 104,
+          "role": "OSTINATO",
+          "dynamics": {
+            "cc11Value": 99,
+            "cc74Value": 90,
+            "attenuationActive": false
+          },
+          "technique": "MARTELE",
+          "bowDirection": "DOWN_BOW",
+          "detuneCents": 0
+        },
+        {
+          "pitch": 60,
+          "startTick": 84966,
+          "durationTicks": 306,
+          "velocity": 94,
+          "role": "OSTINATO",
+          "dynamics": {
+            "cc11Value": 89,
+            "cc74Value": 86,
+            "attenuationActive": false
+          },
+          "technique": "MARTELE",
+          "bowDirection": "UP_BOW",
+          "detuneCents": 0
+        },
+        {
+          "pitch": 64,
+          "startTick": 85445,
+          "durationTicks": 403,
+          "velocity": 80,
+          "role": "OSTINATO",
+          "dynamics": {
+            "cc11Value": 62,
+            "cc74Value": 89,
+            "attenuationActive": true
+          },
+          "technique": "DETACHE",
+          "bowDirection": "DOWN_BOW",
+          "detuneCents": 0
+        },
+        {
+          "pitch": 67,
+          "startTick": 85922,
+          "durationTicks": 310,
+          "velocity": 104,
+          "role": "OSTINATO",
+          "dynamics": {
+            "cc11Value": 73,
+            "cc74Value": 87,
+            "attenuationActive": true
+          },
+          "technique": "MARTELE",
+          "bowDirection": "UP_BOW",
+          "detuneCents": 0
+        },
+        {
+          "pitch": 55,
+          "startTick": 88321,
+          "durationTicks": 311,
+          "velocity": 101,
+          "role": "OSTINATO",
+          "dynamics": {
+            "cc11Value": 99,
+            "cc74Value": 90,
+            "attenuationActive": false
+          },
+          "technique": "MARTELE",
+          "bowDirection": "DOWN_BOW",
+          "detuneCents": 0
+        },
+        {
+          "pitch": 60,
+          "startTick": 88804,
+          "durationTicks": 308,
+          "velocity": 98,
+          "role": "OSTINATO",
+          "dynamics": {
+            "cc11Value": 89,
+            "cc74Value": 86,
+            "attenuationActive": false
+          },
+          "technique": "MARTELE",
+          "bowDirection": "UP_BOW",
+          "detuneCents": 0
+        },
+        {
+          "pitch": 64,
+          "startTick": 89288,
+          "durationTicks": 400,
+          "velocity": 79,
+          "role": "OSTINATO",
+          "dynamics": {
+            "cc11Value": 76,
+            "cc74Value": 94,
+            "attenuationActive": false
+          },
+          "technique": "DETACHE",
+          "bowDirection": "DOWN_BOW",
+          "detuneCents": 0
+        },
+        {
+          "pitch": 67,
+          "startTick": 89763,
+          "durationTicks": 309,
+          "velocity": 103,
+          "role": "OSTINATO",
+          "dynamics": {
+            "cc11Value": 89,
+            "cc74Value": 94,
+            "attenuationActive": false
+          },
+          "technique": "MARTELE",
+          "bowDirection": "UP_BOW",
+          "detuneCents": 0
+        },
+        {
+          "pitch": 55,
+          "startTick": 92169,
+          "durationTicks": 303,
+          "velocity": 99,
+          "role": "OSTINATO",
+          "dynamics": {
+            "cc11Value": 99,
+            "cc74Value": 90,
+            "attenuationActive": false
+          },
+          "technique": "MARTELE",
+          "bowDirection": "DOWN_BOW",
+          "detuneCents": 0
+        },
+        {
+          "pitch": 60,
+          "startTick": 92650,
+          "durationTicks": 302,
+          "velocity": 98,
+          "role": "OSTINATO",
+          "dynamics": {
+            "cc11Value": 89,
+            "cc74Value": 86,
+            "attenuationActive": false
+          },
+          "technique": "MARTELE",
+          "bowDirection": "UP_BOW",
+          "detuneCents": 0
+        },
+        {
+          "pitch": 64,
+          "startTick": 93126,
+          "durationTicks": 402,
+          "velocity": 79,
+          "role": "OSTINATO",
+          "dynamics": {
+            "cc11Value": 76,
+            "cc74Value": 94,
+            "attenuationActive": false
+          },
+          "technique": "DETACHE",
+          "bowDirection": "DOWN_BOW",
+          "detuneCents": 0
+        },
+        {
+          "pitch": 67,
+          "startTick": 93607,
+          "durationTicks": 305,
+          "velocity": 98,
+          "role": "OSTINATO",
+          "dynamics": {
+            "cc11Value": 89,
+            "cc74Value": 94,
+            "attenuationActive": false
+          },
+          "technique": "MARTELE",
+          "bowDirection": "UP_BOW",
+          "detuneCents": 0
+        },
+        {
+          "pitch": 55,
+          "startTick": 96003,
+          "durationTicks": 309,
+          "velocity": 101,
+          "role": "OSTINATO",
+          "dynamics": {
+            "cc11Value": 99,
+            "cc74Value": 90,
+            "attenuationActive": false
+          },
+          "technique": "MARTELE",
+          "bowDirection": "DOWN_BOW",
+          "detuneCents": 0
+        },
+        {
+          "pitch": 60,
+          "startTick": 96483,
+          "durationTicks": 309,
+          "velocity": 95,
+          "role": "OSTINATO",
+          "dynamics": {
+            "cc11Value": 89,
+            "cc74Value": 86,
+            "attenuationActive": false
+          },
+          "technique": "MARTELE",
+          "bowDirection": "UP_BOW",
+          "detuneCents": 0
+        },
+        {
+          "pitch": 64,
+          "startTick": 96965,
+          "durationTicks": 403,
+          "velocity": 88,
+          "role": "OSTINATO",
+          "dynamics": {
+            "cc11Value": 76,
+            "cc74Value": 94,
+            "attenuationActive": false
+          },
+          "technique": "DETACHE",
+          "bowDirection": "DOWN_BOW",
+          "detuneCents": 0
+        },
+        {
+          "pitch": 67,
+          "startTick": 97446,
+          "durationTicks": 306,
+          "velocity": 107,
+          "role": "OSTINATO",
+          "dynamics": {
+            "cc11Value": 89,
+            "cc74Value": 94,
+            "attenuationActive": false
+          },
+          "technique": "MARTELE",
+          "bowDirection": "UP_BOW",
+          "detuneCents": 0
+        },
+        {
+          "pitch": 55,
+          "startTick": 99847,
+          "durationTicks": 305,
+          "velocity": 106,
+          "role": "OSTINATO",
+          "dynamics": {
+            "cc11Value": 99,
+            "cc74Value": 90,
+            "attenuationActive": false
+          },
+          "technique": "MARTELE",
+          "bowDirection": "DOWN_BOW",
+          "detuneCents": 0
+        },
+        {
+          "pitch": 60,
+          "startTick": 100321,
+          "durationTicks": 311,
+          "velocity": 93,
+          "role": "OSTINATO",
+          "dynamics": {
+            "cc11Value": 73,
+            "cc74Value": 79,
+            "attenuationActive": true
+          },
+          "technique": "MARTELE",
+          "bowDirection": "UP_BOW",
+          "detuneCents": 0
+        },
+        {
+          "pitch": 64,
+          "startTick": 100806,
+          "durationTicks": 402,
+          "velocity": 86,
+          "role": "OSTINATO",
+          "dynamics": {
+            "cc11Value": 62,
+            "cc74Value": 89,
+            "attenuationActive": true
+          },
+          "technique": "DETACHE",
+          "bowDirection": "UP_BOW",
+          "detuneCents": 0
+        },
+        {
+          "pitch": 67,
+          "startTick": 101288,
+          "durationTicks": 304,
+          "velocity": 100,
+          "role": "OSTINATO",
+          "dynamics": {
+            "cc11Value": 73,
+            "cc74Value": 87,
+            "attenuationActive": true
+          },
+          "technique": "MARTELE",
+          "bowDirection": "DOWN_BOW",
+          "detuneCents": 0
+        }
+      ]
+    },
+    {
+      "id": "trk_violas",
+      "name": "Violas",
+      "family": "strings",
+      "color": "#3b82f6",
+      "role": "violas",
+      "lowestNote": 48,
+      "highestNote": 81,
+      "locked": false,
+      "muted": false,
+      "soloed": false,
+      "libraryGroupId": null,
+      "midiChannel": 3,
+      "frozen": false,
+      "notes": [
+        {
+          "pitch": 69,
+          "startTick": 1,
+          "durationTicks": 1,
+          "velocity": 62,
+          "role": "PAD",
+          "dynamics": {
+            "cc11Value": 44,
+            "cc74Value": 86,
+            "attenuationActive": true
+          },
+          "technique": "LEGATO",
+          "bowDirection": "DOWN_BOW",
+          "detuneCents": 0
+        },
+        {
+          "pitch": 72,
+          "startTick": 1,
+          "durationTicks": 8,
+          "velocity": 74,
+          "role": "PAD",
+          "dynamics": {
+            "cc11Value": 84,
+            "cc74Value": 102,
+            "attenuationActive": false
+          },
+          "technique": "LEGATO",
+          "bowDirection": "DOWN_BOW",
+          "detuneCents": 0
+        },
+        {
+          "pitch": 62,
+          "startTick": 2,
+          "durationTicks": 3845,
+          "velocity": 71,
+          "role": "PAD",
+          "dynamics": {
+            "cc11Value": 51,
+            "cc74Value": 88,
+            "attenuationActive": true
+          },
+          "technique": "LEGATO",
+          "bowDirection": "DOWN_BOW",
+          "detuneCents": 0
+        },
+        {
+          "pitch": 65,
+          "startTick": 9,
+          "durationTicks": 7675,
+          "velocity": 51,
+          "role": "PAD",
+          "dynamics": {
+            "cc11Value": 41,
+            "cc74Value": 84,
+            "attenuationActive": true
+          },
+          "technique": "LEGATO",
+          "bowDirection": "DOWN_BOW",
+          "detuneCents": 0
+        },
+        {
+          "pitch": 69,
+          "startTick": 3847,
+          "durationTicks": 3838,
+          "velocity": 55,
+          "role": "PAD",
+          "dynamics": {
+            "cc11Value": 49,
+            "cc74Value": 88,
+            "attenuationActive": true
+          },
+          "technique": "LEGATO",
+          "bowDirection": "DOWN_BOW",
+          "detuneCents": 0
+        },
+        {
+          "pitch": 67,
+          "startTick": 7684,
+          "durationTicks": 3840,
+          "velocity": 73,
+          "role": "PAD",
+          "dynamics": {
+            "cc11Value": 51,
+            "cc74Value": 88,
+            "attenuationActive": true
+          },
+          "technique": "LEGATO",
+          "bowDirection": "DOWN_BOW",
+          "detuneCents": 0
+        },
+        {
+          "pitch": 71,
+          "startTick": 7685,
+          "durationTicks": 7677,
+          "velocity": 58,
+          "role": "PAD",
+          "dynamics": {
+            "cc11Value": 44,
+            "cc74Value": 86,
+            "attenuationActive": true
+          },
+          "technique": "LEGATO",
+          "bowDirection": "DOWN_BOW",
+          "detuneCents": 0
+        },
+        {
+          "pitch": 65,
+          "startTick": 11524,
+          "durationTicks": 3840,
+          "velocity": 55,
+          "role": "PAD",
+          "dynamics": {
+            "cc11Value": 41,
+            "cc74Value": 84,
+            "attenuationActive": true
+          },
+          "technique": "LEGATO",
+          "bowDirection": "DOWN_BOW",
+          "detuneCents": 0
+        },
+        {
+          "pitch": 72,
+          "startTick": 15362,
+          "durationTicks": 3841,
+          "velocity": 73,
+          "role": "PAD",
+          "dynamics": {
+            "cc11Value": 84,
+            "cc74Value": 102,
+            "attenuationActive": false
+          },
+          "technique": "LEGATO",
+          "bowDirection": "DOWN_BOW",
+          "detuneCents": 0
+        },
+        {
+          "pitch": 69,
+          "startTick": 15364,
+          "durationTicks": 7679,
+          "velocity": 57,
+          "role": "PAD",
+          "dynamics": {
+            "cc11Value": 73,
+            "cc74Value": 97,
+            "attenuationActive": false
+          },
+          "technique": "LEGATO",
+          "bowDirection": "DOWN_BOW",
+          "detuneCents": 0
+        },
+        {
+          "pitch": 64,
+          "startTick": 19203,
+          "durationTicks": 3847,
+          "velocity": 64,
+          "role": "PAD",
+          "dynamics": {
+            "cc11Value": 51,
+            "cc74Value": 88,
+            "attenuationActive": true
+          },
+          "technique": "LEGATO",
+          "bowDirection": "DOWN_BOW",
+          "detuneCents": 0
+        },
+        {
+          "pitch": 67,
+          "startTick": 23043,
+          "durationTicks": 3839,
+          "velocity": 64,
+          "role": "PAD",
+          "dynamics": {
+            "cc11Value": 69,
+            "cc74Value": 96,
+            "attenuationActive": true
+          },
+          "technique": "LEGATO",
+          "bowDirection": "DOWN_BOW",
+          "detuneCents": 0
+        },
+        {
+          "pitch": 71,
+          "startTick": 23050,
+          "durationTicks": 3837,
+          "velocity": 56,
+          "role": "PAD",
+          "dynamics": {
+            "cc11Value": 60,
+            "cc74Value": 92,
+            "attenuationActive": true
+          },
+          "technique": "LEGATO",
+          "bowDirection": "DOWN_BOW",
+          "detuneCents": 0
+        },
+        {
+          "pitch": 69,
+          "startTick": 26882,
+          "durationTicks": 3915,
+          "velocity": 54,
+          "role": "PAD",
+          "dynamics": {
+            "cc11Value": 49,
+            "cc74Value": 88,
+            "attenuationActive": true
+          },
+          "technique": "LEGATO",
+          "bowDirection": "DOWN_BOW",
+          "detuneCents": 0
+        },
+        {
+          "pitch": 67,
+          "startTick": 26887,
+          "durationTicks": 3910,
+          "velocity": 67,
+          "role": "PAD",
+          "dynamics": {
+            "cc11Value": 57,
+            "cc74Value": 91,
+            "attenuationActive": true
+          },
+          "technique": "LEGATO",
+          "bowDirection": "DOWN_BOW",
+          "detuneCents": 0
+        },
+        {
+          "pitch": 72,
+          "startTick": 61447,
+          "durationTicks": 2877,
+          "velocity": 93,
+          "role": "PAD",
+          "dynamics": {
+            "cc11Value": 100,
+            "cc74Value": 108,
+            "attenuationActive": false
+          },
+          "technique": "LEGATO",
+          "bowDirection": "DOWN_BOW",
+          "detuneCents": 0
+        },
+        {
+          "pitch": 64,
+          "startTick": 61449,
+          "durationTicks": 5751,
+          "velocity": 89,
+          "role": "PAD",
+          "dynamics": {
+            "cc11Value": 98,
+            "cc74Value": 107,
+            "attenuationActive": false
+          },
+          "technique": "LEGATO",
+          "bowDirection": "DOWN_BOW",
+          "detuneCents": 0
+        },
+        {
+          "pitch": 48,
+          "startTick": 64324,
+          "durationTicks": 975,
+          "velocity": 77,
+          "role": "COUNTERLINE",
+          "dynamics": {
+            "cc11Value": 77,
+            "cc74Value": 93,
+            "attenuationActive": false
+          },
+          "technique": "LEGATO",
+          "bowDirection": "DOWN_BOW",
+          "detuneCents": 0
+        },
+        {
+          "pitch": 72,
+          "startTick": 67200,
+          "durationTicks": 5875,
+          "velocity": 94,
+          "role": "PAD",
+          "dynamics": {
+            "cc11Value": 100,
+            "cc74Value": 108,
+            "attenuationActive": false
+          },
+          "technique": "LEGATO",
+          "bowDirection": "DOWN_BOW",
+          "detuneCents": 0
+        },
+        {
+          "pitch": 48,
+          "startTick": 67201,
+          "durationTicks": 1957,
+          "velocity": 83,
+          "role": "COUNTERLINE",
+          "dynamics": {
+            "cc11Value": 77,
+            "cc74Value": 93,
+            "attenuationActive": false
+          },
+          "technique": "LEGATO",
+          "bowDirection": "DOWN_BOW",
+          "detuneCents": 0
+        },
+        {
+          "pitch": 48,
+          "startTick": 70088,
+          "durationTicks": 2930,
+          "velocity": 85,
+          "role": "COUNTERLINE",
+          "dynamics": {
+            "cc11Value": 77,
+            "cc74Value": 93,
+            "attenuationActive": false
+          },
+          "technique": "LEGATO",
+          "bowDirection": "DOWN_BOW",
+          "detuneCents": 0
+        }
+      ]
+    },
+    {
+      "id": "trk_cellos",
+      "name": "Cellos/Basses",
+      "family": "strings",
+      "color": "#3b82f6",
+      "role": "cellos",
+      "lowestNote": 36,
+      "highestNote": 76,
+      "locked": false,
+      "muted": false,
+      "soloed": false,
+      "libraryGroupId": null,
+      "midiChannel": 4,
+      "frozen": false,
+      "notes": [
+        {
+          "pitch": 57,
+          "startTick": 961,
+          "durationTicks": 978,
+          "velocity": 76,
+          "role": "COUNTERLINE",
+          "dynamics": {
+            "cc11Value": 70,
+            "cc74Value": 96,
+            "attenuationActive": false
+          },
+          "technique": "LEGATO",
+          "bowDirection": "UP_BOW",
+          "detuneCents": 0
+        },
+        {
+          "pitch": 53,
+          "startTick": 4802,
+          "durationTicks": 977,
+          "velocity": 85,
+          "role": "COUNTERLINE",
+          "dynamics": {
+            "cc11Value": 70,
+            "cc74Value": 96,
+            "attenuationActive": false
+          },
+          "technique": "LEGATO",
+          "bowDirection": "UP_BOW",
+          "detuneCents": 0
+        },
+        {
+          "pitch": 55,
+          "startTick": 8646,
+          "durationTicks": 973,
+          "velocity": 77,
+          "role": "COUNTERLINE",
+          "dynamics": {
+            "cc11Value": 70,
+            "cc74Value": 96,
+            "attenuationActive": false
+          },
+          "technique": "LEGATO",
+          "bowDirection": "UP_BOW",
+          "detuneCents": 0
+        },
+        {
+          "pitch": 53,
+          "startTick": 12484,
+          "durationTicks": 975,
+          "velocity": 79,
+          "role": "COUNTERLINE",
+          "dynamics": {
+            "cc11Value": 70,
+            "cc74Value": 96,
+            "attenuationActive": false
+          },
+          "technique": "LEGATO",
+          "bowDirection": "UP_BOW",
+          "detuneCents": 0
+        },
+        {
+          "pitch": 53,
+          "startTick": 15367,
+          "durationTicks": 1217,
+          "velocity": 86,
+          "role": "COUNTERLINE",
+          "dynamics": {
+            "cc11Value": 70,
+            "cc74Value": 96,
+            "attenuationActive": false
+          },
+          "technique": "LEGATO",
+          "bowDirection": "DOWN_BOW",
+          "detuneCents": 0
+        },
+        {
+          "pitch": 50,
+          "startTick": 16804,
+          "durationTicks": 1710,
+          "velocity": 83,
+          "role": "COUNTERLINE",
+          "dynamics": {
+            "cc11Value": 70,
+            "cc74Value": 96,
+            "attenuationActive": false
+          },
+          "technique": "LEGATO",
+          "bowDirection": "UP_BOW",
+          "detuneCents": 0
+        },
+        {
+          "pitch": 53,
+          "startTick": 18728,
+          "durationTicks": 5622,
+          "velocity": 81,
+          "role": "COUNTERLINE",
+          "dynamics": {
+            "cc11Value": 70,
+            "cc74Value": 96,
+            "attenuationActive": false
+          },
+          "technique": "LEGATO",
+          "bowDirection": "UP_BOW",
+          "detuneCents": 0
+        },
+        {
+          "pitch": 55,
+          "startTick": 24487,
+          "durationTicks": 2441,
+          "velocity": 78,
+          "role": "COUNTERLINE",
+          "dynamics": {
+            "cc11Value": 70,
+            "cc74Value": 96,
+            "attenuationActive": false
+          },
+          "technique": "LEGATO",
+          "bowDirection": "UP_BOW",
+          "detuneCents": 0
+        },
+        {
+          "pitch": 52,
+          "startTick": 27841,
+          "durationTicks": 2887,
+          "velocity": 84,
+          "role": "COUNTERLINE",
+          "dynamics": {
+            "cc11Value": 70,
+            "cc74Value": 96,
+            "attenuationActive": false
+          },
+          "technique": "LEGATO",
+          "bowDirection": "UP_BOW",
+          "detuneCents": 0
+        },
+        {
+          "pitch": 52,
+          "startTick": 29777,
+          "durationTicks": 975,
+          "velocity": 83,
+          "role": "COUNTERLINE",
+          "detuneCents": 0,
+          "cc74Offset": -5,
+          "dynamics": {
+            "cc11Value": 70,
+            "cc74Value": 91,
+            "attenuationActive": false
+          },
+          "technique": "LEGATO",
+          "bowDirection": "UP_BOW"
+        },
+        {
+          "pitch": 38,
+          "startTick": 30728,
+          "durationTicks": 1912,
+          "velocity": 119,
+          "role": "BASS",
+          "dynamics": {
+            "cc11Value": 110,
+            "cc74Value": 110,
+            "attenuationActive": false
+          },
+          "technique": "BOWED_TREMOLO",
+          "bowDirection": "DOWN_BOW",
+          "detuneCents": 0
+        },
+        {
+          "pitch": 43,
+          "startTick": 32647,
+          "durationTicks": 1913,
+          "velocity": 108,
+          "role": "BASS",
+          "dynamics": {
+            "cc11Value": 104,
+            "cc74Value": 108,
+            "attenuationActive": false
+          },
+          "technique": "BOWED_TREMOLO",
+          "bowDirection": "DOWN_BOW",
+          "detuneCents": 0
+        },
+        {
+          "pitch": 45,
+          "startTick": 34562,
+          "durationTicks": 1918,
+          "velocity": 120,
+          "role": "BASS",
+          "dynamics": {
+            "cc11Value": 109,
+            "cc74Value": 116,
+            "attenuationActive": false
+          },
+          "technique": "BOWED_TREMOLO",
+          "bowDirection": "DOWN_BOW",
+          "detuneCents": 0
+        },
+        {
+          "pitch": 41,
+          "startTick": 36486,
+          "durationTicks": 1914,
+          "velocity": 112,
+          "role": "BASS",
+          "dynamics": {
+            "cc11Value": 112,
+            "cc74Value": 111,
+            "attenuationActive": false
+          },
+          "technique": "BOWED_TREMOLO",
+          "bowDirection": "DOWN_BOW",
+          "detuneCents": 0
+        },
+        {
+          "pitch": 38,
+          "startTick": 38404,
+          "durationTicks": 1916,
+          "velocity": 112,
+          "role": "BASS",
+          "dynamics": {
+            "cc11Value": 106,
+            "cc74Value": 108,
+            "attenuationActive": false
+          },
+          "technique": "BOWED_TREMOLO",
+          "bowDirection": "DOWN_BOW",
+          "detuneCents": 0
+        },
+        {
+          "pitch": 43,
+          "startTick": 40327,
+          "durationTicks": 1913,
+          "velocity": 107,
+          "role": "BASS",
+          "dynamics": {
+            "cc11Value": 107,
+            "cc74Value": 109,
+            "attenuationActive": false
+          },
+          "technique": "BOWED_TREMOLO",
+          "bowDirection": "DOWN_BOW",
+          "detuneCents": 0
+        },
+        {
+          "pitch": 36,
+          "startTick": 42248,
+          "durationTicks": 1912,
+          "velocity": 123,
+          "role": "BASS",
+          "dynamics": {
+            "cc11Value": 115,
+            "cc74Value": 112,
+            "attenuationActive": false
+          },
+          "technique": "BOWED_TREMOLO",
+          "bowDirection": "DOWN_BOW",
+          "detuneCents": 0
+        },
+        {
+          "pitch": 45,
+          "startTick": 44164,
+          "durationTicks": 1916,
+          "velocity": 122,
+          "role": "BASS",
+          "dynamics": {
+            "cc11Value": 116,
+            "cc74Value": 118,
+            "attenuationActive": false
+          },
+          "technique": "BOWED_TREMOLO",
+          "bowDirection": "DOWN_BOW",
+          "detuneCents": 0
+        },
+        {
+          "pitch": 46,
+          "startTick": 46083,
+          "durationTicks": 1917,
+          "velocity": 124,
+          "role": "BASS",
+          "dynamics": {
+            "cc11Value": 115,
+            "cc74Value": 118,
+            "attenuationActive": false
+          },
+          "technique": "BOWED_TREMOLO",
+          "bowDirection": "DOWN_BOW",
+          "detuneCents": 0
+        },
+        {
+          "pitch": 36,
+          "startTick": 48001,
+          "durationTicks": 1919,
+          "velocity": 112,
+          "role": "BASS",
+          "dynamics": {
+            "cc11Value": 105,
+            "cc74Value": 108,
+            "attenuationActive": false
+          },
+          "technique": "BOWED_TREMOLO",
+          "bowDirection": "DOWN_BOW",
+          "detuneCents": 0
+        },
+        {
+          "pitch": 38,
+          "startTick": 49925,
+          "durationTicks": 1915,
+          "velocity": 106,
+          "role": "BASS",
+          "dynamics": {
+            "cc11Value": 104,
+            "cc74Value": 108,
+            "attenuationActive": false
+          },
+          "technique": "BOWED_TREMOLO",
+          "bowDirection": "DOWN_BOW",
+          "detuneCents": 0
+        },
+        {
+          "pitch": 43,
+          "startTick": 51847,
+          "durationTicks": 1913,
+          "velocity": 119,
+          "role": "BASS",
+          "dynamics": {
+            "cc11Value": 112,
+            "cc74Value": 111,
+            "attenuationActive": false
+          },
+          "technique": "BOWED_TREMOLO",
+          "bowDirection": "DOWN_BOW",
+          "detuneCents": 0
+        },
+        {
+          "pitch": 45,
+          "startTick": 53760,
+          "durationTicks": 3840,
+          "velocity": 124,
+          "role": "BASS",
+          "dynamics": {
+            "cc11Value": 114,
+            "cc74Value": 118,
+            "attenuationActive": false
+          },
+          "technique": "BOWED_TREMOLO",
+          "bowDirection": "DOWN_BOW",
+          "detuneCents": 0
+        },
+        {
+          "pitch": 38,
+          "startTick": 57607,
+          "durationTicks": 3833,
+          "velocity": 110,
+          "role": "BASS",
+          "dynamics": {
+            "cc11Value": 107,
+            "cc74Value": 109,
+            "attenuationActive": false
+          },
+          "technique": "BOWED_TREMOLO",
+          "bowDirection": "DOWN_BOW",
+          "detuneCents": 0
+        },
+        {
+          "pitch": 36,
+          "startTick": 61449,
+          "durationTicks": 11741,
+          "velocity": 80,
+          "role": "BASS",
+          "dynamics": {
+            "cc11Value": 75,
+            "cc74Value": 92,
+            "attenuationActive": false
+          },
+          "technique": "LEGATO",
+          "bowDirection": "DOWN_BOW",
+          "detuneCents": 0
+        },
+        {
+          "pitch": 48,
+          "startTick": 75845,
+          "durationTicks": 974,
+          "velocity": 97,
+          "role": "COUNTERLINE",
+          "dynamics": {
+            "cc11Value": 89,
+            "cc74Value": 104,
+            "attenuationActive": false
+          },
+          "technique": "LEGATO",
+          "bowDirection": "DOWN_BOW",
+          "detuneCents": 0
+        },
+        {
+          "pitch": 48,
+          "startTick": 79683,
+          "durationTicks": 976,
+          "velocity": 101,
+          "role": "COUNTERLINE",
+          "dynamics": {
+            "cc11Value": 89,
+            "cc74Value": 104,
+            "attenuationActive": false
+          },
+          "technique": "LEGATO",
+          "bowDirection": "DOWN_BOW",
+          "detuneCents": 0
+        },
+        {
+          "pitch": 52,
+          "startTick": 83520,
+          "durationTicks": 979,
+          "velocity": 100,
+          "role": "COUNTERLINE",
+          "dynamics": {
+            "cc11Value": 89,
+            "cc74Value": 104,
+            "attenuationActive": false
+          },
+          "technique": "LEGATO",
+          "bowDirection": "DOWN_BOW",
+          "detuneCents": 0
+        },
+        {
+          "pitch": 48,
+          "startTick": 87365,
+          "durationTicks": 974,
+          "velocity": 95,
+          "role": "COUNTERLINE",
+          "dynamics": {
+            "cc11Value": 89,
+            "cc74Value": 104,
+            "attenuationActive": false
+          },
+          "technique": "LEGATO",
+          "bowDirection": "DOWN_BOW",
+          "detuneCents": 0
+        },
+        {
+          "pitch": 48,
+          "startTick": 88329,
+          "durationTicks": 11741,
+          "velocity": 99,
+          "role": "COUNTERLINE",
+          "dynamics": {
+            "cc11Value": 89,
+            "cc74Value": 104,
+            "attenuationActive": false
+          },
+          "technique": "LEGATO",
+          "bowDirection": "DOWN_BOW",
+          "detuneCents": 0
+        },
+        {
+          "pitch": 48,
+          "startTick": 100800,
+          "durationTicks": 2938,
+          "velocity": 100,
+          "role": "COUNTERLINE",
+          "dynamics": {
+            "cc11Value": 89,
+            "cc74Value": 104,
+            "attenuationActive": false
+          },
+          "technique": "LEGATO",
+          "bowDirection": "DOWN_BOW",
+          "detuneCents": 0
+        }
+      ]
+    },
+    {
+      "id": "trk_horns",
+      "name": "French Horns",
+      "family": "brass",
+      "color": "#eab308",
+      "role": "horns",
+      "lowestNote": 41,
+      "highestNote": 84,
+      "locked": false,
+      "muted": false,
+      "soloed": false,
+      "libraryGroupId": null,
+      "midiChannel": 5,
+      "frozen": false,
+      "notes": []
+    },
+    {
+      "id": "trk_trumpets",
+      "name": "Trumpets",
+      "family": "brass",
+      "color": "#eab308",
+      "role": "trumpets",
+      "lowestNote": 54,
+      "highestNote": 86,
+      "locked": false,
+      "muted": false,
+      "soloed": false,
+      "libraryGroupId": null,
+      "midiChannel": 6,
+      "frozen": false,
+      "notes": []
+    },
+    {
+      "id": "trk_trombones",
+      "name": "Trombones",
+      "family": "brass",
+      "color": "#eab308",
+      "role": "trombones",
+      "lowestNote": 40,
+      "highestNote": 70,
+      "locked": false,
+      "muted": false,
+      "soloed": false,
+      "libraryGroupId": null,
+      "midiChannel": 7,
+      "frozen": false,
+      "notes": [
+        {
+          "pitch": 62,
+          "startTick": 30723,
+          "durationTicks": 1,
+          "velocity": 127,
+          "role": "PAD",
+          "dynamics": {
+            "cc11Value": 120,
+            "cc74Value": 113,
+            "attenuationActive": false
+          },
+          "technique": "DOIT",
+          "bowDirection": "UNDEFINED",
+          "pitchBendPoints": [
+            {
+              "tick": 34368,
+              "cents": 0
+            },
+            {
+              "tick": 34560,
+              "cents": 170
+            }
+          ],
+          "detuneCents": 0
+        },
+        {
+          "pitch": 65,
+          "startTick": 30724,
+          "durationTicks": 2,
+          "velocity": 102,
+          "role": "PAD",
+          "dynamics": {
+            "cc11Value": 109,
+            "cc74Value": 113,
+            "attenuationActive": false
+          },
+          "technique": "LEGATO_SLUR",
+          "bowDirection": "UNDEFINED",
+          "detuneCents": 0
+        },
+        {
+          "pitch": 69,
+          "startTick": 30726,
+          "durationTicks": 1917,
+          "velocity": 104,
+          "role": "PAD",
+          "dynamics": {
+            "cc11Value": 112,
+            "cc74Value": 119,
+            "attenuationActive": false
+          },
+          "technique": "LEGATO_SLUR",
+          "bowDirection": "UNDEFINED",
+          "detuneCents": 0
+        },
+        {
+          "pitch": 59,
+          "startTick": 32643,
+          "durationTicks": 3,
+          "velocity": 111,
+          "role": "PAD",
+          "dynamics": {
+            "cc11Value": 112,
+            "cc74Value": 114,
+            "attenuationActive": false
+          },
+          "technique": "LEGATO_SLUR",
+          "bowDirection": "UNDEFINED",
+          "detuneCents": 0
+        },
+        {
+          "pitch": 67,
+          "startTick": 32646,
+          "durationTicks": 1918,
+          "velocity": 124,
+          "role": "PAD",
+          "dynamics": {
+            "cc11Value": 120,
+            "cc74Value": 118,
+            "attenuationActive": false
+          },
+          "technique": "DOIT",
+          "bowDirection": "UNDEFINED",
+          "pitchBendPoints": [
+            {
+              "tick": 36288,
+              "cents": 0
+            },
+            {
+              "tick": 36480,
+              "cents": 170
+            }
+          ],
+          "detuneCents": 0
+        },
+        {
+          "pitch": 60,
+          "startTick": 34564,
+          "durationTicks": 2,
+          "velocity": 126,
+          "role": "PAD",
+          "dynamics": {
+            "cc11Value": 120,
+            "cc74Value": 113,
+            "attenuationActive": false
+          },
+          "technique": "DOIT",
+          "bowDirection": "UNDEFINED",
+          "pitchBendPoints": [
+            {
+              "tick": 40128,
+              "cents": 0
+            },
+            {
+              "tick": 40320,
+              "cents": 170
+            }
+          ],
+          "detuneCents": 0
+        },
+        {
+          "pitch": 69,
+          "startTick": 34566,
+          "durationTicks": 1914,
+          "velocity": 112,
+          "role": "PAD",
+          "dynamics": {
+            "cc11Value": 112,
+            "cc74Value": 119,
+            "attenuationActive": false
+          },
+          "technique": "LEGATO_SLUR",
+          "bowDirection": "UNDEFINED",
+          "detuneCents": 0
+        },
+        {
+          "pitch": 65,
+          "startTick": 36480,
+          "durationTicks": 1923,
+          "velocity": 108,
+          "role": "PAD",
+          "dynamics": {
+            "cc11Value": 112,
+            "cc74Value": 114,
+            "attenuationActive": false
+          },
+          "technique": "LEGATO_SLUR",
+          "bowDirection": "UNDEFINED",
+          "detuneCents": 0
+        },
+        {
+          "pitch": 62,
+          "startTick": 38403,
+          "durationTicks": 1919,
+          "velocity": 123,
+          "role": "PAD",
+          "dynamics": {
+            "cc11Value": 120,
+            "cc74Value": 113,
+            "attenuationActive": false
+          },
+          "technique": "DOIT",
+          "bowDirection": "UNDEFINED",
+          "pitchBendPoints": [
+            {
+              "tick": 43968,
+              "cents": 0
+            },
+            {
+              "tick": 44160,
+              "cents": 170
+            }
+          ],
+          "detuneCents": 0
+        },
+        {
+          "pitch": 67,
+          "startTick": 40322,
+          "durationTicks": 4,
+          "velocity": 112,
+          "role": "PAD",
+          "dynamics": {
+            "cc11Value": 112,
+            "cc74Value": 119,
+            "attenuationActive": false
+          },
+          "technique": "LEGATO_SLUR",
+          "bowDirection": "UNDEFINED",
+          "detuneCents": 0
+        },
+        {
+          "pitch": 59,
+          "startTick": 40326,
+          "durationTicks": 1923,
+          "velocity": 106,
+          "role": "PAD",
+          "dynamics": {
+            "cc11Value": 109,
+            "cc74Value": 113,
+            "attenuationActive": false
+          },
+          "technique": "LEGATO_SLUR",
+          "bowDirection": "UNDEFINED",
+          "detuneCents": 0
+        },
+        {
+          "pitch": 60,
+          "startTick": 42249,
+          "durationTicks": 1,
+          "velocity": 103,
+          "role": "PAD",
+          "dynamics": {
+            "cc11Value": 109,
+            "cc74Value": 113,
+            "attenuationActive": false
+          },
+          "technique": "LEGATO_SLUR",
+          "bowDirection": "UNDEFINED",
+          "detuneCents": 0
+        },
+        {
+          "pitch": 64,
+          "startTick": 42250,
+          "durationTicks": 1919,
+          "velocity": 124,
+          "role": "PAD",
+          "dynamics": {
+            "cc11Value": 120,
+            "cc74Value": 113,
+            "attenuationActive": false
+          },
+          "technique": "DOIT",
+          "bowDirection": "UNDEFINED",
+          "pitchBendPoints": [
+            {
+              "tick": 45888,
+              "cents": 0
+            },
+            {
+              "tick": 46080,
+              "cents": 170
+            }
+          ],
+          "detuneCents": 0
+        },
+        {
+          "pitch": 69,
+          "startTick": 44169,
+          "durationTicks": 1912,
+          "velocity": 109,
+          "role": "PAD",
+          "dynamics": {
+            "cc11Value": 112,
+            "cc74Value": 119,
+            "attenuationActive": false
+          },
+          "technique": "LEGATO_SLUR",
+          "bowDirection": "UNDEFINED",
+          "detuneCents": 0
+        },
+        {
+          "pitch": 70,
+          "startTick": 46081,
+          "durationTicks": 1,
+          "velocity": 108,
+          "role": "PAD",
+          "dynamics": {
+            "cc11Value": 109,
+            "cc74Value": 118,
+            "attenuationActive": false
+          },
+          "technique": "LEGATO_SLUR",
+          "bowDirection": "UNDEFINED",
+          "detuneCents": 0
+        },
+        {
+          "pitch": 62,
+          "startTick": 46082,
+          "durationTicks": 5,
+          "velocity": 121,
+          "role": "PAD",
+          "dynamics": {
+            "cc11Value": 120,
+            "cc74Value": 113,
+            "attenuationActive": false
+          },
+          "technique": "DOIT",
+          "bowDirection": "UNDEFINED",
+          "pitchBendPoints": [
+            {
+              "tick": 47808,
+              "cents": 0
+            },
+            {
+              "tick": 48000,
+              "cents": 170
+            }
+          ],
+          "detuneCents": 0
+        },
+        {
+          "pitch": 65,
+          "startTick": 46087,
+          "durationTicks": 1913,
+          "velocity": 127,
+          "role": "PAD",
+          "dynamics": {
+            "cc11Value": 120,
+            "cc74Value": 113,
+            "attenuationActive": false
+          },
+          "technique": "DOIT",
+          "bowDirection": "UNDEFINED",
+          "pitchBendPoints": [
+            {
+              "tick": 47808,
+              "cents": 0
+            },
+            {
+              "tick": 48000,
+              "cents": 170
+            }
+          ],
+          "detuneCents": 0
+        },
+        {
+          "pitch": 64,
+          "startTick": 48001,
+          "durationTicks": 1,
+          "velocity": 118,
+          "role": "PAD",
+          "dynamics": {
+            "cc11Value": 120,
+            "cc74Value": 113,
+            "attenuationActive": false
+          },
+          "technique": "DOIT",
+          "bowDirection": "UNDEFINED",
+          "pitchBendPoints": [
+            {
+              "tick": 49728,
+              "cents": 0
+            },
+            {
+              "tick": 49920,
+              "cents": 170
+            }
+          ],
+          "detuneCents": 0
+        },
+        {
+          "pitch": 60,
+          "startTick": 48002,
+          "durationTicks": 5,
+          "velocity": 124,
+          "role": "PAD",
+          "dynamics": {
+            "cc11Value": 120,
+            "cc74Value": 113,
+            "attenuationActive": false
+          },
+          "technique": "DOIT",
+          "bowDirection": "UNDEFINED",
+          "pitchBendPoints": [
+            {
+              "tick": 51648,
+              "cents": 0
+            },
+            {
+              "tick": 51840,
+              "cents": 170
+            }
+          ],
+          "detuneCents": 0
+        },
+        {
+          "pitch": 67,
+          "startTick": 48007,
+          "durationTicks": 1915,
+          "velocity": 109,
+          "role": "PAD",
+          "dynamics": {
+            "cc11Value": 112,
+            "cc74Value": 119,
+            "attenuationActive": false
+          },
+          "technique": "LEGATO_SLUR",
+          "bowDirection": "UNDEFINED",
+          "detuneCents": 0
+        },
+        {
+          "pitch": 65,
+          "startTick": 49922,
+          "durationTicks": 1,
+          "velocity": 121,
+          "role": "PAD",
+          "dynamics": {
+            "cc11Value": 120,
+            "cc74Value": 113,
+            "attenuationActive": false
+          },
+          "technique": "DOIT",
+          "bowDirection": "UNDEFINED",
+          "pitchBendPoints": [
+            {
+              "tick": 53568,
+              "cents": 0
+            },
+            {
+              "tick": 53760,
+              "cents": 170
+            }
+          ],
+          "detuneCents": 0
+        },
+        {
+          "pitch": 69,
+          "startTick": 49923,
+          "durationTicks": 6,
+          "velocity": 103,
+          "role": "PAD",
+          "dynamics": {
+            "cc11Value": 112,
+            "cc74Value": 119,
+            "attenuationActive": false
+          },
+          "technique": "LEGATO_SLUR",
+          "bowDirection": "UNDEFINED",
+          "detuneCents": 0
+        },
+        {
+          "pitch": 62,
+          "startTick": 49929,
+          "durationTicks": 1913,
+          "velocity": 119,
+          "role": "PAD",
+          "dynamics": {
+            "cc11Value": 120,
+            "cc74Value": 113,
+            "attenuationActive": false
+          },
+          "technique": "DOIT",
+          "bowDirection": "UNDEFINED",
+          "pitchBendPoints": [
+            {
+              "tick": 53568,
+              "cents": 0
+            },
+            {
+              "tick": 53760,
+              "cents": 170
+            }
+          ],
+          "detuneCents": 0
+        },
+        {
+          "pitch": 59,
+          "startTick": 51842,
+          "durationTicks": 4,
+          "velocity": 106,
+          "role": "PAD",
+          "dynamics": {
+            "cc11Value": 111,
+            "cc74Value": 113,
+            "attenuationActive": false
+          },
+          "technique": "LEGATO_SLUR",
+          "bowDirection": "UNDEFINED",
+          "detuneCents": 0
+        },
+        {
+          "pitch": 67,
+          "startTick": 51846,
+          "durationTicks": 1915,
+          "velocity": 105,
+          "role": "PAD",
+          "dynamics": {
+            "cc11Value": 112,
+            "cc74Value": 119,
+            "attenuationActive": false
+          },
+          "technique": "LEGATO_SLUR",
+          "bowDirection": "UNDEFINED",
+          "detuneCents": 0
+        },
+        {
+          "pitch": 69,
+          "startTick": 53761,
+          "durationTicks": 5,
+          "velocity": 110,
+          "role": "PAD",
+          "dynamics": {
+            "cc11Value": 112,
+            "cc74Value": 119,
+            "attenuationActive": false
+          },
+          "technique": "LEGATO_SLUR",
+          "bowDirection": "UNDEFINED",
+          "detuneCents": 0
+        },
+        {
+          "pitch": 60,
+          "startTick": 53766,
+          "durationTicks": 1,
+          "velocity": 105,
+          "role": "PAD",
+          "dynamics": {
+            "cc11Value": 113,
+            "cc74Value": 114,
+            "attenuationActive": false
+          },
+          "technique": "LEGATO_SLUR",
+          "bowDirection": "UNDEFINED",
+          "detuneCents": 0
+        },
+        {
+          "pitch": 64,
+          "startTick": 53767,
+          "durationTicks": 3833,
+          "velocity": 125,
+          "role": "PAD",
+          "dynamics": {
+            "cc11Value": 120,
+            "cc74Value": 113,
+            "attenuationActive": false
+          },
+          "technique": "DOIT",
+          "bowDirection": "UNDEFINED",
+          "pitchBendPoints": [
+            {
+              "tick": 57408,
+              "cents": 0
+            },
+            {
+              "tick": 57600,
+              "cents": 170
+            }
+          ],
+          "detuneCents": 0
+        },
+        {
+          "pitch": 62,
+          "startTick": 57607,
+          "durationTicks": 1,
+          "velocity": 125,
+          "role": "PAD",
+          "dynamics": {
+            "cc11Value": 120,
+            "cc74Value": 113,
+            "attenuationActive": false
+          },
+          "technique": "DOIT",
+          "bowDirection": "UNDEFINED",
+          "pitchBendPoints": [
+            {
+              "tick": 61248,
+              "cents": 0
+            },
+            {
+              "tick": 61440,
+              "cents": 170
+            }
+          ],
+          "detuneCents": 0
+        },
+        {
+          "pitch": 65,
+          "startTick": 57608,
+          "durationTicks": 3832,
+          "velocity": 127,
+          "role": "PAD",
+          "dynamics": {
+            "cc11Value": 120,
+            "cc74Value": 113,
+            "attenuationActive": false
+          },
+          "technique": "DOIT",
+          "bowDirection": "UNDEFINED",
+          "pitchBendPoints": [
+            {
+              "tick": 61248,
+              "cents": 0
+            },
+            {
+              "tick": 61440,
+              "cents": 170
+            }
+          ],
+          "detuneCents": 0
+        }
+      ]
+    },
+    {
+      "id": "trk_tuba",
+      "name": "Tuba",
+      "family": "brass",
+      "color": "#eab308",
+      "role": "tuba",
+      "lowestNote": 26,
+      "highestNote": 65,
+      "locked": false,
+      "muted": false,
+      "soloed": false,
+      "libraryGroupId": null,
+      "midiChannel": 8,
+      "frozen": false,
+      "notes": [
+        {
+          "pitch": 36,
+          "startTick": 72962,
+          "durationTicks": 30718,
+          "velocity": 114,
+          "role": "BASS",
+          "dynamics": {
+            "cc11Value": 101,
+            "cc74Value": 100,
+            "attenuationActive": false
+          },
+          "technique": "DOIT",
+          "bowDirection": "UNDEFINED",
+          "pitchBendPoints": [
+            {
+              "tick": 103488,
+              "cents": 0
+            },
+            {
+              "tick": 103680,
+              "cents": 170
+            }
+          ],
+          "detuneCents": 0
+        }
+      ]
+    },
+    {
+      "id": "trk_flutes",
+      "name": "Flutes",
+      "family": "woodwinds",
+      "color": "#22c55e",
+      "role": "flutes",
+      "lowestNote": 60,
+      "highestNote": 93,
+      "locked": false,
+      "muted": false,
+      "soloed": false,
+      "libraryGroupId": null,
+      "midiChannel": 9,
+      "frozen": false,
+      "notes": [
+        {
+          "pitch": 62,
+          "startTick": 9,
+          "durationTicks": 1199,
+          "velocity": 26,
+          "role": "LEAD",
+          "dynamics": {
+            "cc11Value": 17,
+            "cc74Value": 70,
+            "attenuationActive": true
+          },
+          "technique": "LEGATO_SLUR",
+          "bowDirection": "UNDEFINED",
+          "detuneCents": 0
+        },
+        {
+          "pitch": 65,
+          "startTick": 1208,
+          "durationTicks": 112,
+          "velocity": 29,
+          "role": "LEAD",
+          "dynamics": {
+            "cc11Value": 15,
+            "cc74Value": 65,
+            "attenuationActive": true
+          },
+          "technique": "STACCATO_STANDARD",
+          "bowDirection": "UNDEFINED",
+          "detuneCents": 0
+        },
+        {
+          "pitch": 64,
+          "startTick": 1929,
+          "durationTicks": 479,
+          "velocity": 27,
+          "role": "LEAD",
+          "dynamics": {
+            "cc11Value": 17,
+            "cc74Value": 70,
+            "attenuationActive": true
+          },
+          "technique": "LEGATO_SLUR",
+          "bowDirection": "UNDEFINED",
+          "detuneCents": 0
+        },
+        {
+          "pitch": 67,
+          "startTick": 2408,
+          "durationTicks": 476,
+          "velocity": 32,
+          "role": "LEAD",
+          "dynamics": {
+            "cc11Value": 17,
+            "cc74Value": 70,
+            "attenuationActive": false
+          },
+          "technique": "LEGATO_SLUR",
+          "bowDirection": "UNDEFINED",
+          "detuneCents": 0
+        },
+        {
+          "pitch": 65,
+          "startTick": 2884,
+          "durationTicks": 957,
+          "velocity": 24,
+          "role": "LEAD",
+          "dynamics": {
+            "cc11Value": 17,
+            "cc74Value": 70,
+            "attenuationActive": true
+          },
+          "technique": "LEGATO_SLUR",
+          "bowDirection": "UNDEFINED",
+          "detuneCents": 0
+        },
+        {
+          "pitch": 65,
+          "startTick": 3841,
+          "durationTicks": 1202,
+          "velocity": 25,
+          "role": "LEAD",
+          "dynamics": {
+            "cc11Value": 17,
+            "cc74Value": 70,
+            "attenuationActive": true
+          },
+          "technique": "LEGATO_SLUR",
+          "bowDirection": "UNDEFINED",
+          "detuneCents": 0
+        },
+        {
+          "pitch": 71,
+          "startTick": 5043,
+          "durationTicks": 117,
+          "velocity": 34,
+          "role": "LEAD",
+          "dynamics": {
+            "cc11Value": 15,
+            "cc74Value": 72,
+            "attenuationActive": false
+          },
+          "technique": "STACCATO_STANDARD",
+          "bowDirection": "UNDEFINED",
+          "detuneCents": 0
+        },
+        {
+          "pitch": 67,
+          "startTick": 5768,
+          "durationTicks": 477,
+          "velocity": 27,
+          "role": "LEAD",
+          "dynamics": {
+            "cc11Value": 17,
+            "cc74Value": 70,
+            "attenuationActive": false
+          },
+          "technique": "LEGATO_SLUR",
+          "bowDirection": "UNDEFINED",
+          "detuneCents": 0
+        },
+        {
+          "pitch": 71,
+          "startTick": 6245,
+          "durationTicks": 480,
+          "velocity": 34,
+          "role": "LEAD",
+          "dynamics": {
+            "cc11Value": 17,
+            "cc74Value": 77,
+            "attenuationActive": false
+          },
+          "technique": "LEGATO_SLUR",
+          "bowDirection": "UNDEFINED",
+          "detuneCents": 0
+        },
+        {
+          "pitch": 69,
+          "startTick": 6725,
+          "durationTicks": 238,
+          "velocity": 38,
+          "role": "LEAD",
+          "dynamics": {
+            "cc11Value": 17,
+            "cc74Value": 77,
+            "attenuationActive": false
+          },
+          "technique": "LEGATO_SLUR",
+          "bowDirection": "UNDEFINED",
+          "detuneCents": 0
+        },
+        {
+          "pitch": 62,
+          "startTick": 6963,
+          "durationTicks": 117,
+          "velocity": 28,
+          "role": "LEAD",
+          "dynamics": {
+            "cc11Value": 15,
+            "cc74Value": 65,
+            "attenuationActive": true
+          },
+          "technique": "STACCATO_STANDARD",
+          "bowDirection": "UNDEFINED",
+          "detuneCents": 0
+        },
+        {
+          "pitch": 67,
+          "startTick": 7682,
+          "durationTicks": 1924,
+          "velocity": 22,
+          "role": "LEAD",
+          "dynamics": {
+            "cc11Value": 17,
+            "cc74Value": 70,
+            "attenuationActive": false
+          },
+          "technique": "LEGATO_SLUR",
+          "bowDirection": "UNDEFINED",
+          "detuneCents": 0
+        },
+        {
+          "pitch": 69,
+          "startTick": 9606,
+          "durationTicks": 478,
+          "velocity": 37,
+          "role": "LEAD",
+          "dynamics": {
+            "cc11Value": 17,
+            "cc74Value": 77,
+            "attenuationActive": false
+          },
+          "technique": "LEGATO_SLUR",
+          "bowDirection": "UNDEFINED",
+          "detuneCents": 0
+        },
+        {
+          "pitch": 60,
+          "startTick": 10084,
+          "durationTicks": 480,
+          "velocity": 25,
+          "role": "LEAD",
+          "dynamics": {
+            "cc11Value": 17,
+            "cc74Value": 70,
+            "attenuationActive": true
+          },
+          "technique": "LEGATO_SLUR",
+          "bowDirection": "UNDEFINED",
+          "detuneCents": 0
+        },
+        {
+          "pitch": 71,
+          "startTick": 10564,
+          "durationTicks": 961,
+          "velocity": 36,
+          "role": "LEAD",
+          "dynamics": {
+            "cc11Value": 17,
+            "cc74Value": 77,
+            "attenuationActive": false
+          },
+          "technique": "LEGATO_SLUR",
+          "bowDirection": "UNDEFINED",
+          "detuneCents": 0
+        },
+        {
+          "pitch": 71,
+          "startTick": 11525,
+          "durationTicks": 1925,
+          "velocity": 39,
+          "role": "LEAD",
+          "dynamics": {
+            "cc11Value": 17,
+            "cc74Value": 77,
+            "attenuationActive": false
+          },
+          "technique": "LEGATO_SLUR",
+          "bowDirection": "UNDEFINED",
+          "detuneCents": 0
+        },
+        {
+          "pitch": 60,
+          "startTick": 13450,
+          "durationTicks": 472,
+          "velocity": 22,
+          "role": "LEAD",
+          "dynamics": {
+            "cc11Value": 17,
+            "cc74Value": 70,
+            "attenuationActive": true
+          },
+          "technique": "LEGATO_SLUR",
+          "bowDirection": "UNDEFINED",
+          "detuneCents": 0
+        },
+        {
+          "pitch": 64,
+          "startTick": 13922,
+          "durationTicks": 478,
+          "velocity": 27,
+          "role": "LEAD",
+          "dynamics": {
+            "cc11Value": 17,
+            "cc74Value": 70,
+            "attenuationActive": true
+          },
+          "technique": "LEGATO_SLUR",
+          "bowDirection": "UNDEFINED",
+          "detuneCents": 0
+        },
+        {
+          "pitch": 62,
+          "startTick": 14400,
+          "durationTicks": 488,
+          "velocity": 22,
+          "role": "LEAD",
+          "dynamics": {
+            "cc11Value": 17,
+            "cc74Value": 70,
+            "attenuationActive": true
+          },
+          "technique": "LEGATO_SLUR",
+          "bowDirection": "UNDEFINED",
+          "detuneCents": 0
+        },
+        {
+          "pitch": 64,
+          "startTick": 14888,
+          "durationTicks": 482,
+          "velocity": 22,
+          "role": "LEAD",
+          "dynamics": {
+            "cc11Value": 15,
+            "cc74Value": 69,
+            "attenuationActive": true
+          },
+          "technique": "LEGATO_SLUR",
+          "bowDirection": "UNDEFINED",
+          "detuneCents": 0
+        },
+        {
+          "pitch": 65,
+          "startTick": 24250,
+          "durationTicks": 110,
+          "velocity": 31,
+          "role": "LEAD",
+          "dynamics": {
+            "cc11Value": 18,
+            "cc74Value": 66,
+            "attenuationActive": true
+          },
+          "technique": "STACCATO_STANDARD",
+          "bowDirection": "UNDEFINED",
+          "detuneCents": 0
+        },
+        {
+          "pitch": 64,
+          "startTick": 26882,
+          "durationTicks": 1924,
+          "velocity": 26,
+          "role": "LEAD",
+          "dynamics": {
+            "cc11Value": 17,
+            "cc74Value": 70,
+            "attenuationActive": true
+          },
+          "technique": "LEGATO_SLUR",
+          "bowDirection": "UNDEFINED",
+          "detuneCents": 0
+        },
+        {
+          "pitch": 65,
+          "startTick": 28806,
+          "durationTicks": 1952,
+          "velocity": 28,
+          "role": "LEAD",
+          "dynamics": {
+            "cc11Value": 15,
+            "cc74Value": 69,
+            "attenuationActive": true
+          },
+          "technique": "LEGATO_SLUR",
+          "bowDirection": "UNDEFINED",
+          "detuneCents": 0
+        },
+        {
+          "pitch": 60,
+          "startTick": 72963,
+          "durationTicks": 485,
+          "velocity": 31,
+          "role": "LEAD",
+          "dynamics": {
+            "cc11Value": 17,
+            "cc74Value": 70,
+            "attenuationActive": true
+          },
+          "technique": "LEGATO_SLUR",
+          "bowDirection": "UNDEFINED",
+          "detuneCents": 0
+        },
+        {
+          "pitch": 71,
+          "startTick": 73448,
+          "durationTicks": 474,
+          "velocity": 31,
+          "role": "LEAD",
+          "dynamics": {
+            "cc11Value": 17,
+            "cc74Value": 77,
+            "attenuationActive": false
+          },
+          "technique": "LEGATO_SLUR",
+          "bowDirection": "UNDEFINED",
+          "detuneCents": 0
+        },
+        {
+          "pitch": 60,
+          "startTick": 73922,
+          "durationTicks": 964,
+          "velocity": 30,
+          "role": "LEAD",
+          "dynamics": {
+            "cc11Value": 17,
+            "cc74Value": 70,
+            "attenuationActive": true
+          },
+          "technique": "LEGATO_SLUR",
+          "bowDirection": "UNDEFINED",
+          "detuneCents": 0
+        },
+        {
+          "pitch": 64,
+          "startTick": 74886,
+          "durationTicks": 1923,
+          "velocity": 31,
+          "role": "LEAD",
+          "dynamics": {
+            "cc11Value": 17,
+            "cc74Value": 70,
+            "attenuationActive": true
+          },
+          "technique": "LEGATO_SLUR",
+          "bowDirection": "UNDEFINED",
+          "detuneCents": 0
+        },
+        {
+          "pitch": 64,
+          "startTick": 76809,
+          "durationTicks": 473,
+          "velocity": 26,
+          "role": "LEAD",
+          "dynamics": {
+            "cc11Value": 17,
+            "cc74Value": 70,
+            "attenuationActive": true
+          },
+          "technique": "LEGATO_SLUR",
+          "bowDirection": "UNDEFINED",
+          "detuneCents": 0
+        },
+        {
+          "pitch": 62,
+          "startTick": 77282,
+          "durationTicks": 480,
+          "velocity": 25,
+          "role": "LEAD",
+          "dynamics": {
+            "cc11Value": 17,
+            "cc74Value": 70,
+            "attenuationActive": true
+          },
+          "technique": "LEGATO_SLUR",
+          "bowDirection": "UNDEFINED",
+          "detuneCents": 0
+        },
+        {
+          "pitch": 64,
+          "startTick": 77762,
+          "durationTicks": 964,
+          "velocity": 27,
+          "role": "LEAD",
+          "dynamics": {
+            "cc11Value": 17,
+            "cc74Value": 70,
+            "attenuationActive": true
+          },
+          "technique": "LEGATO_SLUR",
+          "bowDirection": "UNDEFINED",
+          "detuneCents": 0
+        },
+        {
+          "pitch": 67,
+          "startTick": 78726,
+          "durationTicks": 959,
+          "velocity": 27,
+          "role": "LEAD",
+          "dynamics": {
+            "cc11Value": 17,
+            "cc74Value": 70,
+            "attenuationActive": false
+          },
+          "technique": "LEGATO_SLUR",
+          "bowDirection": "UNDEFINED",
+          "detuneCents": 0
+        },
+        {
+          "pitch": 65,
+          "startTick": 79685,
+          "durationTicks": 964,
+          "velocity": 27,
+          "role": "LEAD",
+          "dynamics": {
+            "cc11Value": 15,
+            "cc74Value": 69,
+            "attenuationActive": true
+          },
+          "technique": "LEGATO_SLUR",
+          "bowDirection": "UNDEFINED",
+          "detuneCents": 0
+        },
+        {
+          "pitch": 67,
+          "startTick": 80649,
+          "durationTicks": 478,
+          "velocity": 31,
+          "role": "LEAD",
+          "dynamics": {
+            "cc11Value": 17,
+            "cc74Value": 70,
+            "attenuationActive": false
+          },
+          "technique": "LEGATO_SLUR",
+          "bowDirection": "UNDEFINED",
+          "detuneCents": 0
+        },
+        {
+          "pitch": 65,
+          "startTick": 81127,
+          "durationTicks": 476,
+          "velocity": 22,
+          "role": "LEAD",
+          "dynamics": {
+            "cc11Value": 17,
+            "cc74Value": 70,
+            "attenuationActive": true
+          },
+          "technique": "LEGATO_SLUR",
+          "bowDirection": "UNDEFINED",
+          "detuneCents": 0
+        },
+        {
+          "pitch": 67,
+          "startTick": 81603,
+          "durationTicks": 958,
+          "velocity": 24,
+          "role": "LEAD",
+          "dynamics": {
+            "cc11Value": 17,
+            "cc74Value": 70,
+            "attenuationActive": false
+          },
+          "technique": "LEGATO_SLUR",
+          "bowDirection": "UNDEFINED",
+          "detuneCents": 0
+        },
+        {
+          "pitch": 71,
+          "startTick": 82561,
+          "durationTicks": 962,
+          "velocity": 33,
+          "role": "LEAD",
+          "dynamics": {
+            "cc11Value": 17,
+            "cc74Value": 77,
+            "attenuationActive": false
+          },
+          "technique": "LEGATO_SLUR",
+          "bowDirection": "UNDEFINED",
+          "detuneCents": 0
+        },
+        {
+          "pitch": 60,
+          "startTick": 83523,
+          "durationTicks": 965,
+          "velocity": 24,
+          "role": "LEAD",
+          "dynamics": {
+            "cc11Value": 15,
+            "cc74Value": 69,
+            "attenuationActive": true
+          },
+          "technique": "LEGATO_SLUR",
+          "bowDirection": "UNDEFINED",
+          "detuneCents": 0
+        },
+        {
+          "pitch": 60,
+          "startTick": 84488,
+          "durationTicks": 479,
+          "velocity": 30,
+          "role": "LEAD",
+          "dynamics": {
+            "cc11Value": 17,
+            "cc74Value": 70,
+            "attenuationActive": true
+          },
+          "technique": "LEGATO_SLUR",
+          "bowDirection": "UNDEFINED",
+          "detuneCents": 0
+        },
+        {
+          "pitch": 71,
+          "startTick": 84967,
+          "durationTicks": 483,
+          "velocity": 31,
+          "role": "LEAD",
+          "dynamics": {
+            "cc11Value": 17,
+            "cc74Value": 77,
+            "attenuationActive": false
+          },
+          "technique": "LEGATO_SLUR",
+          "bowDirection": "UNDEFINED",
+          "detuneCents": 0
+        },
+        {
+          "pitch": 60,
+          "startTick": 85450,
+          "durationTicks": 952,
+          "velocity": 27,
+          "role": "LEAD",
+          "dynamics": {
+            "cc11Value": 17,
+            "cc74Value": 70,
+            "attenuationActive": true
+          },
+          "technique": "LEGATO_SLUR",
+          "bowDirection": "UNDEFINED",
+          "detuneCents": 0
+        },
+        {
+          "pitch": 64,
+          "startTick": 86402,
+          "durationTicks": 1956,
+          "velocity": 32,
+          "role": "LEAD",
+          "dynamics": {
+            "cc11Value": 17,
+            "cc74Value": 70,
+            "attenuationActive": true
+          },
+          "technique": "LEGATO_SLUR",
+          "bowDirection": "UNDEFINED",
+          "detuneCents": 0
+        },
+        {
+          "pitch": 64,
+          "startTick": 99849,
+          "durationTicks": 3908,
+          "velocity": 26,
+          "role": "LEAD",
+          "dynamics": {
+            "cc11Value": 17,
+            "cc74Value": 70,
+            "attenuationActive": true
+          },
+          "technique": "LEGATO_SLUR",
+          "bowDirection": "UNDEFINED",
+          "detuneCents": 0
+        }
+      ]
+    },
+    {
+      "id": "trk_oboes",
+      "name": "Oboes",
+      "family": "woodwinds",
+      "color": "#22c55e",
+      "role": "oboes",
+      "lowestNote": 58,
+      "highestNote": 89,
+      "locked": false,
+      "muted": false,
+      "soloed": false,
+      "libraryGroupId": null,
+      "midiChannel": 10,
+      "frozen": false,
+      "notes": [
+        {
+          "pitch": 65,
+          "startTick": 16568,
+          "durationTicks": 112,
+          "velocity": 33,
+          "role": "LEAD",
+          "dynamics": {
+            "cc11Value": 15,
+            "cc74Value": 68,
+            "attenuationActive": false
+          },
+          "technique": "STACCATO_STANDARD",
+          "bowDirection": "UNDEFINED",
+          "detuneCents": 0
+        },
+        {
+          "pitch": 67,
+          "startTick": 18486,
+          "durationTicks": 114,
+          "velocity": 34,
+          "role": "LEAD",
+          "dynamics": {
+            "cc11Value": 15,
+            "cc74Value": 72,
+            "attenuationActive": false
+          },
+          "technique": "STACCATO_STANDARD",
+          "bowDirection": "UNDEFINED",
+          "detuneCents": 0
+        }
+      ]
+    },
+    {
+      "id": "trk_clarinets",
+      "name": "Clarinets",
+      "family": "woodwinds",
+      "color": "#22c55e",
+      "role": "clarinets",
+      "lowestNote": 52,
+      "highestNote": 93,
+      "locked": false,
+      "muted": false,
+      "soloed": false,
+      "libraryGroupId": null,
+      "midiChannel": 11,
+      "frozen": false,
+      "notes": [
+        {
+          "pitch": 62,
+          "startTick": 3,
+          "durationTicks": 1955,
+          "velocity": 27,
+          "role": "LEAD",
+          "isDoubling": true,
+          "dynamics": {
+            "cc11Value": 17,
+            "cc74Value": 69,
+            "attenuationActive": false
+          },
+          "technique": "LEGATO_SLUR",
+          "bowDirection": "UNDEFINED",
+          "detuneCents": 0
+        },
+        {
+          "pitch": 65,
+          "startTick": 2886,
+          "durationTicks": 973,
+          "velocity": 27,
+          "role": "LEAD",
+          "isDoubling": true,
+          "dynamics": {
+            "cc11Value": 17,
+            "cc74Value": 72,
+            "attenuationActive": false
+          },
+          "technique": "LEGATO_SLUR",
+          "bowDirection": "UNDEFINED",
+          "detuneCents": 0
+        },
+        {
+          "pitch": 62,
+          "startTick": 6962,
+          "durationTicks": 118,
+          "velocity": 32,
+          "role": "LEAD",
+          "isDoubling": true,
+          "dynamics": {
+            "cc11Value": 15,
+            "cc74Value": 64,
+            "attenuationActive": false
+          },
+          "technique": "STACCATO_STANDARD",
+          "bowDirection": "UNDEFINED",
+          "detuneCents": 0
+        },
+        {
+          "pitch": 60,
+          "startTick": 10083,
+          "durationTicks": 487,
+          "velocity": 34,
+          "role": "LEAD",
+          "isDoubling": true,
+          "dynamics": {
+            "cc11Value": 17,
+            "cc74Value": 69,
+            "attenuationActive": false
+          },
+          "technique": "LEGATO_SLUR",
+          "bowDirection": "UNDEFINED",
+          "detuneCents": 0
+        },
+        {
+          "pitch": 60,
+          "startTick": 13441,
+          "durationTicks": 489,
+          "velocity": 31,
+          "role": "LEAD",
+          "isDoubling": true,
+          "dynamics": {
+            "cc11Value": 17,
+            "cc74Value": 69,
+            "attenuationActive": false
+          },
+          "technique": "LEGATO_SLUR",
+          "bowDirection": "UNDEFINED",
+          "detuneCents": 0
+        },
+        {
+          "pitch": 62,
+          "startTick": 14405,
+          "durationTicks": 974,
+          "velocity": 35,
+          "role": "LEAD",
+          "isDoubling": true,
+          "dynamics": {
+            "cc11Value": 17,
+            "cc74Value": 69,
+            "attenuationActive": false
+          },
+          "technique": "LEGATO_SLUR",
+          "bowDirection": "UNDEFINED",
+          "detuneCents": 0
+        },
+        {
+          "pitch": 65,
+          "startTick": 24240,
+          "durationTicks": 120,
+          "velocity": 26,
+          "role": "LEAD",
+          "isDoubling": true,
+          "dynamics": {
+            "cc11Value": 18,
+            "cc74Value": 68,
+            "attenuationActive": false
+          },
+          "technique": "STACCATO_STANDARD",
+          "bowDirection": "UNDEFINED",
+          "detuneCents": 0
+        },
+        {
+          "pitch": 64,
+          "startTick": 26890,
+          "durationTicks": 3907,
+          "velocity": 29,
+          "role": "LEAD",
+          "isDoubling": true,
+          "dynamics": {
+            "cc11Value": 17,
+            "cc74Value": 72,
+            "attenuationActive": false
+          },
+          "technique": "LEGATO_SLUR",
+          "bowDirection": "UNDEFINED",
+          "detuneCents": 0
+        },
+        {
+          "pitch": 53,
+          "startTick": 31682,
+          "durationTicks": 977,
+          "velocity": 87,
+          "role": "COUNTERLINE",
+          "dynamics": {
+            "cc11Value": 86,
+            "cc74Value": 96,
+            "attenuationActive": false
+          },
+          "technique": "LEGATO_SLUR",
+          "bowDirection": "UNDEFINED",
+          "detuneCents": 0
+        },
+        {
+          "pitch": 52,
+          "startTick": 35527,
+          "durationTicks": 972,
+          "velocity": 86,
+          "role": "COUNTERLINE",
+          "dynamics": {
+            "cc11Value": 86,
+            "cc74Value": 96,
+            "attenuationActive": false
+          },
+          "technique": "LEGATO_SLUR",
+          "bowDirection": "UNDEFINED",
+          "detuneCents": 0
+        },
+        {
+          "pitch": 53,
+          "startTick": 37445,
+          "durationTicks": 958,
+          "velocity": 89,
+          "role": "COUNTERLINE",
+          "dynamics": {
+            "cc11Value": 86,
+            "cc74Value": 96,
+            "attenuationActive": false
+          },
+          "technique": "LEGATO_SLUR",
+          "bowDirection": "UNDEFINED",
+          "detuneCents": 0
+        },
+        {
+          "pitch": 53,
+          "startTick": 38403,
+          "durationTicks": 976,
+          "velocity": 92,
+          "role": "COUNTERLINE",
+          "dynamics": {
+            "cc11Value": 86,
+            "cc74Value": 96,
+            "attenuationActive": false
+          },
+          "technique": "LEGATO_SLUR",
+          "bowDirection": "UNDEFINED",
+          "detuneCents": 0
+        },
+        {
+          "pitch": 53,
+          "startTick": 39846,
+          "durationTicks": 2442,
+          "velocity": 84,
+          "role": "COUNTERLINE",
+          "dynamics": {
+            "cc11Value": 86,
+            "cc74Value": 96,
+            "attenuationActive": false
+          },
+          "technique": "LEGATO_SLUR",
+          "bowDirection": "UNDEFINED",
+          "detuneCents": 0
+        },
+        {
+          "pitch": 62,
+          "startTick": 43204,
+          "durationTicks": 1924,
+          "velocity": 86,
+          "role": "COUNTERLINE",
+          "dynamics": {
+            "cc11Value": 55,
+            "cc74Value": 84,
+            "attenuationActive": true
+          },
+          "technique": "LEGATO_SLUR",
+          "bowDirection": "UNDEFINED",
+          "detuneCents": 0
+        },
+        {
+          "pitch": 52,
+          "startTick": 45128,
+          "durationTicks": 971,
+          "velocity": 90,
+          "role": "COUNTERLINE",
+          "dynamics": {
+            "cc11Value": 86,
+            "cc74Value": 96,
+            "attenuationActive": false
+          },
+          "technique": "LEGATO_SLUR",
+          "bowDirection": "UNDEFINED",
+          "detuneCents": 0
+        },
+        {
+          "pitch": 53,
+          "startTick": 47046,
+          "durationTicks": 973,
+          "velocity": 91,
+          "role": "COUNTERLINE",
+          "dynamics": {
+            "cc11Value": 86,
+            "cc74Value": 96,
+            "attenuationActive": false
+          },
+          "technique": "LEGATO_SLUR",
+          "bowDirection": "UNDEFINED",
+          "detuneCents": 0
+        },
+        {
+          "pitch": 62,
+          "startTick": 50884,
+          "durationTicks": 975,
+          "velocity": 87,
+          "role": "COUNTERLINE",
+          "dynamics": {
+            "cc11Value": 51,
+            "cc74Value": 82,
+            "attenuationActive": true
+          },
+          "technique": "LEGATO_SLUR",
+          "bowDirection": "UNDEFINED",
+          "detuneCents": 0
+        },
+        {
+          "pitch": 60,
+          "startTick": 53760,
+          "durationTicks": 3917,
+          "velocity": 93,
+          "role": "COUNTERLINE",
+          "dynamics": {
+            "cc11Value": 68,
+            "cc74Value": 89,
+            "attenuationActive": true
+          },
+          "technique": "LEGATO_SLUR",
+          "bowDirection": "UNDEFINED",
+          "detuneCents": 0
+        },
+        {
+          "pitch": 62,
+          "startTick": 58566,
+          "durationTicks": 2932,
+          "velocity": 88,
+          "role": "COUNTERLINE",
+          "dynamics": {
+            "cc11Value": 57,
+            "cc74Value": 85,
+            "attenuationActive": true
+          },
+          "technique": "LEGATO_SLUR",
+          "bowDirection": "UNDEFINED",
+          "detuneCents": 0
+        },
+        {
+          "pitch": 64,
+          "startTick": 72964,
+          "durationTicks": 1,
+          "velocity": 116,
+          "role": "PAD",
+          "dynamics": {
+            "cc11Value": 72,
+            "cc74Value": 94,
+            "attenuationActive": true
+          },
+          "technique": "LEGATO_SLUR",
+          "bowDirection": "UNDEFINED",
+          "detuneCents": 0
+        },
+        {
+          "pitch": 72,
+          "startTick": 72965,
+          "durationTicks": 4,
+          "velocity": 106,
+          "role": "PAD",
+          "dynamics": {
+            "cc11Value": 113,
+            "cc74Value": 116,
+            "attenuationActive": false
+          },
+          "technique": "LEGATO_SLUR",
+          "bowDirection": "UNDEFINED",
+          "detuneCents": 0
+        },
+        {
+          "pitch": 67,
+          "startTick": 72969,
+          "durationTicks": 15356,
+          "velocity": 115,
+          "role": "PAD",
+          "dynamics": {
+            "cc11Value": 72,
+            "cc74Value": 94,
+            "attenuationActive": true
+          },
+          "technique": "LEGATO_SLUR",
+          "bowDirection": "UNDEFINED",
+          "detuneCents": 0
+        },
+        {
+          "pitch": 72,
+          "startTick": 88325,
+          "durationTicks": 1,
+          "velocity": 104,
+          "role": "PAD",
+          "dynamics": {
+            "cc11Value": 113,
+            "cc74Value": 116,
+            "attenuationActive": false
+          },
+          "technique": "LEGATO_SLUR",
+          "bowDirection": "UNDEFINED",
+          "detuneCents": 0
+        },
+        {
+          "pitch": 64,
+          "startTick": 88326,
+          "durationTicks": 15661,
+          "velocity": 116,
+          "role": "PAD",
+          "dynamics": {
+            "cc11Value": 98,
+            "cc74Value": 104,
+            "attenuationActive": true
+          },
+          "technique": "LEGATO_SLUR",
+          "bowDirection": "UNDEFINED",
+          "detuneCents": 0
+        }
+      ]
+    },
+    {
+      "id": "trk_bassoons",
+      "name": "Bassoons",
+      "family": "woodwinds",
+      "color": "#22c55e",
+      "role": "bassoons",
+      "lowestNote": 34,
+      "highestNote": 70,
+      "locked": false,
+      "muted": false,
+      "soloed": false,
+      "libraryGroupId": null,
+      "midiChannel": 12,
+      "frozen": false,
+      "notes": [
+        {
+          "pitch": 38,
+          "startTick": 2,
+          "durationTicks": 7681,
+          "velocity": 61,
+          "role": "BASS",
+          "dynamics": {
+            "cc11Value": 55,
+            "cc74Value": 86,
+            "attenuationActive": false
+          },
+          "technique": "LEGATO_SLUR",
+          "bowDirection": "UNDEFINED",
+          "detuneCents": 0
+        },
+        {
+          "pitch": 43,
+          "startTick": 7683,
+          "durationTicks": 7683,
+          "velocity": 64,
+          "role": "BASS",
+          "dynamics": {
+            "cc11Value": 51,
+            "cc74Value": 89,
+            "attenuationActive": false
+          },
+          "technique": "LEGATO_SLUR",
+          "bowDirection": "UNDEFINED",
+          "detuneCents": 0
+        },
+        {
+          "pitch": 38,
+          "startTick": 15366,
+          "durationTicks": 3841,
+          "velocity": 68,
+          "role": "BASS",
+          "dynamics": {
+            "cc11Value": 56,
+            "cc74Value": 86,
+            "attenuationActive": false
+          },
+          "technique": "LEGATO_SLUR",
+          "bowDirection": "UNDEFINED",
+          "detuneCents": 0
+        },
+        {
+          "pitch": 41,
+          "startTick": 19207,
+          "durationTicks": 3834,
+          "velocity": 62,
+          "role": "BASS",
+          "dynamics": {
+            "cc11Value": 54,
+            "cc74Value": 86,
+            "attenuationActive": false
+          },
+          "technique": "LEGATO_SLUR",
+          "bowDirection": "UNDEFINED",
+          "detuneCents": 0
+        },
+        {
+          "pitch": 36,
+          "startTick": 23041,
+          "durationTicks": 3844,
+          "velocity": 63,
+          "role": "BASS",
+          "dynamics": {
+            "cc11Value": 54,
+            "cc74Value": 86,
+            "attenuationActive": false
+          },
+          "technique": "LEGATO_SLUR",
+          "bowDirection": "UNDEFINED",
+          "detuneCents": 0
+        },
+        {
+          "pitch": 45,
+          "startTick": 26885,
+          "durationTicks": 3912,
+          "velocity": 59,
+          "role": "BASS",
+          "dynamics": {
+            "cc11Value": 48,
+            "cc74Value": 88,
+            "attenuationActive": false
+          },
+          "technique": "LEGATO_SLUR",
+          "bowDirection": "UNDEFINED",
+          "detuneCents": 0
+        },
+        {
+          "pitch": 60,
+          "startTick": 61441,
+          "durationTicks": 480,
+          "velocity": 34,
+          "role": "LEAD",
+          "dynamics": {
+            "cc11Value": 17,
+            "cc74Value": 76,
+            "attenuationActive": false
+          },
+          "technique": "LEGATO_SLUR",
+          "bowDirection": "UNDEFINED",
+          "detuneCents": 0
+        },
+        {
+          "pitch": 59,
+          "startTick": 61921,
+          "durationTicks": 485,
+          "velocity": 34,
+          "role": "LEAD",
+          "dynamics": {
+            "cc11Value": 17,
+            "cc74Value": 76,
+            "attenuationActive": false
+          },
+          "technique": "LEGATO_SLUR",
+          "bowDirection": "UNDEFINED",
+          "detuneCents": 0
+        },
+        {
+          "pitch": 60,
+          "startTick": 62406,
+          "durationTicks": 956,
+          "velocity": 39,
+          "role": "LEAD",
+          "dynamics": {
+            "cc11Value": 17,
+            "cc74Value": 76,
+            "attenuationActive": false
+          },
+          "technique": "LEGATO_SLUR",
+          "bowDirection": "UNDEFINED",
+          "detuneCents": 0
+        },
+        {
+          "pitch": 64,
+          "startTick": 63362,
+          "durationTicks": 1920,
+          "velocity": 41,
+          "role": "LEAD",
+          "dynamics": {
+            "cc11Value": 17,
+            "cc74Value": 81,
+            "attenuationActive": false
+          },
+          "technique": "LEGATO_SLUR",
+          "bowDirection": "UNDEFINED",
+          "detuneCents": 0
+        },
+        {
+          "pitch": 64,
+          "startTick": 65282,
+          "durationTicks": 484,
+          "velocity": 33,
+          "role": "LEAD",
+          "dynamics": {
+            "cc11Value": 17,
+            "cc74Value": 81,
+            "attenuationActive": false
+          },
+          "technique": "LEGATO_SLUR",
+          "bowDirection": "UNDEFINED",
+          "detuneCents": 0
+        },
+        {
+          "pitch": 62,
+          "startTick": 65766,
+          "durationTicks": 483,
+          "velocity": 36,
+          "role": "LEAD",
+          "dynamics": {
+            "cc11Value": 17,
+            "cc74Value": 76,
+            "attenuationActive": false
+          },
+          "technique": "LEGATO_SLUR",
+          "bowDirection": "UNDEFINED",
+          "detuneCents": 0
+        },
+        {
+          "pitch": 64,
+          "startTick": 66249,
+          "durationTicks": 970,
+          "velocity": 42,
+          "role": "LEAD",
+          "dynamics": {
+            "cc11Value": 17,
+            "cc74Value": 81,
+            "attenuationActive": false
+          },
+          "technique": "LEGATO_SLUR",
+          "bowDirection": "UNDEFINED",
+          "detuneCents": 0
+        },
+        {
+          "pitch": 64,
+          "startTick": 69125,
+          "durationTicks": 3912,
+          "velocity": 41,
+          "role": "LEAD",
+          "dynamics": {
+            "cc11Value": 17,
+            "cc74Value": 81,
+            "attenuationActive": false
+          },
+          "technique": "LEGATO_SLUR",
+          "bowDirection": "UNDEFINED",
+          "detuneCents": 0
+        }
+      ]
+    },
+    {
+      "id": "trk_timpani",
+      "name": "Timpani",
+      "family": "percussion",
+      "color": "#ef4444",
+      "role": "timpani",
+      "lowestNote": 38,
+      "highestNote": 57,
+      "locked": false,
+      "muted": false,
+      "soloed": false,
+      "libraryGroupId": null,
+      "midiChannel": 13,
+      "frozen": false,
+      "notes": []
+    },
+    {
+      "id": "trk_snare",
+      "name": "Snare",
+      "family": "percussion",
+      "color": "#ef4444",
+      "role": "snare",
+      "lowestNote": 38,
+      "highestNote": 38,
+      "locked": false,
+      "muted": false,
+      "soloed": false,
+      "libraryGroupId": null,
+      "midiChannel": 14,
+      "frozen": false,
+      "notes": []
+    },
+    {
+      "id": "trk_cymbals",
+      "name": "Cymbals",
+      "family": "percussion",
+      "color": "#ef4444",
+      "role": "cymbals",
+      "lowestNote": 49,
+      "highestNote": 49,
+      "locked": false,
+      "muted": false,
+      "soloed": false,
+      "libraryGroupId": null,
+      "midiChannel": 15,
+      "frozen": false,
+      "notes": []
+    },
+    {
+      "id": "trk_aux",
+      "name": "Aux",
+      "family": "percussion",
+      "color": "#ef4444",
+      "role": "aux",
+      "lowestNote": 36,
+      "highestNote": 81,
+      "locked": false,
+      "muted": false,
+      "soloed": false,
+      "libraryGroupId": null,
+      "midiChannel": 16,
+      "frozen": false,
+      "notes": []
+    },
+    {
+      "id": "trk_piano",
+      "name": "Piano",
+      "family": "keys",
+      "color": "#a855f8",
+      "role": "piano",
+      "lowestNote": 21,
+      "highestNote": 108,
+      "locked": false,
+      "muted": false,
+      "soloed": false,
+      "libraryGroupId": null,
+      "midiChannel": 1,
+      "frozen": false,
+      "notes": []
+    },
+    {
+      "id": "trk_harp",
+      "name": "Harp",
+      "family": "keys",
+      "color": "#a855f8",
+      "role": "harp",
+      "lowestNote": 23,
+      "highestNote": 104,
+      "locked": false,
+      "muted": false,
+      "soloed": false,
+      "libraryGroupId": null,
+      "midiChannel": 2,
+      "frozen": false,
+      "notes": []
+    },
+    {
+      "id": "bass_trombone",
+      "name": "Bass Trombone",
+      "family": "brass",
+      "color": "#eab308",
+      "role": "bassTrombone",
+      "lowestNote": 22,
+      "highestNote": 65,
+      "locked": false,
+      "muted": false,
+      "soloed": false,
+      "libraryGroupId": null,
+      "midiChannel": 3,
+      "frozen": false,
+      "notes": [
+        {
+          "pitch": 36,
+          "startTick": 72962,
+          "durationTicks": 30718,
+          "velocity": 116,
+          "role": "BASS",
+          "isDoubling": true,
+          "dynamics": {
+            "cc11Value": 101,
+            "cc74Value": 99,
+            "attenuationActive": false
+          },
+          "technique": "DOIT",
+          "bowDirection": "UNDEFINED",
+          "pitchBendPoints": [
+            {
+              "tick": 103488,
+              "cents": 0
+            },
+            {
+              "tick": 103680,
+              "cents": 170
+            }
+          ],
+          "detuneCents": 0
+        }
+      ]
+    },
+    {
+      "id": "double_bass",
+      "name": "Double Bass",
+      "family": "strings",
+      "color": "#3b82f6",
+      "role": "doubleBass",
+      "lowestNote": 24,
+      "highestNote": 67,
+      "locked": false,
+      "muted": false,
+      "soloed": false,
+      "libraryGroupId": null,
+      "midiChannel": 4,
+      "frozen": false,
+      "notes": [
+        {
+          "pitch": 28,
+          "startTick": 30721,
+          "durationTicks": 1919,
+          "velocity": 113,
+          "role": "BASS",
+          "isDoubling": true,
+          "dynamics": {
+            "cc11Value": 110,
+            "cc74Value": 116,
+            "attenuationActive": false
+          },
+          "technique": "BOWED_TREMOLO",
+          "bowDirection": "DOWN_BOW",
+          "detuneCents": 0
+        },
+        {
+          "pitch": 33,
+          "startTick": 34562,
+          "durationTicks": 1918,
+          "velocity": 121,
+          "role": "BASS",
+          "isDoubling": true,
+          "dynamics": {
+            "cc11Value": 109,
+            "cc74Value": 116,
+            "attenuationActive": false
+          },
+          "technique": "BOWED_TREMOLO",
+          "bowDirection": "DOWN_BOW",
+          "detuneCents": 0
+        },
+        {
+          "pitch": 28,
+          "startTick": 38406,
+          "durationTicks": 1914,
+          "velocity": 110,
+          "role": "BASS",
+          "isDoubling": true,
+          "dynamics": {
+            "cc11Value": 106,
+            "cc74Value": 114,
+            "attenuationActive": false
+          },
+          "technique": "BOWED_TREMOLO",
+          "bowDirection": "DOWN_BOW",
+          "detuneCents": 0
+        },
+        {
+          "pitch": 28,
+          "startTick": 42244,
+          "durationTicks": 1916,
+          "velocity": 120,
+          "role": "BASS",
+          "isDoubling": true,
+          "dynamics": {
+            "cc11Value": 115,
+            "cc74Value": 118,
+            "attenuationActive": false
+          },
+          "technique": "BOWED_TREMOLO",
+          "bowDirection": "DOWN_BOW",
+          "detuneCents": 0
+        },
+        {
+          "pitch": 34,
+          "startTick": 46087,
+          "durationTicks": 1913,
+          "velocity": 126,
+          "role": "BASS",
+          "isDoubling": true,
+          "dynamics": {
+            "cc11Value": 115,
+            "cc74Value": 118,
+            "attenuationActive": false
+          },
+          "technique": "BOWED_TREMOLO",
+          "bowDirection": "DOWN_BOW",
+          "detuneCents": 0
+        },
+        {
+          "pitch": 28,
+          "startTick": 49924,
+          "durationTicks": 1916,
+          "velocity": 114,
+          "role": "BASS",
+          "isDoubling": true,
+          "dynamics": {
+            "cc11Value": 104,
+            "cc74Value": 114,
+            "attenuationActive": false
+          },
+          "technique": "BOWED_TREMOLO",
+          "bowDirection": "DOWN_BOW",
+          "detuneCents": 0
+        },
+        {
+          "pitch": 33,
+          "startTick": 53768,
+          "durationTicks": 3832,
+          "velocity": 121,
+          "role": "BASS",
+          "isDoubling": true,
+          "dynamics": {
+            "cc11Value": 114,
+            "cc74Value": 118,
+            "attenuationActive": false
+          },
+          "technique": "BOWED_TREMOLO",
+          "bowDirection": "DOWN_BOW",
+          "detuneCents": 0
+        }
+      ]
+    }
+  ],
+  "exportedAt": "2026-10-13T16:37:20.127Z"
+}

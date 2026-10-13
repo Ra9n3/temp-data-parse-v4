@@ -44,7 +44,12 @@ export function acousticWeightForTrack(track: Project["tracks"][number]): number
 }
 
 export function cc7ForWeight(weight: number): number {
-  return Math.round(clamp(127 * (0.4 + 0.6 * (weight / 1.2)), 30, 115));
+  // Module 8.7 B4 — mix rebalance: compress + INVERT the spread. The old band
+  // (0.4 + 0.6·w/1.2, clamp [30,115]) gave brass 114–115 and strings 70–73.
+  // The new band clamps to [78,108]: strings ≈ 99–104, woodwinds ≈ 92–99,
+  // brass ≈ 78–86, tuba ≈ 78 — heavier carriers ride LOWER, so the mix opens
+  // up. Export flows through unchanged (midi.ts reads this function).
+  return Math.round(clamp(127 * (0.85 - 0.25 * (weight / 1.2)), 78, 108));
 }
 
 export type CurveType = "EXPONENTIAL" | "LINEAR" | "LOGARITHMIC";
@@ -79,7 +84,7 @@ export function resolveBalanceConfig(partial?: BalanceConfigPartial): BalanceCon
 export const DEFAULT_BALANCE_CONFIG: BalanceConfig = {
   windowing: { enabled: true, minGapMs: 120, searchWindowMs: 600, allowOctaveEscape: false },
   attenuation: { lowFluteFactor: 0.82, brassDominanceFactor: 0.8, combinedFloor: 0.6 },
-  cc11Floor: 15,
+  cc11Floor: 40, // Module 8.7 B4: pp floor 15 → 40 (was starving winds/strings)
 };
 
 export interface BalanceEvent extends AbstractNoteEvent {

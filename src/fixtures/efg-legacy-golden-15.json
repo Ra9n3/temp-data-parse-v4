@@ -31,7 +31,7 @@
    {
     "pitch": 81,
     "startTick": 960,
-    "durationTicks": 979,
+    "durationTicks": 960,
     "velocity": 65,
     "dynamics": {
      "cc11Value": 51,
@@ -59,7 +59,7 @@
    {
     "pitch": 81,
     "startTick": 2880,
-    "durationTicks": 979,
+    "durationTicks": 960,
     "velocity": 73,
     "dynamics": {
      "cc11Value": 60,
@@ -87,7 +87,7 @@
    {
     "pitch": 81,
     "startTick": 4800,
-    "durationTicks": 979,
+    "durationTicks": 960,
     "velocity": 67,
     "dynamics": {
      "cc11Value": 53,
@@ -115,7 +115,7 @@
    {
     "pitch": 81,
     "startTick": 6720,
-    "durationTicks": 979,
+    "durationTicks": 960,
     "velocity": 70,
     "dynamics": {
      "cc11Value": 57,
@@ -143,7 +143,7 @@
    {
     "pitch": 79,
     "startTick": 8640,
-    "durationTicks": 979,
+    "durationTicks": 960,
     "velocity": 72,
     "dynamics": {
      "cc11Value": 59,
@@ -171,7 +171,7 @@
    {
     "pitch": 79,
     "startTick": 10560,
-    "durationTicks": 979,
+    "durationTicks": 960,
     "velocity": 72,
     "dynamics": {
      "cc11Value": 60,
@@ -199,7 +199,7 @@
    {
     "pitch": 79,
     "startTick": 12480,
-    "durationTicks": 979,
+    "durationTicks": 960,
     "velocity": 70,
     "dynamics": {
      "cc11Value": 57,
@@ -227,7 +227,7 @@
    {
     "pitch": 79,
     "startTick": 14400,
-    "durationTicks": 979,
+    "durationTicks": 960,
     "velocity": 66,
     "dynamics": {
      "cc11Value": 53,
@@ -255,7 +255,7 @@
    {
     "pitch": 86,
     "startTick": 16320,
-    "durationTicks": 979,
+    "durationTicks": 960,
     "velocity": 75,
     "dynamics": {
      "cc11Value": 60,
@@ -283,7 +283,7 @@
    {
     "pitch": 86,
     "startTick": 18240,
-    "durationTicks": 979,
+    "durationTicks": 960,
     "velocity": 79,
     "dynamics": {
      "cc11Value": 64,
@@ -311,7 +311,7 @@
    {
     "pitch": 84,
     "startTick": 20160,
-    "durationTicks": 979,
+    "durationTicks": 960,
     "velocity": 75,
     "dynamics": {
      "cc11Value": 59,
@@ -339,7 +339,7 @@
    {
     "pitch": 84,
     "startTick": 22080,
-    "durationTicks": 979,
+    "durationTicks": 960,
     "velocity": 71,
     "dynamics": {
      "cc11Value": 54,
@@ -367,7 +367,7 @@
    {
     "pitch": 84,
     "startTick": 24000,
-    "durationTicks": 979,
+    "durationTicks": 960,
     "velocity": 69,
     "dynamics": {
      "cc11Value": 52,
@@ -395,7 +395,7 @@
    {
     "pitch": 84,
     "startTick": 25920,
-    "durationTicks": 979,
+    "durationTicks": 960,
     "velocity": 72,
     "dynamics": {
      "cc11Value": 56,
@@ -423,7 +423,7 @@
    {
     "pitch": 84,
     "startTick": 27840,
-    "durationTicks": 979,
+    "durationTicks": 960,
     "velocity": 75,
     "dynamics": {
      "cc11Value": 59,
@@ -451,7 +451,7 @@
    {
     "pitch": 84,
     "startTick": 29760,
-    "durationTicks": 979,
+    "durationTicks": 960,
     "velocity": 74,
     "dynamics": {
      "cc11Value": 58,
@@ -493,7 +493,7 @@
    {
     "pitch": 86,
     "startTick": 32650,
-    "durationTicks": 979,
+    "durationTicks": 957,
     "velocity": 123,
     "detuneCents": 0,
     "cc74Offset": -5,
@@ -537,7 +537,7 @@
    {
     "pitch": 84,
     "startTick": 35533,
-    "durationTicks": 979,
+    "durationTicks": 4,
     "velocity": 119,
     "detuneCents": 0,
     "cc74Offset": -5,
@@ -581,7 +581,7 @@
    {
     "pitch": 84,
     "startTick": 38400,
-    "durationTicks": 979,
+    "durationTicks": 960,
     "velocity": 122,
     "dynamics": {
      "cc11Value": 115,
@@ -623,7 +623,7 @@
    {
     "pitch": 86,
     "startTick": 41287,
-    "durationTicks": 979,
+    "durationTicks": 6,
     "velocity": 119,
     "detuneCents": 0,
     "cc74Offset": -5,
@@ -681,7 +681,7 @@
    {
     "pitch": 88,
     "startTick": 45134,
-    "durationTicks": 979,
+    "durationTicks": 946,
     "velocity": 127,
     "detuneCents": 0,
     "cc74Offset": -5,
@@ -738,7 +738,7 @@
    {
     "pitch": 88,
     "startTick": 48969,
-    "durationTicks": 979,
+    "durationTicks": 951,
     "velocity": 124,
     "detuneCents": 0,
     "cc74Offset": -5,
@@ -767,7 +767,7 @@
    {
     "pitch": 86,
     "startTick": 50880,
-    "durationTicks": 979,
+    "durationTicks": 960,
     "velocity": 127,
     "dynamics": {
      "cc11Value": 121,
@@ -823,7 +823,7 @@
    {
     "pitch": 84,
     "startTick": 54736,
-    "durationTicks": 979,
+    "durationTicks": 1,
     "velocity": 121,
     "detuneCents": 0,
     "cc74Offset": -5,
@@ -895,7 +895,7 @@
    {
     "pitch": 86,
     "startTick": 59520,
-    "durationTicks": 979,
+    "durationTicks": 960,
     "velocity": 121,
     "dynamics": {
      "cc11Value": 114,
@@ -942,7 +942,7 @@
    {
     "pitch": 74,
     "startTick": 960,
-    "durationTicks": 979,
+    "durationTicks": 960,
     "velocity": 72,
     "dynamics": {
      "cc11Value": 60,
@@ -1110,7 +1110,7 @@
    {
     "pitch": 74,
     "startTick": 8640,
-    "durationTicks": 979,
+    "durationTicks": 960,
     "velocity": 73,
     "dynamics": {
      "cc11Value": 61,
@@ -1194,7 +1194,7 @@
    {
     "pitch": 74,
     "startTick": 12480,
-    "durationTicks": 979,
+    "durationTicks": 960,
     "velocity": 73,
     "dynamics": {
      "cc11Value": 60,
@@ -1264,7 +1264,7 @@
    {
     "pitch": 74,
     "startTick": 16320,
-    "durationTicks": 979,
+    "durationTicks": 960,
     "velocity": 72,
     "dynamics": {
      "cc11Value": 60,
@@ -1320,7 +1320,7 @@
    {
     "pitch": 76,
     "startTick": 19200,
-    "durationTicks": 979,
+    "durationTicks": 960,
     "velocity": 71,
     "dynamics": {
      "cc11Value": 58,
@@ -1376,7 +1376,7 @@
    {
     "pitch": 77,
     "startTick": 22080,
-    "durationTicks": 979,
+    "durationTicks": 960,
     "velocity": 71,
     "dynamics": {
      "cc11Value": 59,
@@ -1404,7 +1404,7 @@
    {
     "pitch": 79,
     "startTick": 24000,
-    "durationTicks": 979,
+    "durationTicks": 960,
     "velocity": 71,
     "dynamics": {
      "cc11Value": 58,
@@ -1824,7 +1824,7 @@
    {
     "pitch": 81,
     "startTick": 46080,
-    "durationTicks": 979,
+    "durationTicks": 960,
     "velocity": 120,
     "dynamics": {
      "cc11Value": 117,
@@ -5664,8 +5664,8 @@
     "durationTicks": 979,
     "velocity": 58,
     "dynamics": {
-     "cc11Value": 17,
-     "cc74Value": 76,
+     "cc11Value": 40,
+     "cc74Value": 85,
      "attenuationActive": false
     },
     "technique": "LEGATO_SLUR",
@@ -5678,8 +5678,8 @@
     "durationTicks": 960,
     "velocity": 68,
     "dynamics": {
-     "cc11Value": 25,
-     "cc74Value": 85,
+     "cc11Value": 40,
+     "cc74Value": 91,
      "attenuationActive": false
     },
     "technique": "LEGATO_SLUR",
@@ -5692,8 +5692,8 @@
     "durationTicks": 960,
     "velocity": 60,
     "dynamics": {
-     "cc11Value": 17,
-     "cc74Value": 82,
+     "cc11Value": 40,
+     "cc74Value": 91,
      "attenuationActive": false
     },
     "technique": "LEGATO_SLUR",
@@ -5706,8 +5706,8 @@
     "durationTicks": 960,
     "velocity": 63,
     "dynamics": {
-     "cc11Value": 20,
-     "cc74Value": 83,
+     "cc11Value": 40,
+     "cc74Value": 91,
      "attenuationActive": false
     },
     "technique": "LEGATO_SLUR",
@@ -5720,8 +5720,8 @@
     "durationTicks": 960,
     "velocity": 67,
     "dynamics": {
-     "cc11Value": 24,
-     "cc74Value": 85,
+     "cc11Value": 40,
+     "cc74Value": 91,
      "attenuationActive": false
     },
     "technique": "LEGATO_SLUR",
@@ -5734,8 +5734,8 @@
     "durationTicks": 456,
     "velocity": 63,
     "dynamics": {
-     "cc11Value": 20,
-     "cc74Value": 79,
+     "cc11Value": 40,
+     "cc74Value": 87,
      "attenuationActive": false
     },
     "technique": "STANDARD_TONGUED",
@@ -5748,8 +5748,8 @@
     "durationTicks": 456,
     "velocity": 62,
     "dynamics": {
-     "cc11Value": 20,
-     "cc74Value": 79,
+     "cc11Value": 40,
+     "cc74Value": 87,
      "attenuationActive": false
     },
     "technique": "STANDARD_TONGUED",
@@ -5762,8 +5762,8 @@
     "durationTicks": 456,
     "velocity": 67,
     "dynamics": {
-     "cc11Value": 23,
-     "cc74Value": 80,
+     "cc11Value": 40,
+     "cc74Value": 87,
      "attenuationActive": false
     },
     "technique": "STANDARD_TONGUED",
@@ -5776,8 +5776,8 @@
     "durationTicks": 456,
     "velocity": 65,
     "dynamics": {
-     "cc11Value": 23,
-     "cc74Value": 80,
+     "cc11Value": 40,
+     "cc74Value": 87,
      "attenuationActive": false
     },
     "technique": "STANDARD_TONGUED",
@@ -5790,8 +5790,8 @@
     "durationTicks": 960,
     "velocity": 62,
     "dynamics": {
-     "cc11Value": 19,
-     "cc74Value": 83,
+     "cc11Value": 40,
+     "cc74Value": 91,
      "attenuationActive": false
     },
     "technique": "LEGATO_SLUR",
@@ -5804,8 +5804,8 @@
     "durationTicks": 960,
     "velocity": 69,
     "dynamics": {
-     "cc11Value": 26,
-     "cc74Value": 85,
+     "cc11Value": 40,
+     "cc74Value": 91,
      "attenuationActive": false
     },
     "technique": "LEGATO_SLUR",
@@ -5818,8 +5818,8 @@
     "durationTicks": 960,
     "velocity": 59,
     "dynamics": {
-     "cc11Value": 16,
-     "cc74Value": 81,
+     "cc11Value": 40,
+     "cc74Value": 91,
      "attenuationActive": false
     },
     "technique": "LEGATO_SLUR",
@@ -5832,8 +5832,8 @@
     "durationTicks": 960,
     "velocity": 65,
     "dynamics": {
-     "cc11Value": 21,
-     "cc74Value": 83,
+     "cc11Value": 40,
+     "cc74Value": 91,
      "attenuationActive": false
     },
     "technique": "LEGATO_SLUR",
@@ -5846,8 +5846,8 @@
     "durationTicks": 456,
     "velocity": 66,
     "dynamics": {
-     "cc11Value": 23,
-     "cc74Value": 80,
+     "cc11Value": 40,
+     "cc74Value": 87,
      "attenuationActive": false
     },
     "technique": "STANDARD_TONGUED",
@@ -5860,8 +5860,8 @@
     "durationTicks": 456,
     "velocity": 66,
     "dynamics": {
-     "cc11Value": 23,
-     "cc74Value": 80,
+     "cc11Value": 40,
+     "cc74Value": 87,
      "attenuationActive": false
     },
     "technique": "STANDARD_TONGUED",
@@ -5874,8 +5874,8 @@
     "durationTicks": 960,
     "velocity": 67,
     "dynamics": {
-     "cc11Value": 23,
-     "cc74Value": 84,
+     "cc11Value": 40,
+     "cc74Value": 91,
      "attenuationActive": false
     },
     "technique": "LEGATO_SLUR",
@@ -5888,8 +5888,8 @@
     "durationTicks": 960,
     "velocity": 59,
     "dynamics": {
-     "cc11Value": 16,
-     "cc74Value": 81,
+     "cc11Value": 40,
+     "cc74Value": 91,
      "attenuationActive": false
     },
     "technique": "LEGATO_SLUR",
@@ -5902,8 +5902,8 @@
     "durationTicks": 960,
     "velocity": 63,
     "dynamics": {
-     "cc11Value": 19,
-     "cc74Value": 83,
+     "cc11Value": 40,
+     "cc74Value": 91,
      "attenuationActive": false
     },
     "technique": "LEGATO_SLUR",
@@ -5916,8 +5916,8 @@
     "durationTicks": 456,
     "velocity": 62,
     "dynamics": {
-     "cc11Value": 19,
-     "cc74Value": 79,
+     "cc11Value": 40,
+     "cc74Value": 87,
      "attenuationActive": false
     },
     "technique": "STANDARD_TONGUED",
@@ -5930,8 +5930,8 @@
     "durationTicks": 456,
     "velocity": 60,
     "dynamics": {
-     "cc11Value": 19,
-     "cc74Value": 79,
+     "cc11Value": 40,
+     "cc74Value": 87,
      "attenuationActive": false
     },
     "technique": "STANDARD_TONGUED",
@@ -5944,8 +5944,8 @@
     "durationTicks": 456,
     "velocity": 68,
     "dynamics": {
-     "cc11Value": 23,
-     "cc74Value": 80,
+     "cc11Value": 40,
+     "cc74Value": 87,
      "attenuationActive": false
     },
     "technique": "STANDARD_TONGUED",
@@ -5958,8 +5958,8 @@
     "durationTicks": 456,
     "velocity": 66,
     "dynamics": {
-     "cc11Value": 23,
-     "cc74Value": 80,
+     "cc11Value": 40,
+     "cc74Value": 87,
      "attenuationActive": false
     },
     "technique": "STANDARD_TONGUED",
@@ -5972,8 +5972,8 @@
     "durationTicks": 960,
     "velocity": 60,
     "dynamics": {
-     "cc11Value": 17,
-     "cc74Value": 82,
+     "cc11Value": 40,
+     "cc74Value": 91,
      "attenuationActive": false
     },
     "technique": "LEGATO_SLUR",
@@ -5986,8 +5986,8 @@
     "durationTicks": 456,
     "velocity": 62,
     "dynamics": {
-     "cc11Value": 18,
-     "cc74Value": 78,
+     "cc11Value": 40,
+     "cc74Value": 87,
      "attenuationActive": false
     },
     "technique": "STANDARD_TONGUED",
@@ -6000,8 +6000,8 @@
     "durationTicks": 456,
     "velocity": 62,
     "dynamics": {
-     "cc11Value": 18,
-     "cc74Value": 78,
+     "cc11Value": 40,
+     "cc74Value": 87,
      "attenuationActive": false
     },
     "technique": "STANDARD_TONGUED",
@@ -6014,8 +6014,8 @@
     "durationTicks": 979,
     "velocity": 59,
     "dynamics": {
-     "cc11Value": 16,
-     "cc74Value": 81,
+     "cc11Value": 40,
+     "cc74Value": 91,
      "attenuationActive": false
     },
     "technique": "LEGATO_SLUR",
@@ -6028,8 +6028,8 @@
     "durationTicks": 456,
     "velocity": 67,
     "dynamics": {
-     "cc11Value": 24,
-     "cc74Value": 81,
+     "cc11Value": 40,
+     "cc74Value": 87,
      "attenuationActive": false
     },
     "technique": "STANDARD_TONGUED",
@@ -6042,8 +6042,8 @@
     "durationTicks": 456,
     "velocity": 67,
     "dynamics": {
-     "cc11Value": 24,
-     "cc74Value": 81,
+     "cc11Value": 40,
+     "cc74Value": 87,
      "attenuationActive": false
     },
     "technique": "STANDARD_TONGUED",
@@ -6056,8 +6056,8 @@
     "durationTicks": 960,
     "velocity": 60,
     "dynamics": {
-     "cc11Value": 17,
-     "cc74Value": 82,
+     "cc11Value": 40,
+     "cc74Value": 91,
      "attenuationActive": false
     },
     "technique": "LEGATO_SLUR",
@@ -6070,8 +6070,8 @@
     "durationTicks": 960,
     "velocity": 69,
     "dynamics": {
-     "cc11Value": 26,
-     "cc74Value": 85,
+     "cc11Value": 40,
+     "cc74Value": 91,
      "attenuationActive": false
     },
     "technique": "LEGATO_SLUR",
@@ -6084,8 +6084,8 @@
     "durationTicks": 456,
     "velocity": 62,
     "dynamics": {
-     "cc11Value": 18,
-     "cc74Value": 78,
+     "cc11Value": 40,
+     "cc74Value": 87,
      "attenuationActive": false
     },
     "technique": "STANDARD_TONGUED",
@@ -6098,8 +6098,8 @@
     "durationTicks": 456,
     "velocity": 62,
     "dynamics": {
-     "cc11Value": 18,
-     "cc74Value": 78,
+     "cc11Value": 40,
+     "cc74Value": 87,
      "attenuationActive": false
     },
     "technique": "STANDARD_TONGUED",
@@ -6112,8 +6112,8 @@
     "durationTicks": 979,
     "velocity": 63,
     "dynamics": {
-     "cc11Value": 20,
-     "cc74Value": 83,
+     "cc11Value": 40,
+     "cc74Value": 91,
      "attenuationActive": false
     },
     "technique": "LEGATO_SLUR",
@@ -6126,8 +6126,8 @@
     "durationTicks": 960,
     "velocity": 63,
     "dynamics": {
-     "cc11Value": 20,
-     "cc74Value": 83,
+     "cc11Value": 40,
+     "cc74Value": 91,
      "attenuationActive": false
     },
     "technique": "LEGATO_SLUR",
@@ -6140,8 +6140,8 @@
     "durationTicks": 960,
     "velocity": 61,
     "dynamics": {
-     "cc11Value": 18,
-     "cc74Value": 82,
+     "cc11Value": 40,
+     "cc74Value": 91,
      "attenuationActive": false
     },
     "technique": "LEGATO_SLUR",
@@ -6154,8 +6154,8 @@
     "durationTicks": 960,
     "velocity": 64,
     "dynamics": {
-     "cc11Value": 21,
-     "cc74Value": 83,
+     "cc11Value": 40,
+     "cc74Value": 91,
      "attenuationActive": false
     },
     "technique": "LEGATO_SLUR",
@@ -6168,8 +6168,8 @@
     "durationTicks": 960,
     "velocity": 68,
     "dynamics": {
-     "cc11Value": 24,
-     "cc74Value": 85,
+     "cc11Value": 40,
+     "cc74Value": 91,
      "attenuationActive": false
     },
     "technique": "LEGATO_SLUR",
@@ -6995,8 +6995,8 @@
     "durationTicks": 456,
     "velocity": 59,
     "dynamics": {
-     "cc11Value": 18,
-     "cc74Value": 73,
+     "cc11Value": 40,
+     "cc74Value": 82,
      "attenuationActive": false
     },
     "technique": "STANDARD_TONGUED",
@@ -7009,8 +7009,8 @@
     "durationTicks": 979,
     "velocity": 63,
     "dynamics": {
-     "cc11Value": 22,
-     "cc74Value": 79,
+     "cc11Value": 40,
+     "cc74Value": 86,
      "attenuationActive": false
     },
     "technique": "LEGATO_SLUR",
@@ -7023,8 +7023,8 @@
     "durationTicks": 456,
     "velocity": 63,
     "dynamics": {
-     "cc11Value": 21,
-     "cc74Value": 74,
+     "cc11Value": 40,
+     "cc74Value": 82,
      "attenuationActive": false
     },
     "technique": "STANDARD_TONGUED",
@@ -7037,8 +7037,8 @@
     "durationTicks": 456,
     "velocity": 63,
     "dynamics": {
-     "cc11Value": 21,
-     "cc74Value": 74,
+     "cc11Value": 40,
+     "cc74Value": 82,
      "attenuationActive": false
     },
     "technique": "STANDARD_TONGUED",
@@ -7051,8 +7051,8 @@
     "durationTicks": 979,
     "velocity": 60,
     "dynamics": {
-     "cc11Value": 19,
-     "cc74Value": 78,
+     "cc11Value": 40,
+     "cc74Value": 86,
      "attenuationActive": false
     },
     "technique": "LEGATO_SLUR",
@@ -7065,8 +7065,8 @@
     "durationTicks": 979,
     "velocity": 63,
     "dynamics": {
-     "cc11Value": 22,
-     "cc74Value": 79,
+     "cc11Value": 40,
+     "cc74Value": 86,
      "attenuationActive": false
     },
     "technique": "LEGATO_SLUR",
@@ -7079,8 +7079,8 @@
     "durationTicks": 456,
     "velocity": 66,
     "dynamics": {
-     "cc11Value": 24,
-     "cc74Value": 76,
+     "cc11Value": 40,
+     "cc74Value": 82,
      "attenuationActive": false
     },
     "technique": "STANDARD_TONGUED",
@@ -7093,8 +7093,8 @@
     "durationTicks": 979,
     "velocity": 63,
     "dynamics": {
-     "cc11Value": 21,
-     "cc74Value": 78,
+     "cc11Value": 40,
+     "cc74Value": 86,
      "attenuationActive": false
     },
     "technique": "LEGATO_SLUR",
@@ -7107,8 +7107,8 @@
     "durationTicks": 979,
     "velocity": 62,
     "dynamics": {
-     "cc11Value": 21,
-     "cc74Value": 78,
+     "cc11Value": 40,
+     "cc74Value": 86,
      "attenuationActive": false
     },
     "technique": "LEGATO_SLUR",
@@ -7121,8 +7121,8 @@
     "durationTicks": 960,
     "velocity": 66,
     "dynamics": {
-     "cc11Value": 24,
-     "cc74Value": 80,
+     "cc11Value": 40,
+     "cc74Value": 86,
      "attenuationActive": false
     },
     "technique": "LEGATO_SLUR",
@@ -7135,8 +7135,8 @@
     "durationTicks": 979,
     "velocity": 58,
     "dynamics": {
-     "cc11Value": 17,
-     "cc74Value": 77,
+     "cc11Value": 40,
+     "cc74Value": 86,
      "attenuationActive": false
     },
     "technique": "LEGATO_SLUR",
@@ -7149,8 +7149,8 @@
     "durationTicks": 960,
     "velocity": 58,
     "dynamics": {
-     "cc11Value": 17,
-     "cc74Value": 77,
+     "cc11Value": 40,
+     "cc74Value": 86,
      "attenuationActive": false
     },
     "technique": "LEGATO_SLUR",
@@ -7163,8 +7163,8 @@
     "durationTicks": 960,
     "velocity": 59,
     "dynamics": {
-     "cc11Value": 18,
-     "cc74Value": 77,
+     "cc11Value": 40,
+     "cc74Value": 86,
      "attenuationActive": false
     },
     "technique": "LEGATO_SLUR",
@@ -7177,8 +7177,8 @@
     "durationTicks": 960,
     "velocity": 60,
     "dynamics": {
-     "cc11Value": 19,
-     "cc74Value": 78,
+     "cc11Value": 40,
+     "cc74Value": 86,
      "attenuationActive": false
     },
     "technique": "LEGATO_SLUR",
@@ -7191,8 +7191,8 @@
     "durationTicks": 960,
     "velocity": 64,
     "dynamics": {
-     "cc11Value": 22,
-     "cc74Value": 79,
+     "cc11Value": 40,
+     "cc74Value": 86,
      "attenuationActive": false
     },
     "technique": "LEGATO_SLUR",
@@ -7205,8 +7205,8 @@
     "durationTicks": 960,
     "velocity": 63,
     "dynamics": {
-     "cc11Value": 22,
-     "cc74Value": 79,
+     "cc11Value": 40,
+     "cc74Value": 86,
      "attenuationActive": false
     },
     "technique": "LEGATO_SLUR",
@@ -7219,8 +7219,8 @@
     "durationTicks": 960,
     "velocity": 59,
     "dynamics": {
-     "cc11Value": 18,
-     "cc74Value": 77,
+     "cc11Value": 40,
+     "cc74Value": 86,
      "attenuationActive": false
     },
     "technique": "LEGATO_SLUR",
@@ -7233,8 +7233,8 @@
     "durationTicks": 979,
     "velocity": 57,
     "dynamics": {
-     "cc11Value": 16,
-     "cc74Value": 76,
+     "cc11Value": 40,
+     "cc74Value": 86,
      "attenuationActive": false
     },
     "technique": "LEGATO_SLUR",
@@ -7247,8 +7247,8 @@
     "durationTicks": 960,
     "velocity": 59,
     "dynamics": {
-     "cc11Value": 18,
-     "cc74Value": 77,
+     "cc11Value": 40,
+     "cc74Value": 86,
      "attenuationActive": false
     },
     "technique": "LEGATO_SLUR",
@@ -7261,8 +7261,8 @@
     "durationTicks": 960,
     "velocity": 67,
     "dynamics": {
-     "cc11Value": 20,
-     "cc74Value": 84,
+     "cc11Value": 40,
+     "cc74Value": 92,
      "attenuationActive": false
     },
     "technique": "LEGATO_SLUR",
@@ -7275,8 +7275,8 @@
     "durationTicks": 456,
     "velocity": 67,
     "dynamics": {
-     "cc11Value": 20,
-     "cc74Value": 80,
+     "cc11Value": 40,
+     "cc74Value": 88,
      "attenuationActive": false
     },
     "technique": "STANDARD_TONGUED",
@@ -7289,8 +7289,8 @@
     "durationTicks": 456,
     "velocity": 67,
     "dynamics": {
-     "cc11Value": 20,
-     "cc74Value": 80,
+     "cc11Value": 40,
+     "cc74Value": 88,
      "attenuationActive": false
     },
     "technique": "STANDARD_TONGUED",
@@ -7303,8 +7303,8 @@
     "durationTicks": 960,
     "velocity": 61,
     "dynamics": {
-     "cc11Value": 15,
-     "cc74Value": 82,
+     "cc11Value": 40,
+     "cc74Value": 92,
      "attenuationActive": false
     },
     "technique": "LEGATO_SLUR",
@@ -7317,8 +7317,8 @@
     "durationTicks": 960,
     "velocity": 70,
     "dynamics": {
-     "cc11Value": 23,
-     "cc74Value": 85,
+     "cc11Value": 40,
+     "cc74Value": 92,
      "attenuationActive": false
     },
     "technique": "LEGATO_SLUR",
@@ -7331,8 +7331,8 @@
     "durationTicks": 960,
     "velocity": 61,
     "dynamics": {
-     "cc11Value": 15,
-     "cc74Value": 82,
+     "cc11Value": 40,
+     "cc74Value": 92,
      "attenuationActive": false
     },
     "technique": "LEGATO_SLUR",
@@ -7345,8 +7345,8 @@
     "durationTicks": 960,
     "velocity": 66,
     "dynamics": {
-     "cc11Value": 19,
-     "cc74Value": 84,
+     "cc11Value": 40,
+     "cc74Value": 92,
      "attenuationActive": false
     },
     "technique": "LEGATO_SLUR",
@@ -7359,8 +7359,8 @@
     "durationTicks": 456,
     "velocity": 66,
     "dynamics": {
-     "cc11Value": 19,
-     "cc74Value": 80,
+     "cc11Value": 40,
+     "cc74Value": 88,
      "attenuationActive": false
     },
     "technique": "STANDARD_TONGUED",
@@ -7373,8 +7373,8 @@
     "durationTicks": 456,
     "velocity": 66,
     "dynamics": {
-     "cc11Value": 19,
-     "cc74Value": 80,
+     "cc11Value": 40,
+     "cc74Value": 88,
      "attenuationActive": false
     },
     "technique": "STANDARD_TONGUED",
@@ -7387,8 +7387,8 @@
     "durationTicks": 960,
     "velocity": 61,
     "dynamics": {
-     "cc11Value": 15,
-     "cc74Value": 82,
+     "cc11Value": 40,
+     "cc74Value": 92,
      "attenuationActive": false
     },
     "technique": "LEGATO_SLUR",
@@ -8108,8 +8108,8 @@
     "durationTicks": 960,
     "velocity": 57,
     "dynamics": {
-     "cc11Value": 16,
-     "cc74Value": 75,
+     "cc11Value": 40,
+     "cc74Value": 85,
      "attenuationActive": false
     },
     "technique": "LEGATO_SLUR",
@@ -8122,8 +8122,8 @@
     "durationTicks": 960,
     "velocity": 63,
     "dynamics": {
-     "cc11Value": 22,
-     "cc74Value": 78,
+     "cc11Value": 40,
+     "cc74Value": 85,
      "attenuationActive": false
     },
     "technique": "LEGATO_SLUR",
@@ -8136,8 +8136,8 @@
     "durationTicks": 979,
     "velocity": 60,
     "dynamics": {
-     "cc11Value": 19,
-     "cc74Value": 77,
+     "cc11Value": 40,
+     "cc74Value": 85,
      "attenuationActive": false
     },
     "technique": "LEGATO_SLUR",
@@ -8150,8 +8150,8 @@
     "durationTicks": 456,
     "velocity": 59,
     "dynamics": {
-     "cc11Value": 18,
-     "cc74Value": 72,
+     "cc11Value": 40,
+     "cc74Value": 81,
      "attenuationActive": false
     },
     "technique": "STANDARD_TONGUED",
@@ -8164,8 +8164,8 @@
     "durationTicks": 456,
     "velocity": 62,
     "dynamics": {
-     "cc11Value": 18,
-     "cc74Value": 72,
+     "cc11Value": 40,
+     "cc74Value": 81,
      "attenuationActive": false
     },
     "technique": "STANDARD_TONGUED",
@@ -8178,8 +8178,8 @@
     "durationTicks": 456,
     "velocity": 53,
     "dynamics": {
-     "cc11Value": 16,
-     "cc74Value": 71,
+     "cc11Value": 40,
+     "cc74Value": 81,
      "attenuationActive": false
     },
     "technique": "STANDARD_TONGUED",
@@ -8192,8 +8192,8 @@
     "durationTicks": 456,
     "velocity": 59,
     "dynamics": {
-     "cc11Value": 16,
-     "cc74Value": 71,
+     "cc11Value": 40,
+     "cc74Value": 81,
      "attenuationActive": false
     },
     "technique": "STANDARD_TONGUED",
@@ -8206,8 +8206,8 @@
     "durationTicks": 456,
     "velocity": 58,
     "dynamics": {
-     "cc11Value": 21,
-     "cc74Value": 73,
+     "cc11Value": 40,
+     "cc74Value": 81,
      "attenuationActive": false
     },
     "technique": "STANDARD_TONGUED",
@@ -8220,8 +8220,8 @@
     "durationTicks": 456,
     "velocity": 58,
     "dynamics": {
-     "cc11Value": 21,
-     "cc74Value": 73,
+     "cc11Value": 40,
+     "cc74Value": 81,
      "attenuationActive": false
     },
     "technique": "STANDARD_TONGUED",
@@ -8234,8 +8234,8 @@
     "durationTicks": 456,
     "velocity": 63,
     "dynamics": {
-     "cc11Value": 26,
-     "cc74Value": 75,
+     "cc11Value": 40,
+     "cc74Value": 81,
      "attenuationActive": false
     },
     "technique": "STANDARD_TONGUED",
@@ -8248,8 +8248,8 @@
     "durationTicks": 456,
     "velocity": 64,
     "dynamics": {
-     "cc11Value": 26,
-     "cc74Value": 75,
+     "cc11Value": 40,
+     "cc74Value": 81,
      "attenuationActive": false
     },
     "technique": "STANDARD_TONGUED",
@@ -8262,8 +8262,8 @@
     "durationTicks": 960,
     "velocity": 59,
     "dynamics": {
-     "cc11Value": 18,
-     "cc74Value": 76,
+     "cc11Value": 40,
+     "cc74Value": 85,
      "attenuationActive": false
     },
     "technique": "LEGATO_SLUR",
@@ -8276,8 +8276,8 @@
     "durationTicks": 456,
     "velocity": 64,
     "dynamics": {
-     "cc11Value": 22,
-     "cc74Value": 74,
+     "cc11Value": 40,
+     "cc74Value": 81,
      "attenuationActive": false
     },
     "technique": "STANDARD_TONGUED",
@@ -8290,8 +8290,8 @@
     "durationTicks": 456,
     "velocity": 64,
     "dynamics": {
-     "cc11Value": 22,
-     "cc74Value": 74,
+     "cc11Value": 40,
+     "cc74Value": 81,
      "attenuationActive": false
     },
     "technique": "STANDARD_TONGUED",
@@ -8304,8 +8304,8 @@
     "durationTicks": 960,
     "velocity": 67,
     "dynamics": {
-     "cc11Value": 26,
-     "cc74Value": 79,
+     "cc11Value": 40,
+     "cc74Value": 85,
      "attenuationActive": false
     },
     "technique": "LEGATO_SLUR",
@@ -8318,8 +8318,8 @@
     "durationTicks": 960,
     "velocity": 67,
     "dynamics": {
-     "cc11Value": 25,
-     "cc74Value": 79,
+     "cc11Value": 40,
+     "cc74Value": 85,
      "attenuationActive": false
     },
     "technique": "LEGATO_SLUR",
@@ -8332,8 +8332,8 @@
     "durationTicks": 960,
     "velocity": 64,
     "dynamics": {
-     "cc11Value": 22,
-     "cc74Value": 78,
+     "cc11Value": 40,
+     "cc74Value": 85,
      "attenuationActive": false
     },
     "technique": "LEGATO_SLUR",
@@ -8346,8 +8346,8 @@
     "durationTicks": 456,
     "velocity": 66,
     "dynamics": {
-     "cc11Value": 25,
-     "cc74Value": 75,
+     "cc11Value": 40,
+     "cc74Value": 81,
      "attenuationActive": false
     },
     "technique": "STANDARD_TONGUED",
@@ -8360,8 +8360,8 @@
     "durationTicks": 456,
     "velocity": 66,
     "dynamics": {
-     "cc11Value": 25,
-     "cc74Value": 75,
+     "cc11Value": 40,
+     "cc74Value": 81,
      "attenuationActive": false
     },
     "technique": "STANDARD_TONGUED",
@@ -8374,8 +8374,8 @@
     "durationTicks": 960,
     "velocity": 63,
     "dynamics": {
-     "cc11Value": 22,
-     "cc74Value": 78,
+     "cc11Value": 40,
+     "cc74Value": 85,
      "attenuationActive": false
     },
     "technique": "LEGATO_SLUR",
@@ -8388,8 +8388,8 @@
     "durationTicks": 960,
     "velocity": 62,
     "dynamics": {
-     "cc11Value": 20,
-     "cc74Value": 77,
+     "cc11Value": 40,
+     "cc74Value": 85,
      "attenuationActive": false
     },
     "technique": "LEGATO_SLUR",
@@ -8402,8 +8402,8 @@
     "durationTicks": 960,
     "velocity": 57,
     "dynamics": {
-     "cc11Value": 16,
-     "cc74Value": 75,
+     "cc11Value": 40,
+     "cc74Value": 85,
      "attenuationActive": false
     },
     "technique": "LEGATO_SLUR",
@@ -8416,8 +8416,8 @@
     "durationTicks": 456,
     "velocity": 66,
     "dynamics": {
-     "cc11Value": 24,
-     "cc74Value": 75,
+     "cc11Value": 40,
+     "cc74Value": 81,
      "attenuationActive": false
     },
     "technique": "STANDARD_TONGUED",
@@ -8430,8 +8430,8 @@
     "durationTicks": 456,
     "velocity": 66,
     "dynamics": {
-     "cc11Value": 24,
-     "cc74Value": 75,
+     "cc11Value": 40,
+     "cc74Value": 81,
      "attenuationActive": false
     },
     "technique": "STANDARD_TONGUED",
@@ -8444,8 +8444,8 @@
     "durationTicks": 456,
     "velocity": 64,
     "dynamics": {
-     "cc11Value": 22,
-     "cc74Value": 74,
+     "cc11Value": 40,
+     "cc74Value": 81,
      "attenuationActive": false
     },
     "technique": "STANDARD_TONGUED",
@@ -8458,8 +8458,8 @@
     "durationTicks": 456,
     "velocity": 64,
     "dynamics": {
-     "cc11Value": 22,
-     "cc74Value": 74,
+     "cc11Value": 40,
+     "cc74Value": 81,
      "attenuationActive": false
     },
     "technique": "STANDARD_TONGUED",
@@ -8472,8 +8472,8 @@
     "durationTicks": 456,
     "velocity": 61,
     "dynamics": {
-     "cc11Value": 20,
-     "cc74Value": 73,
+     "cc11Value": 40,
+     "cc74Value": 81,
      "attenuationActive": false
     },
     "technique": "STANDARD_TONGUED",
@@ -8486,8 +8486,8 @@
     "durationTicks": 456,
     "velocity": 62,
     "dynamics": {
-     "cc11Value": 20,
-     "cc74Value": 73,
+     "cc11Value": 40,
+     "cc74Value": 81,
      "attenuationActive": false
     },
     "technique": "STANDARD_TONGUED",
@@ -8500,8 +8500,8 @@
     "durationTicks": 456,
     "velocity": 59,
     "dynamics": {
-     "cc11Value": 18,
-     "cc74Value": 72,
+     "cc11Value": 40,
+     "cc74Value": 81,
      "attenuationActive": false
     },
     "technique": "STANDARD_TONGUED",
@@ -8514,8 +8514,8 @@
     "durationTicks": 456,
     "velocity": 55,
     "dynamics": {
-     "cc11Value": 18,
-     "cc74Value": 72,
+     "cc11Value": 40,
+     "cc74Value": 81,
      "attenuationActive": false
     },
     "technique": "STANDARD_TONGUED",
@@ -8528,8 +8528,8 @@
     "durationTicks": 456,
     "velocity": 67,
     "dynamics": {
-     "cc11Value": 23,
-     "cc74Value": 74,
+     "cc11Value": 40,
+     "cc74Value": 81,
      "attenuationActive": false
     },
     "technique": "STANDARD_TONGUED",
@@ -8542,8 +8542,8 @@
     "durationTicks": 456,
     "velocity": 61,
     "dynamics": {
-     "cc11Value": 23,
-     "cc74Value": 74,
+     "cc11Value": 40,
+     "cc74Value": 81,
      "attenuationActive": false
     },
     "technique": "STANDARD_TONGUED",
@@ -8556,8 +8556,8 @@
     "durationTicks": 960,
     "velocity": 63,
     "dynamics": {
-     "cc11Value": 22,
-     "cc74Value": 78,
+     "cc11Value": 40,
+     "cc74Value": 85,
      "attenuationActive": false
     },
     "technique": "LEGATO_SLUR",
@@ -8570,8 +8570,8 @@
     "durationTicks": 456,
     "velocity": 59,
     "dynamics": {
-     "cc11Value": 18,
-     "cc74Value": 72,
+     "cc11Value": 40,
+     "cc74Value": 81,
      "attenuationActive": false
     },
     "technique": "STANDARD_TONGUED",
@@ -8584,8 +8584,8 @@
     "durationTicks": 456,
     "velocity": 61,
     "dynamics": {
-     "cc11Value": 18,
-     "cc74Value": 72,
+     "cc11Value": 40,
+     "cc74Value": 81,
      "attenuationActive": false
     },
     "technique": "STANDARD_TONGUED",
@@ -8598,8 +8598,8 @@
     "durationTicks": 456,
     "velocity": 69,
     "dynamics": {
-     "cc11Value": 26,
-     "cc74Value": 75,
+     "cc11Value": 40,
+     "cc74Value": 81,
      "attenuationActive": false
     },
     "technique": "STANDARD_TONGUED",
@@ -8612,8 +8612,8 @@
     "durationTicks": 456,
     "velocity": 70,
     "dynamics": {
-     "cc11Value": 26,
-     "cc74Value": 75,
+     "cc11Value": 40,
+     "cc74Value": 81,
      "attenuationActive": false
     },
     "technique": "STANDARD_TONGUED",
@@ -8626,8 +8626,8 @@
     "durationTicks": 456,
     "velocity": 62,
     "dynamics": {
-     "cc11Value": 20,
-     "cc74Value": 73,
+     "cc11Value": 40,
+     "cc74Value": 81,
      "attenuationActive": false
     },
     "technique": "STANDARD_TONGUED",
@@ -8640,8 +8640,8 @@
     "durationTicks": 456,
     "velocity": 59,
     "dynamics": {
-     "cc11Value": 20,
-     "cc74Value": 73,
+     "cc11Value": 40,
+     "cc74Value": 81,
      "attenuationActive": false
     },
     "technique": "STANDARD_TONGUED",
@@ -8654,8 +8654,8 @@
     "durationTicks": 960,
     "velocity": 65,
     "dynamics": {
-     "cc11Value": 23,
-     "cc74Value": 78,
+     "cc11Value": 40,
+     "cc74Value": 85,
      "attenuationActive": false
     },
     "technique": "LEGATO_SLUR",
@@ -8668,8 +8668,8 @@
     "durationTicks": 960,
     "velocity": 63,
     "dynamics": {
-     "cc11Value": 22,
-     "cc74Value": 78,
+     "cc11Value": 40,
+     "cc74Value": 85,
      "attenuationActive": false
     },
     "technique": "LEGATO_SLUR",
@@ -8682,8 +8682,8 @@
     "durationTicks": 960,
     "velocity": 66,
     "dynamics": {
-     "cc11Value": 25,
-     "cc74Value": 79,
+     "cc11Value": 40,
+     "cc74Value": 85,
      "attenuationActive": false
     },
     "technique": "LEGATO_SLUR",
@@ -8696,8 +8696,8 @@
     "durationTicks": 960,
     "velocity": 62,
     "dynamics": {
-     "cc11Value": 20,
-     "cc74Value": 77,
+     "cc11Value": 40,
+     "cc74Value": 85,
      "attenuationActive": false
     },
     "technique": "LEGATO_SLUR",
