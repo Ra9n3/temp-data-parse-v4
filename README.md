@@ -1,5 +1,7 @@
 # Scorch
 
+![CI](https://github.com/Ra9n3/scorsh/actions/workflows/ci.yml/badge.svg)
+
 Orchestral MIDI generator with a DAW-style arranger. Not a DAW: no audio recording, mixing, or mastering. Set key, mode, BPM and meter, place chords and sections, click **Compose All**, export JSON or MIDI, finish in Fender Studio (or any DAW).
 
 This repository snapshot is the **web preview** (React + Vite + Tailwind) covering the data model, arranger UI, rule-based generator, and export. The intended native shell is Tauri + a JUCE 8 preview engine (not built in this environment).
