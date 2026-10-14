@@ -1,4 +1,4 @@
-import { useEffect, useState, type ReactNode } from "react";
+import { useEffect, useRef, useState, type ReactNode } from "react";
 import { Ph } from "../icons";
 import {
   MODE_LABELS,
@@ -216,12 +216,41 @@ export function TopBar({
   );
 }
 
-// Chord v2 — inline top-bar editor panel (P1/P3). Ported field-for-field from
-// the old in-lane ChordEditor popup: symbol text input (parseChord-validated
-// live — invalid = red ring, no commit), quality buttons, extension toggles,
-// and a slash-bass override select. Esc / ✕ close; Delete removes the chord.
+// Chord Panel Refinement (Commit 2) — the top-bar chord editor, reskinned to
+// read as a sibling of the settings pill: same rounded-full container, same
+// black/30 field tokens, same font scale; controls inside are pill-style.
+// Fields: searchable combobox over a curated chord list (data below — the
+// text input accepts anything parseChord validates, so the list never jails
+// input), bass dropdown with an explicit "default (root)" option, and a
+// chip-grid popover for quality + extensions (the structure-lane density-chip
+// pattern). Commit semantics: ONE onboard commit per field change — the
+// combobox/type commits on each valid keystroke, chips/bass on each toggle
+// (all commit via App's lifted onChangeChordSymbol → patch; each edit is
+// undo-able). Popover closes on outside click / Esc; Esc also closes it
+// before the panel itself (stopPropagation layered).
+const CURATED_CHORDS: string[] = [
+  "C", "Cm", "C7", "Cmaj7", "Cm7", "Csus2", "Csus4", "Cdim", "Caug",
+  "D", "Dm", "D7", "Dmaj7", "Dm7", "Dsus2", "Dsus4",
+  "E", "Em", "E7", "Emaj7", "Em7",
+  "F", "Fm", "F7", "Fmaj7", "Fm7",
+  "G", "Gm", "G7", "Gmaj7", "Gm7", "Gsus4",
+  "A", "Am", "A7", "Amaj7", "Am7",
+  "B", "Bm", "B7", "Bm7b5",
+  "Dm7/G", "G/B", "C/E", "Am/E",
+];
+
+const QUALITY_CHIPS: [string, string][] = [
+  ["major", "Maj"], ["minor", "Min"], ["diminished", "Dim"],
+  ["augmented", "Aug"], ["sus2", "Sus2"], ["sus4", "Sus4"],
+];
+
+const EXTENSION_CHIPS: string[] = ["7", "maj7", "9", "b9", "#9", "11", "#11", "13", "b13"];
+
 function ChordPanel({ chord, onSymbol, onClose, onDelete }: { chord: Chord; onSymbol: (symbol: string) => void; onClose: () => void; onDelete: () => void }) {
   const [v, setV] = useState(chord.symbol);
+  const [comboOpen, setComboOpen] = useState(false);
+  const [gridOpen, setGridOpen] = useState(false);
+  const gridRef = useRef<HTMLDivElement | null>(null);
   const parsed = parseChord(v);
   const parsedRoot = parsed.ok ? parsed.chord.root : 0;
   const parsedBass = parsed.ok ? parsed.chord.bass : null;
@@ -231,8 +260,10 @@ function ChordPanel({ chord, onSymbol, onClose, onDelete }: { chord: Chord; onSy
     : parsedQuality === "diminished" || parsedQuality === "dim7" ? "diminished"
     : parsedQuality === "augmented" || parsedQuality === "aug7" ? "augmented"
     : parsedQuality === "sus2" ? "sus2" : parsedQuality === "sus4" || parsedQuality === "7sus4" ? "sus4" : "major";
-  const extensionNames = ["7", "maj7", "9", "b9", "#9", "11", "#11", "13", "b13"];
   const selectedExtensions = parsed.ok ? parsed.chord.extensions : [];
+
+  // Chip/bass updates rebuild the symbol from parts (ported formatter) and
+  // commit immediately when the rebuilt symbol parses.
   const update = (nextRoot: string = rootName, nextQuality: ChordQuality | string = quality, nextExtensions: string[] = selectedExtensions, nextBass: PitchClass | null = parsedBass) => {
     const qualityToken = nextQuality === "major" ? "" : nextQuality === "minor" ? "m" : nextQuality === "diminished" ? "dim" : nextQuality === "augmented" ? "aug" : nextQuality === "sus2" || nextQuality === "sus4" ? nextQuality : "";
     const extensionOrder = ["maj7", "7", "b9", "#9", "9", "#11", "11", "b13", "13"];
@@ -254,65 +285,133 @@ function ChordPanel({ chord, onSymbol, onClose, onDelete }: { chord: Chord; onSy
     if (parseChord(next).ok) onSymbol(next);
   };
 
+  // Outside click closes ONLY the popover (panel itself stays open; the ✕ /
+  // Esc path owns that).
+  useEffect(() => {
+    if (!gridOpen) return;
+    const onDown = (e: MouseEvent) => {
+      if (!gridRef.current?.contains(e.target as Node)) setGridOpen(false);
+    };
+    window.addEventListener("mousedown", onDown);
+    return () => window.removeEventListener("mousedown", onDown);
+  }, [gridOpen]);
+
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       if (e.key !== "Escape") return;
       e.stopPropagation();
+      if (gridOpen) { setGridOpen(false); return; }
+      if (comboOpen) { setComboOpen(false); return; }
       onClose();
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [onClose]);
+  }, [onClose, gridOpen, comboOpen]);
+
+  const filter = v.trim().toLowerCase();
+  const options = CURATED_CHORDS.filter((sym) => sym.toLowerCase().includes(filter));
 
   return (
     <div
       data-chord-panel
-      className="flex min-w-0 flex-1 items-center gap-2 overflow-x-auto rounded-2xl border border-white/10 bg-[#161922] px-2 py-1"
+      className="flex min-h-8 min-w-0 shrink-0 items-center gap-1 rounded-full border border-white/10 bg-[#161922] px-2 py-1"
     >
       <span className="shrink-0 text-[10px] font-semibold uppercase tracking-wider text-orange-300">Chord</span>
-      <input
-        aria-label="Chord symbol"
-        autoFocus
-        value={v}
-        onChange={(e) => {
-          const next = e.target.value;
-          setV(next);
-          // Parse-validate live: invalid = red ring, no commit.
-          if (parseChord(next).ok) onSymbol(next.trim());
-        }}
-        onKeyDown={(e) => {
-          if (e.key === "Enter" && parsed.ok) { onSymbol(v.trim() || chord.symbol); onClose(); }
-          e.stopPropagation();
-        }}
-        className={cn(
-          "min-w-0 flex-1 rounded-md bg-black/30 px-1.5 py-0.5 font-mono text-xs outline-none ring-1",
-          parsed.ok ? "text-sky-100 ring-white/10 focus:ring-orange-400/50" : "text-red-300 ring-red-500",
+      {/* Combobox: input + curated dropdown; any parseChord-valid text wins. */}
+      <div className="relative min-w-0 w-28">
+        <input
+          aria-label="Chord symbol"
+          autoComplete="off"
+          value={v}
+          onFocus={() => setComboOpen(true)}
+          onChange={(e) => {
+            const next = e.target.value;
+            setV(next);
+            setComboOpen(true);
+            // Parse-validate live: invalid = red ring, no commit.
+            if (parseChord(next).ok) onSymbol(next.trim());
+          }}
+          onKeyDown={(e) => {
+            if (e.key === "Enter" && parsed.ok) { onSymbol(v.trim() || chord.symbol); setComboOpen(false); }
+            if (e.key === "Escape") { setComboOpen(false); e.stopPropagation(); }
+            e.stopPropagation();
+          }}
+          onBlur={() => setComboOpen(false)}
+          className={cn(
+            "w-full rounded-md bg-black/30 px-1.5 py-0.5 font-mono text-xs outline-none ring-1",
+            parsed.ok ? "text-sky-100 ring-white/10 focus:ring-orange-400/50" : "text-red-300 ring-red-500",
+          )}
+        />
+        {comboOpen && options.length > 0 && (
+          <div
+            data-chord-combobox
+            className="absolute left-0 top-full z-[70] mt-1 max-h-56 w-44 overflow-auto rounded-md border border-white/10 bg-[#161922] py-1 shadow-xl"
+          >
+            {options.map((sym) => (
+              <button
+                key={sym}
+                type="button"
+                className="block w-full px-2 py-0.5 text-left font-mono text-[11px] text-stone-200 hover:bg-orange-500/20"
+                onMouseDown={(e) => { e.preventDefault(); setV(sym); onSymbol(sym); setComboOpen(false); }}
+              >
+                {sym}
+              </button>
+            ))}
+          </div>
         )}
-      />
-      <div role="group" aria-label="Chord quality" className="flex shrink-0 gap-0.5">
-        {([["major", "Maj"], ["minor", "Min"], ["diminished", "Dim"], ["augmented", "Aug"], ["sus2", "Sus2"], ["sus4", "Sus4"]] as const).map(([value, label]) => (
-          <button key={value} type="button" aria-pressed={quality === value} title={`Quality: ${label}`} className={cn("rounded px-1 py-0.5 text-[9px]", quality === value ? "bg-sky-500/40 text-white" : "bg-white/5 text-stone-400 hover:text-stone-200")} onClick={() => update(rootName, value)}>{label}</button>
-        ))}
       </div>
-      <div role="group" aria-label="Chord extensions" className="flex min-w-0 flex-wrap gap-0.5">
-        {extensionNames.map((extension) => {
-          const active = selectedExtensions.includes(extension);
-          return (
-            <button key={extension} type="button" aria-pressed={active} title={`Extension: ${extension}`} className={cn("rounded px-1 py-0.5 text-[9px]", active ? "bg-orange-500/40 text-orange-100" : "bg-white/5 text-stone-400 hover:text-stone-200")} onClick={() => update(rootName, quality, active ? selectedExtensions.filter((item) => item !== extension) : [...selectedExtensions, extension])}>{extension}</button>
-          );
-        })}
+      {/* Quality + extensions popover (chip-grid pattern). */}
+      <div className="relative shrink-0" ref={gridRef}>
+        <button
+          type="button"
+          aria-label="Open quality and extensions grid"
+          aria-expanded={gridOpen}
+          title="Quality & extensions"
+          className={cn(
+            "rounded-md bg-black/30 px-1.5 py-0.5 text-[10px] text-stone-200 ring-1 ring-white/10 hover:bg-white/5",
+            gridOpen && "ring-orange-400/50",
+          )}
+          onClick={() => setGridOpen((o) => !o)}
+        >
+          {QUALITY_CHIPS.find(([q]) => q === quality)?.[1]}{selectedExtensions.length > 0 ? `+${selectedExtensions.length}` : ""} ▾
+        </button>
+        {gridOpen && (
+          <div
+            data-chord-grid
+            className="absolute left-0 top-full z-[70] mt-1 w-64 rounded-md border border-white/10 bg-[#161922] p-2 shadow-xl"
+          >
+            <div className="mb-1 text-[9px] font-semibold uppercase tracking-wider text-stone-500">Quality</div>
+            <div role="group" aria-label="Chord quality" className="grid grid-cols-3 gap-0.5">
+              {QUALITY_CHIPS.map(([value, label]) => (
+                <button key={value} type="button" aria-pressed={quality === value} className={cn("rounded px-1 py-0.5 text-[9px]", quality === value ? "bg-sky-500/40 text-white" : "bg-white/5 text-stone-400 hover:text-stone-200")} onClick={() => update(rootName, value)}>{label}</button>
+              ))}
+            </div>
+            <div className="mb-1 mt-2 text-[9px] font-semibold uppercase tracking-wider text-stone-500">Extensions</div>
+            <div role="group" aria-label="Chord extensions" className="grid grid-cols-3 gap-0.5">
+              {EXTENSION_CHIPS.map((extension) => {
+                const active = selectedExtensions.includes(extension);
+                return (
+                  <button key={extension} type="button" aria-pressed={active} className={cn("rounded px-1 py-0.5 text-[9px]", active ? "bg-orange-500/40 text-orange-100" : "bg-white/5 text-stone-400 hover:text-stone-200")} onClick={() => update(rootName, quality, active ? selectedExtensions.filter((item) => item !== extension) : [...selectedExtensions, extension])}>{extension}</button>
+                );
+              })}
+            </div>
+            <div className="mt-1.5 text-[9px] text-stone-500">Preview: <span className="font-mono text-sky-100">{v}</span></div>
+          </div>
+        )}
       </div>
+      {/* Bass dropdown: explicit default option + 12 pitch classes. */}
       <select
-        aria-label="Slash chord bass"
+        aria-label="Bass note"
+        title="Bass note"
         className="min-w-0 rounded-md bg-black/30 px-1 py-0.5 text-[10px] text-stone-200 outline-none ring-1 ring-white/10"
-        value={parsedBass === null ? "none" : parsedBass}
-        onChange={(e) => update(rootName, quality, selectedExtensions, e.target.value === "none" ? null : Number(e.target.value) as PitchClass)}
+        value={parsedBass === null ? "root" : parsedBass}
+        onChange={(e) => update(rootName, quality, selectedExtensions, e.target.value === "root" ? null : Number(e.target.value) as PitchClass)}
       >
-        <option value="none">/—</option>
+        <option value="root">default (root)</option>
         {PITCH_CLASS_NAMES.map((name, index) => <option key={name} value={index}>/{name}</option>)}
       </select>
-      <button type="button" aria-label="Delete this chord" title="Delete chord (Del)" className="shrink-0 rounded-md bg-red-500/15 px-2 py-1 text-[10px] text-red-200 ring-1 ring-red-400/20 hover:bg-red-500/25" onClick={onDelete}>Delete</button>
-      <button type="button" aria-label="Close chord editor (Esc)" title="Close (Esc)" className="shrink-0 rounded-md bg-white/5 px-1.5 py-1 text-[10px] text-stone-300 hover:bg-white/10" onClick={onClose}>✕</button>
+      <button type="button" aria-label="Delete this chord" title="Delete chord (Del)" className="shrink-0 rounded-md bg-red-500/15 px-2 py-0.5 text-[10px] text-red-200 ring-1 ring-red-400/20 hover:bg-red-500/25" onClick={onDelete}>Delete</button>
+      <button type="button" aria-label="Close chord editor (Esc)" title="Close (Esc)" className="shrink-0 rounded-full bg-white/5 px-1.5 py-0.5 text-[10px] text-stone-300 hover:bg-white/10" onClick={onClose}>✕</button>
     </div>
   );
 }
