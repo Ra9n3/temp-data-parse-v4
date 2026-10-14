@@ -36,8 +36,14 @@ import { cn } from "../utils/cn";
 type Drag =
   | { kind: "section-new"; a: number; b: number }
   | { kind: "section-resize"; id: string; edge: "l" | "r" }
-  | { kind: "chord-new"; a: number; b: number }
+  | { kind: "chord-new"; a: number; b: number; startX: number; releaseX: number | null }
   | { kind: "chord-resize"; id: string; edge: "l" | "r" };
+
+// Chord v2 gesture policy: a press on empty chords-lane space is a CLICK when
+// the pointer stays within CLICK_MOVE_PX (3px) of its start position for the
+// whole gesture (mouse-up records the release X so we compare total travel,
+// not just the final cursor position); anything beyond that is a DRAG.
+const CLICK_MOVE_PX = 3;
 
 interface Props {
   project: Project;
@@ -279,7 +285,8 @@ export function Arranger(props: Props) {
       const lane = document.querySelector<HTMLElement>("[data-drag-lane]");
       if (!lane) return;
       const t = tickFromEvent(e, lane);
-      if (d.kind === "section-new" || d.kind === "chord-new") setDrag({ ...d, b: t });
+      if (d.kind === "section-new") setDrag({ ...d, b: t });
+      if (d.kind === "chord-new") setDrag({ ...d, b: t, releaseX: e.clientX });
     },
     [tickFromEvent],
   );
@@ -299,14 +306,21 @@ export function Arranger(props: Props) {
       onPatchProject({
         sections: [...project.sections, { id: makeId("sec"), name, startBar, lengthBars }],
       });
-    }
-    if (d.kind === "chord-new") {
-      const a = Math.min(d.a, d.b);
-      const b = Math.max(d.a, d.b);
-      const dur = Math.max(tpb, b - a);
+    }    if (d.kind === "chord-new") {
+      // Chord v2 — click vs. drag. CLICK (whole-gesture travel < 3px, see the
+      // CLICK_MOVE_PX note above): chord snapped to the START of the clicked
+      // bar, one full bar long. DRAG: start snapped to the nearest BEAT,
+      // end = EXACT release tick (no end-snapping, user-requested exact
+      // length), duration ≥ half beat. Either way the new chord is selected
+      // and its editor opens immediately.
+      // CLICK_MOVE_PX lives beside the Drag type (documented there).
+      const click = Math.abs((d.releaseX ?? d.startX) - d.startX) < CLICK_MOVE_PX;
+      const bar0 = Math.max(0, Math.floor(d.a / tpBar)) * tpBar;
+      const start = click ? bar0 : Math.round(d.a / tpb) * tpb;
+      const dur = click ? tpBar : Math.max(tpb / 2, d.b - start);
       const id = makeId("ch");
       onPatchProject({
-        chords: [...project.chords, { id, symbol: "C", startTick: a, durationTicks: dur }],
+        chords: [...project.chords, { id, symbol: "C", startTick: start, durationTicks: dur }],
       });
       setSelChord(id);
       setEditingChord(id);
@@ -754,13 +768,14 @@ function ChordsLane({
 }) {
   const preview =
     drag?.kind === "chord-new" ? { a: Math.min(drag.a, drag.b), b: Math.max(drag.a, drag.b) } : null;
-  return (
-    <div
+  return (      <div
       className="absolute inset-0"
       onMouseDown={(e) => {
         if ((e.target as HTMLElement).closest("[data-block]")) return;
         const t = tickFromEvent(e, e.currentTarget);
-        onStartDrag({ kind: "chord-new", a: t, b: t });
+        // Chord v2 — record tick AND screen X; nothing is created until
+        // mouse-up decides click vs. drag (CLICK_MOVE_PX policy above).
+        onStartDrag({ kind: "chord-new", a: t, b: t, startX: e.clientX, releaseX: null });
         onSelect(null);
       }}
     >
@@ -795,7 +810,6 @@ function ChordsLane({
             />
             {editingId === c.id ? (
               <ChordEditor chord={c} onDone={(symbol) => {
-                const parsed = parseChord(symbol);
                 const quality = parsed.ok ? parsed.chord.quality === "minor" || parsed.chord.quality.startsWith("m") ? "Min" : parsed.chord.quality === "diminished" || parsed.chord.quality === "dim7" ? "Dim" : parsed.chord.quality === "augmented" || parsed.chord.quality === "aug7" ? "Aug" : parsed.chord.quality === "sus2" ? "Sus2" : parsed.chord.quality === "sus4" || parsed.chord.quality === "7sus4" ? "Sus4" : "Maj" : undefined;
                 onPatch({ chords: project.chords.map((x) => x.id === c.id ? { ...x, symbol, quality, extensions: parsed.ok ? parsed.chord.extensions : [], bassOverride: parsed.ok ? parsed.chord.bass ?? undefined : undefined } : x) });
                 onEdit(null);
@@ -803,7 +817,6 @@ function ChordsLane({
             ) : (
               <span className="block truncate pt-3">{c.symbol}</span>
             )}
-            <button type="button" aria-label={`Edit advanced chord ${c.symbol}`} title="Advanced chord editor" className="absolute bottom-1 right-2 z-10 rounded bg-black/60 px-1 text-[9px] text-sky-200" onMouseDown={(event) => event.stopPropagation()} onClick={(event) => { event.stopPropagation(); onEdit(c.id); }}>Edit</button>
             <Edge
               side="r"
               onMouseDown={(e) => {
