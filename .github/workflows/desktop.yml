@@ -6,6 +6,7 @@ on:
     paths:
       - "src/**"
       - "src-tauri/**"
+      - "engine/**"
       - "package.json"
       - "package-lock.json"
       - "vite.config.ts"
@@ -34,6 +35,53 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: src-tauri
+
+      # Stage 3a: build the JUCE engine sidecar BEFORE tauri build, so the
+      # exe can be placed in src-tauri/binaries/ for the bundler to pick up.
+      - name: Setup CMake
+        uses: lukka/get-cmake@latest
+
+      - name: Setup MSVC developer environment
+        uses: seanmiddleditch/gha-setup-vsdevenv@v4
+
+      - name: Cache JUCE + IXWebSocket FetchContent
+        uses: actions/cache@v4
+        with:
+          path: engine/build/_fetch
+          key: engine-fetch-${{ runner.os }}-${{ hashFiles('engine/CMakeLists.txt') }}
+          restore-keys: |
+            engine-fetch-${{ runner.os }}-
+
+      - name: Configure + build engine (CMake + MSVC)
+        shell: pwsh
+        run: |
+          cmake -S engine -B engine/build -G "Ninja" -DCMAKE_BUILD_TYPE=Release
+          cmake --build engine/build --parallel
+          if (-not (Test-Path "engine/build/scorch-engine.exe")) {
+            throw "scorch-engine.exe not found after build"
+          }
+          New-Item -ItemType Directory -Path src-tauri/binaries -Force | Out-Null
+          Copy-Item engine/build/scorch-engine.exe src-tauri/binaries/scorch-engine.exe -Force
+          Write-Host "Engine exe copied to src-tauri/binaries/"
+
+      - name: Engine standalone protocol test
+        shell: pwsh
+        run: |
+          # Start the engine on a test port
+          $proc = Start-Process -FilePath "engine/build/scorch-engine.exe" -ArgumentList "--port","9378" -PassThru -NoNewWindow
+          Start-Sleep -Seconds 2
+
+          # Test 1: --version
+          $versionOut = & "engine/build/scorch-engine.exe" --version
+          Write-Host "Version output: $versionOut"
+          if ($versionOut -notmatch "scorch-engine 0.1.0") { throw "Version check failed" }
+
+          # Test 2-4: WebSocket protocol via Node.js test client
+          node .github/scripts/test-engine-protocol.mjs 9378
+          if ($LASTEXITCODE -ne 0) { throw "Engine protocol test failed" }
+
+          Write-Host "All engine protocol tests passed"
+          Stop-Process -Id $proc.Id -Force -ErrorAction SilentlyContinue
 
       - run: npm ci
 
@@ -70,7 +118,6 @@ jobs:
           if ($entries -notcontains "manifest.json") { throw "manifest.json missing from web-pack" }
           if ($entries -notcontains "index.html") { throw "index.html missing from web-pack" }
           Write-Host "web-pack entries: $($entries -join ', ')"
-          # Print manifest for the log
           $tmp = New-Item -ItemType Directory -Path web-pack-verify -Force
           Expand-Archive -Path $zip -DestinationPath $tmp -Force
           Get-Content "$tmp\manifest.json"
@@ -80,6 +127,14 @@ jobs:
         with:
           name: web-pack
           path: web-pack-v*.zip
+          retention-days: 14
+
+      - name: Upload engine exe (sidecar)
+        uses: actions/upload-artifact@v4
+        with:
+          name: scorch-engine-windows-exe
+          path: engine/build/scorch-engine.exe
+          if-no-files-found: error
           retention-days: 14
 
       - name: Upload MSI installer

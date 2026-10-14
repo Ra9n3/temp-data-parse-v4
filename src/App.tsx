@@ -1,9 +1,11 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useImmer } from "use-immer";
+import { invoke } from "@tauri-apps/api/core";
 import dorianFixture from "./fixtures/dorian-16bars.json";
 import { TopBar } from "./components/TopBar";
 import { Arranger } from "./components/Arranger";
 import { GenerationSettingsPanel } from "./components/GenerationSettingsPanel";
+import { EngineClient, type EngineStatus } from "./engine/engineClient";
 import {
   AboutDialog,
   ExportDialog,
@@ -76,6 +78,26 @@ function takeStartupNoticeOnce(): string | null {
 
 let toastSeq = 0;
 
+// Stage 3a — engine status indicator (display-only). Compact footer element
+// reflecting the WebSocket connection state to the scorch-engine sidecar.
+function EngineIndicator({ status, rtt }: { status: EngineStatus; rtt: number | null }) {
+  const label = (() => {
+    switch (status) {
+      case "off": return "engine: off";
+      case "connecting": return "engine: connecting…";
+      case "handshake": return "engine: handshake…";
+      case "ready": return rtt !== null ? `engine: ready · ${rtt}ms` : "engine: ready";
+      case "restarting": return "engine: restarting…";
+      case "failed": return "engine: failed";
+    }
+  })();
+  const color = status === "ready" ? "text-emerald-400"
+    : status === "failed" ? "text-red-400"
+    : status === "off" ? "text-stone-500"
+    : "text-amber-400";
+  return <span className={`hidden sm:inline ${color}`}>{label}</span>;
+}
+
 export default function App() {
   const [project, setProject] = useImmer<Project>(loadStartup);
   const [undo, setUndo] = useState<Project[]>([]);
@@ -103,6 +125,12 @@ export default function App() {
   const [toasts, setToasts] = useState<ToastItem[]>([]);
   const [selectedTrackId, setSelectedTrackId] = useState<string | null>(null);
   const [pianoTrackId, setPianoTrackId] = useState<string | null>(null);
+  // Stage 3a: engine status indicator (display-only — no musical behavior
+  // wires to the engine yet; 3b connects rendering). The status reflects the
+  // WebSocket connection to the scorch-engine sidecar spawned by the Rust shell.
+  const [engineStatus, setEngineStatus] = useState<EngineStatus>("off");
+  const [engineRtt, setEngineRtt] = useState<number | null>(null);
+  const engineClientRef = useRef<EngineClient | null>(null);
   // Chord v2 — the editing chord id is LIFTED here (was local to the Arranger
   // lane) so the top-bar panel and the in-lane editor share one source of
   // truth: creation/retarget/Esc/delete all stay in sync. No schema change.
@@ -135,6 +163,42 @@ export default function App() {
     const notice = takeStartupNoticeOnce();
     if (notice) toast("error", notice);
   }, [toast]);
+
+  // Stage 3a — engine client lifecycle. The shell spawns scorch-engine and
+  // exposes get_engine_info (port + failed flag). We connect, ping every 5s
+  // for RTT, and reconnect with deterministic backoff on drop. Display-only.
+  useEffect(() => {
+    let disposed = false;
+    let pingTimer: number | undefined;
+    const client = new EngineClient((status, rtt) => {
+      if (disposed) return;
+      setEngineStatus(status);
+      setEngineRtt(rtt);
+    });
+    engineClientRef.current = client;
+
+    invoke<{ port: number; failed: boolean }>("get_engine_info")
+      .then((info) => {
+        if (disposed) return;
+        if (info.failed || info.port === 0) {
+          setEngineStatus("off");
+          return;
+        }
+        client.connect(info.port);
+        // Ping every 5s for RTT measurement.
+        pingTimer = window.setInterval(() => client.ping(), 5000);
+      })
+      .catch(() => {
+        // Not in Tauri (web preview) — engine is off.
+        if (!disposed) setEngineStatus("off");
+      });
+
+    return () => {
+      disposed = true;
+      if (pingTimer) window.clearInterval(pingTimer);
+      client.dispose();
+    };
+  }, []);
 
   const commit = useCallback(
     (next: Project) => {
@@ -395,7 +459,7 @@ export default function App() {
           </span>
         </div>
         <div className="flex items-center gap-2">
-          <span className="hidden sm:inline">Engine: web preview (JUCE not installed)</span>
+          <EngineIndicator status={engineStatus} rtt={engineRtt} />
           <button type="button" className="hover:text-stone-200" onClick={() => jsonInputRef.current?.click()} title="Import project JSON">
             Import
           </button>

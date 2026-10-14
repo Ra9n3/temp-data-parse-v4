@@ -183,3 +183,73 @@ Stage 1 was 13 SLoC. Stage 2 adds the protocol handler, version discovery, hands
 ### No `.scorch` file association this stage
 
 Unchanged from Stage 1. Double-clicking a project file does not open the app. Use in-app Export/Import JSON. Later stage.
+
+## Stage 3a — JUCE engine skeleton (protocol handshake, no audio)
+
+### Engine contract v1 (4 message types, versioned from message one)
+
+| Direction | Message | Behavior |
+|---|---|---|
+| server → client | `{"type":"hello","engineVersion":"0.1.0","protocol":1}` | Sent on connect. `protocol: 1` is the version — 3b extends, never mutates. |
+| client → server | `{"type":"ping"}` | Server replies `{"type":"pong","t":<monotonic ms>}` |
+| client → server | `{"type":"shutdown"}` | Server clean exit 0 |
+| client → server | anything else | Server replies `{"type":"error","code":"unknown","echo":<original>}` |
+
+- `protocol: 1` is the contract version. Future stages add new message types but never change existing ones (additive-only, like the schema's `schemaVersion`). The frontend checks `protocol` in the hello and will refuse to use the engine if it's higher than expected (3b wires this; 3a is display-only).
+- No randomness anywhere — the engine is fully deterministic. The frontend's reconnect backoff is a fixed sequence (1, 2, 4, 8, 16 seconds), NOT random jitter.
+
+### Loopback-only rule
+
+The engine binds `127.0.0.1` ONLY — never `0.0.0.0`, never a public interface. This is enforced in `engine/src/main.cpp` (`ix::WebSocketServer server(port, "127.0.0.1")`). The engine is a servant to the frontend (which runs in the same process's webview); there is no network exposure. `netstat` should show the listener on `127.0.0.1:9377` only (or whichever port the shell selected).
+
+### Sidecar lifecycle (spawn / restart / kill)
+
+- **Spawn**: at app launch, `setup()` calls `start_engine()` which finds a free port (9377, increment on bind failure up to +20), spawns `scorch-engine.exe --port <N>`, and stores the `Child` handle + port in `EngineState`.
+- **Restart**: a background thread runs `check_and_restart()` every 2 seconds. If `child.try_wait()` returns `Some(_)` (process exited), the shell respawns the engine. Max 3 rapid restarts within 60 seconds; after that, `failed=true` and the frontend shows "engine: failed". The 60s window resets if the engine stays alive long enough (a fresh restart after a long run is allowed).
+- **Kill**: on `WindowEvent::CloseRequested`, the shell calls `kill_engine()` which `child.kill()` + `child.wait()` — no orphaned engine processes. (The spec asks to verify via tasklist after close; this is a CI-runtime test that can't be automated in the workflow — it's a manual smoke test documented in the report.)
+- **Port selection**: the shell owns port selection (try 9377, increment on bind failure). The frontend gets the port via the `get_engine_info` Tauri command. The engine itself just binds whatever port it's told.
+
+### WebSocket library choice rationale
+
+**Chosen: IXWebSocket v11.4.5** (true RFC 6455 WebSocket server, via CMake FetchContent).
+
+- **Why not JUCE's `InterprocessConnection`**: it's raw TCP, not WebSocket. The frontend uses the browser's native `WebSocket` API (no JS dependency), which speaks RFC 6455. Browser WebSocket cannot connect to a raw TCP server. Using `InterprocessConnection` would require writing a custom client in the frontend (defeating the "browser-native WebSocket" goal).
+- **Why not libwebsockets**: heavier, C API, more CMake boilerplate. IXWebSocket is C++ with a clean server API, sufficient for a 4-message protocol.
+- **Why not boost::beast**: would pull in all of Boost. Overkill for a loopback-only 4-message protocol.
+- IXWebSocket is pinned at v11.4.5 via FetchContent; the build links `ixwebsocket` (which transitively needs `zlib` and `openssl`/`mbedtls` for WSS — but we're WS-only on loopback, so the TLS backend is unused; IXWebSocket's CMake handles this gracefully on Windows with MSVC).
+
+### JUCE version + modules
+
+- JUCE 8.0.4 pinned via FetchContent (`GIT_TAG 8.0.4`). Only `juce_core` is linked — no audio, graph, GUI, or networking modules. This keeps the engine compile time minimal (~2-3 min cold, ~30s cached) and avoids pulling in audio APIs that don't exist in this stage.
+- JUCE is used for `juce_core` utilities only (string, time, logging). The WebSocket server is IXWebSocket, not JUCE. This is a deliberate separation: JUCE's audio/graph APIs come in Stage 3b+; the protocol layer is IXWebSocket so it's browser-compatible from day one.
+
+### Frontend engine client (`src/engine/engineClient.ts`)
+
+- `EngineClient` class: `connect(port)`, `ping()`, `dispose()`, status enum `"off"|"connecting"|"handshake"|"ready"|"restarting"|"failed"`.
+- **Deterministic reconnect**: fixed sequence [1, 2, 4, 8, 16] seconds, 5 attempts max. NO random jitter (standing rule: no RNG). After 5 failed attempts → `failed`.
+- **RTT measurement**: `ping()` records `performance.now()` at send; `pong` arrival computes the delta. Displayed in the footer as "engine: ready · Nms".
+- **Status indicator**: footer span, colored by status (emerald=ready, amber=connecting/handshake/restarting, red=failed, stone=off). Replaces the old "Engine: web preview (JUCE not installed)" span.
+- **IMPORTANT guard**: when engine status ≠ ready, NOTHING in the app's musical behavior changes. Status is display-only this stage. 3b will wire the engine to rendering (PhysicalMidiStreamEvent); 3a proves the plumbing.
+
+### Rust line count (thin-shell budget)
+
+Stage 2 was 97 SLoC. Stage 3a adds `engine.rs` (119 SLoC) + sidecar wiring in `lib.rs` (+12 SLoC), bringing the total to **235 SLoC** (lib.rs 109 + engine.rs 119 + main.rs 4 + build.rs 3). This is well over the original ~80 thin-shell budget. The growth is entirely in the sidecar manager (`engine.rs`): spawn, port selection, crash-restart (3/60s), kill-on-close. This is explicitly shell responsibility per the spec ("Rust = spawn/kill/restart + port pass-through ONLY"). No musical logic in Rust — the `engine.rs` module contains zero domain knowledge (no MIDI, no audio, no generation). Reported per the standing "budget check" rule.
+
+### CI engine build
+
+- `desktop.yml` now builds the engine BEFORE `tauri build`: CMake configure (Visual Studio 17 2022, x64, Release) + build + copy to `src-tauri/binaries/scorch-engine.exe` (so `tauri.conf.json`'s `bundle.resources` mapping bundles it next to `scorch.exe`).
+- JUCE + IXWebSocket FetchContent cached via `actions/cache@v4` keyed on `CMakeLists.txt` hash. Cold build: ~5-8 min (JUCE is large); cached: ~30-60s.
+- Engine standalone protocol test: a Node.js WebSocket client (`.github/scripts/test-engine-protocol.mjs`) asserts all 4 message types (hello, ping→pong, unknown→error, shutdown→exit). Runs before the Tauri build so a protocol regression fails fast.
+- Engine exe uploaded as a separate artifact (`scorch-engine-windows-exe`) alongside the existing installer/exe/web-pack artifacts.
+
+### Engine exe bundling
+
+- `tauri.conf.json`'s `bundle.resources` maps `"binaries/scorch-engine.exe"` → `"scorch-engine.exe"` (placed next to the app exe in the installed app).
+- The Rust `engine_exe_path()` looks for `scorch-engine.exe` in `current_exe().parent()` (prod, bundled) and falls back to walking up the directory tree to find `engine/build/Release/` (dev).
+- If the engine exe is not found, the shell sets `failed=true` and the frontend shows "engine: off" — the app still boots from the web tier (graceful degradation, same principle as Stage 2's fallback).
+
+### Untested claims (fire-rate honesty)
+
+- **Kill-on-close**: the `on_window_event(CloseRequested)` handler calls `kill_engine()`, but the actual "no orphans" verification requires running the app on Windows, closing it, and checking `tasklist`. This is a manual smoke test that can't be automated in CI — documented as a manual verification step, not an automated claim.
+- **Restart contract**: the `check_and_restart()` thread polls every 2s. If the engine is killed mid-session, the restart fires within ~2s. But the "max 3 in 60s" window and the "failed" terminal state are code paths that need a live Windows session to exercise (kill the engine 4 times rapidly and observe the transition). Documented as manual verification.
+- **Loopback proof**: `netstat` showing the listener on `127.0.0.1` only requires running the app on Windows. The engine code binds `127.0.0.1` explicitly (`ix::WebSocketServer server(port, "127.0.0.1")`), but the runtime verification is manual.

@@ -9,3 +9,6 @@ Cargo.lock
 
 # Tauri generated
 gen/
+
+# Engine sidecar binary (built by CI, not checked in)
+binaries/*.exe
