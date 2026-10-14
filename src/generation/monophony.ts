@@ -18,6 +18,7 @@
  * count means an upstream stage is still stacking — warn so it is visible.
  */
 import type { AbstractNoteEvent } from "./generate";
+import { validateDoubleStop, STRING_INSTRUMENTS, type StringInstrument } from "./strings";
 
 
 export type MonophonyFamily = "monophonic" | "double-stop" | "polyphonic";
@@ -50,36 +51,69 @@ export function familyOfRole(role: string): string | undefined {
 export interface GuardResolution { trackId: string; dropped: number; truncated: number }
 
 /** Generic guard over note rows; optional parallel `roles` array (per-note event role)
- * supplies the priority tiebreak (LEAD > COUNTERLINE > OSTINATO > BASS > PAD).
- * Active-set algorithm: notes are processed in onset order; whenever a candidate
- * would push the simultaneous count past `maxSimultaneous`, the lowest-priority
- * active overlap is truncated to a legato handoff (end exactly where the later
- * note begins) or, when onsets tie, dropped. The invariant holds globally by
- * induction: every admission re-checks against the live active set. Deterministic
- * (sorted order, listed tiebreaks); pitch is NEVER modified. */
+ * supplies the priority tiebreak (LEAD > COUNTERLINE > OSTINATO > BASS > PAD), and an
+ * optional parallel `pitches` array enables the Module STRINGS double-stop physics on
+ * cap=2 (double-stop) families: a candidate that would form a PAIR which fails
+ * `validateDoubleStop` resolves the lower-priority victim by the same rules as an
+ * over-cap overlap (legato handoff / tied-onset drop) and the caller logs
+ * `[scorch] unplayable double-stop resolved`. Playable pairs are validated at admission
+ * and survive untouched. Active-set algorithm: notes are processed in onset order;
+ * whenever a candidate would push the simultaneous count past `maxSimultaneous` (or
+ * form an unplayable pair), the lowest-priority active overlap is truncated to a legato
+ * handoff (end exactly where the later note begins) or, when onsets tie, dropped. The
+ * invariant holds globally by induction: every admission re-checks against the live
+ * active set. Deterministic (sorted order, listed tiebreaks); pitch is NEVER modified. */
+export interface GuardOptions {
+  /** Parallel per-note pitches — enables double-stop PHYSICS on cap-2 families. */
+  pitches?: number[];
+  /** The string instrument whose open strings define the physical law
+   * (string section tracks carry instrument names as their role). */
+  doubleStopInstrument?: StringInstrument;
+}
+
 export function applyMonophonyGuard<N extends { startTick: number; durationTicks: number }>(
   notes: N[],
   maxSimultaneous: number,
   roles?: string[],
-): { notes: N[]; dropped: number; truncated: number } {
+  options?: GuardOptions,
+): { notes: N[]; dropped: number; truncated: number; unplayableResolved: Array<{ pitchA: number; pitchB: number }> } {
   if (maxSimultaneous === Number.POSITIVE_INFINITY || notes.length <= 1) {
-    return { notes: [...notes], dropped: 0, truncated: 0 };
+    return { notes: [...notes], dropped: 0, truncated: 0, unplayableResolved: [] };
   }
-  const order = notes.map((note, index) => ({ note, role: roles?.[index] })).sort((a, b) =>
+  const pitches = options?.pitches;
+  const instrument = options?.doubleStopInstrument;
+  const order = notes.map((note, index) => ({ note, role: roles?.[index], pitch: pitches?.[index] })).sort((a, b) =>
     a.note.startTick - b.note.startTick || (ROLE_PRIORITY[a.role ?? ""] ?? 9) - (ROLE_PRIORITY[b.role ?? ""] ?? 9));
-  const active: Array<{ note: N; role?: string }> = [];
+  const active: Array<{ note: N; role?: string; pitch?: number }> = [];
   let truncated = 0;
   let dropped = 0;
+  const unplayableResolved: Array<{ pitchA: number; pitchB: number }> = [];
+  // Module STRINGS — double-stop physics: on cap=2 families with pitch data, a
+  // new PAIR must pass `validateDoubleStop`; an impossible pair resolves the
+  // lower-priority victim exactly like an over-cap overlap (decision 2).
+  const formsUnplayablePair = (entry: { pitch?: number }, candidate: { pitch?: number }): boolean => {
+    if (maxSimultaneous !== 2 || instrument === undefined) return false;
+    if (entry.pitch === undefined || candidate.pitch === undefined) return false;
+    const pitchA = Math.min(entry.pitch, candidate.pitch);
+    const pitchB = Math.max(entry.pitch, candidate.pitch);
+    return !validateDoubleStop(pitchA, pitchB, instrument).playable;
+  };
   const overlaps = (a: { startTick: number; durationTicks: number }, b: { startTick: number; durationTicks: number }): boolean =>
     a.startTick < b.startTick + b.durationTicks && b.startTick < a.startTick + a.durationTicks;
   for (const candidate of order) {
     let overlapping = active.filter((entry) => overlaps(entry.note, candidate.note));
-    while (overlapping.length >= maxSimultaneous) {
+    while (overlapping.length >= maxSimultaneous || (overlapping.length === 1 && formsUnplayablePair(overlapping[0]!, candidate))) {
+      const physicsPair = overlapping.length === 1 && formsUnplayablePair(overlapping[0]!, candidate);
       // Victim: lowest priority, then earliest onset (smallest startTick).
       const victim = [...overlapping].sort((a, b) =>
         (ROLE_PRIORITY[a.role ?? ""] ?? 9) - (ROLE_PRIORITY[b.role ?? ""] ?? 9)
         || a.note.startTick - b.note.startTick)[0]!;
       const cutTo = candidate.note.startTick - victim.note.startTick; // ≥ 1 → legato handoff possible
+      if (physicsPair && victim.pitch !== undefined && candidate.pitch !== undefined) {
+        const pitchA = Math.min(victim.pitch, candidate.pitch);
+        const pitchB = Math.max(victim.pitch, candidate.pitch);
+        unplayableResolved.push({ pitchA, pitchB });
+      }
       if (cutTo >= 1) {
         (victim.note as { durationTicks: number }).durationTicks = cutTo;
         truncated++;
@@ -142,27 +176,35 @@ export function applyMonophonyGuard<N extends { startTick: number; durationTicks
     }
   }
   const kept = active.map((entry) => entry.note).sort((a, b) => a.startTick - b.startTick);
-  return { notes: kept, dropped, truncated };
+  return { notes: kept, dropped, truncated, unplayableResolved };
 }
 
 /** Track-level entry: capability resolves from the RECEIVING TRACK's family
  * (Module 8.6 B1 fix — the rotation engine remaps event-level instrumentIds, so
  * capability must never depend on a string-keyed role→family map). The legacy
- * role-key lookup stays as a fallback so existing callers keep working. */
+ * role-key lookup stays as a fallback so existing callers keep working.
+ * Module STRINGS (decision 2): pitches + the track's string instrument enable
+ * the double-stop physics — an impossible pair resolves per existing role
+ * priority and logs `[scorch] unplayable double-stop resolved` here. */
 export function guardTrackNotes<N extends { startTick: number; durationTicks: number }>(
   trackId: string,
   role: string,
   notes: N[],
   noteRoles?: string[],
   trackFamily?: string,
-): GuardResolution & { notes: N[] } {
+  pitches?: number[],
+): GuardResolution & { notes: N[]; unplayableResolved: Array<{ pitchA: number; pitchB: number }> } {
   const family = trackFamily ?? familyOfRole(role);
   const max = maxSimultaneousFor(family);
-  const result = applyMonophonyGuard(notes, max, noteRoles);
+  const doubleStopInstrument = max === 2 && (STRING_INSTRUMENTS as readonly string[]).includes(role) ? role as StringInstrument : undefined;
+  const result = applyMonophonyGuard(notes, max, noteRoles, doubleStopInstrument ? { pitches, doubleStopInstrument } : undefined);
   if (result.dropped || result.truncated) {
     console.warn(`[scorch] monophony guard resolved on ${trackId} (${role}): ${result.dropped} dropped, ${result.truncated} truncated`);
   }
-  return { trackId, dropped: result.dropped, truncated: result.truncated, notes: result.notes };
+  for (const pair of result.unplayableResolved) {
+    console.warn(`[scorch] unplayable double-stop resolved ${trackId} pitches ${pair.pitchA}+${pair.pitchB}`);
+  }
+  return { trackId, dropped: result.dropped, truncated: result.truncated, notes: result.notes, unplayableResolved: result.unplayableResolved };
 }
 
 /** Module 8.7 B2 — the "global rule" made provable. Re-checks the WHOLE

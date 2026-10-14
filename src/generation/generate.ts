@@ -1319,7 +1319,10 @@ export function generate(project: Project, options: GenerateOptions): Track[] {
   // pitch is never modified. Expected resolutions after Phases 1–3: zero.
   const guardedTracks = divided.map((track) => {
     if (track.family === "structure" || track.family === "audio") return track;
-    const guarded = guardTrackNotes(track.id, track.role, track.notes, undefined, track.family);
+    // Module STRINGS — pitches + the string instrument let the guard apply
+    // double-stop PHYSICS on cap-2 (strings) tracks (decision 2); winds/brass
+    // stay plain, keys/percussion unbounded.
+    const guarded = guardTrackNotes(track.id, track.role, track.notes, undefined, track.family, track.notes.map((note) => note.pitch));
     return { ...track, notes: guarded.notes };
   });
   // Module 8.7 B2 — the "global rule" made provable: after the guard runs, a

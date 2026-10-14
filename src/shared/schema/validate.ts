@@ -1,5 +1,6 @@
 import { parseChord } from "./chords";
 import { builtInProfileById } from "../../plugins/expressionMaps";
+import { validateSectionProfile } from "../../generation/strings";
 import {
   DEFAULT_EXPRESSION_MAPPING,
   DEFAULT_GENERATION_SETTINGS,
@@ -293,6 +294,25 @@ export function validateProject(input: unknown): ValidationResult {
             for (const key of ["germ", "nct", "counterline"] as const) {
               if (themesConfig[key] !== undefined && typeof themesConfig[key] !== "boolean") {
                 errors.push(`generationSettings.themes.${key} must be boolean`);
+              }
+            }
+          }
+        }
+        // Module STRINGS — additive optional string-section config; error style "strings config".
+        const stringsConfig = settings.strings;
+        if (stringsConfig !== undefined) {
+          if (!stringsConfig || typeof stringsConfig !== "object") errors.push("strings config must be an object");
+          else {
+            if (stringsConfig.panningProfile !== undefined
+              && !["CLASSICAL", "STUDIO_CENTERED_BASS"].includes(stringsConfig.panningProfile)) {
+              errors.push("strings config: panningProfile must be CLASSICAL or STUDIO_CENTERED_BASS");
+            }
+            if (stringsConfig.sectionProfile !== undefined) {
+              if (!["SYMPHONIC_60", "STUDIO_34", "CHAMBER_12", "QUARTET_4"].includes(stringsConfig.sectionProfile)) {
+                errors.push("strings config: sectionProfile does not resolve in SECTION_PROFILES");
+              } else {
+                const sectionProfileResult = validateSectionProfile(stringsConfig.sectionProfile);
+                if (!sectionProfileResult.ok) errors.push(`strings config: ${sectionProfileResult.errors.join("; ")}`);
               }
             }
           }

@@ -4,6 +4,7 @@ import { projectEndTick, secondsToTicks, secondsToTicksAlongMap, ticksPerBar, ti
 import { buildConductorTempoEvents } from "../generation/humanizeV2";
 import { acousticWeightForTrack } from "../generation/balance";
 import { readMixOverrides } from "../state/persistence";
+import { panForTrack, panValueFromCc10 } from "../generation/strings";
 
 export interface PlaybackState {
   playheadTick: number;
@@ -15,6 +16,7 @@ export interface PlaybackState {
 interface Voices {
   osc: OscillatorNode;
   gain: GainNode;
+  panner?: StereoPannerNode;
   stopAt: number;
 }
 
@@ -160,6 +162,12 @@ export function usePlayback(
       } catch {
         /* already stopped */
       }
+      try {
+        v.panner?.disconnect();
+        v.gain.disconnect();
+      } catch {
+        /* already disconnected */
+      }
     }
     voicesRef.current = [];
     scheduledRef.current.clear();
@@ -230,14 +238,28 @@ export function usePlayback(
           gain.gain.linearRampToValueAtTime(0, when + durSec);
           osc.connect(filter);
           filter.connect(gain);
-          gain.connect(masterRef.current!.input); // through the master bus, not straight to destination
+          // Module STRINGS decision 3 — stereo seating in preview: every string
+          // track voice rides a StereoPannerNode (pan = (cc10−64)/63) from the
+          // active PANNING profile (default CLASSICAL — violins left, cellos
+          // right, bass far right). Non-string tracks get no pan this task
+          // (native mixer era). Deterministic; no timing change.
+          let panner: StereoPannerNode | undefined;
+          if (t.family === "strings") {
+            const cc10 = panForTrack(p, { role: t.role, family: t.family });
+            if (cc10 !== undefined) {
+              panner = ctx.createStereoPanner();
+              panner.pan.value = panValueFromCc10(cc10);
+              panner.connect(masterRef.current!.input);
+            }
+          }
+          gain.connect(panner ?? masterRef.current!.input); // via the voice chain through the master bus
           try {
             osc.start(when);
             osc.stop(when + durSec + 0.02);
           } catch {
             continue;
           }
-          voicesRef.current.push({ osc, gain, stopAt: when + durSec });
+          voicesRef.current.push({ osc, gain, ...(panner ? { panner } : {}), stopAt: when + durSec });
         }
       }
       if (voicesRef.current.length > 64) {

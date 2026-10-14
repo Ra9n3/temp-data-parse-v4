@@ -240,6 +240,13 @@ export interface ThemesSettingsPartial {
   counterline?: boolean;
 }
 
+/** Module STRINGS: additive optional string-section config; absent = the
+ * CLASSICAL panning profile and SYMPHONIC_60 section sizes (spec default). */
+export interface StringsSettingsPartial {
+  sectionProfile?: "SYMPHONIC_60" | "STUDIO_34" | "CHAMBER_12" | "QUARTET_4";
+  panningProfile?: "CLASSICAL" | "STUDIO_CENTERED_BASS";
+}
+
 /** Module 8: additive optional arrangement config (merged over defaults). */
 export interface ArrangementConfigPartial {
   enableAutoBuildStaggering?: boolean;
@@ -314,6 +321,8 @@ export interface ProjectGenerationSettings {
   themes?: { germ?: boolean; nct?: boolean; counterline?: boolean };
   /** Module 8: optional arrangement config; absent = defaults (staggering on, gestures on, SOLO_CELLO). */
   arrangement?: ArrangementConfigPartial;
+  /** Module STRINGS: optional string-section config; absent = CLASSICAL panning + SYMPHONIC_60 sizes. */
+  strings?: StringsSettingsPartial;
 }
 
 export const DEFAULT_GENERATION_SETTINGS: ProjectGenerationSettings = {

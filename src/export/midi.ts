@@ -11,7 +11,8 @@ import { CC74_OFFSETS } from "../generation/articulation";
 import { acousticWeightForTrack, cc7ForWeight } from "../generation/balance";
 import { builtInProfileById, vst3EventAdapter, type PhysicalMidiStreamEvent } from "../plugins/expressionMaps";
 import { buildConductorTempoEvents } from "../generation/humanizeV2";
-import { keyboardPedalAutomation, PAN_CENTERED_ROLES, type PedalCcEvent } from "../generation/rhythm";
+import { keyboardPedalAutomation, type PedalCcEvent } from "../generation/rhythm";
+import { panForTrack } from "../generation/strings";
 
 function isInstrument(track: Track): boolean {
   return track.family !== "structure" && track.family !== "audio";
@@ -191,7 +192,7 @@ function applyHeader(midi: MidiInstance, project: Project, endTick: number): voi
   });
 }
 
-function writeInstrumentTrack(midi: MidiInstance, track: Track, endTick: number, channel: number, libraryGroups: Project["libraryGroups"] = [], bpm = 120, pedalEvents?: PedalCcEvent[]): void {
+function writeInstrumentTrack(midi: MidiInstance, track: Track, endTick: number, channel: number, libraryGroups: Project["libraryGroups"] = [], bpm = 120, pedalEvents?: PedalCcEvent[], panCc10?: number): void {
   const expression = track.expressionMapping;
   const mt = midi.addTrack();
   mt.name = track.name;
@@ -200,10 +201,14 @@ function writeInstrumentTrack(midi: MidiInstance, track: Track, endTick: number,
   // CC#7 is a static master fader by acoustic carrying power, deliberately separate
   // from per-note expressionMapping so custom CC assignments remain untouched.
   mt.addCC({ number: 7, value: cc7ForWeight(acousticWeightForTrack(track)) / 127, ticks: 0 });
-  // Module 13 decision 4 — pan centering (sub-150 Hz rule): bass-carrying
-  // tracks get CC10 = 64 at tick 0. No other pan automation (section stereo
-  // spread is native-era mixing). Deterministic, one event, tick 0.
-  if (PAN_CENTERED_ROLES.has(track.role ?? "")) mt.addCC({ number: 10, value: 64 / 127, ticks: 0 });
+  // Module STRINGS decision 3 — section panning profiles: every STRING track
+  // gets exactly one CC10 @ tick 0 from the active profile (default CLASSICAL:
+  // violins1 14, violins2 39, violas 77, cellos 102, doubleBass 118;
+  // STUDIO_CENTERED_BASS: 17/42/77/108/64 — the M13 sub-150 Hz center rule
+  // lives HERE as the doubleBass row). Module 13's unconditional bass-carrier
+  // CC10=64 write is SUPERSEDED (basoons/tuba keep NO pan — non-string tracks
+  // get none this task; native mixer). Deterministic, one event, tick 0.
+  if (panCc10 !== undefined) mt.addCC({ number: 10, value: panCc10 / 127, ticks: 0 });
   // Module 13 decision 3 — keyboard pedal catch on KEYS-family tracks only:
   // chord-boundary CC64 streams (127 at start, 0 at the next start, 127 again
   // +10 ms — "the catch"), replacing per-note sustain THERE. Non-keys tracks
@@ -287,7 +292,7 @@ export function exportMergedMidi(
       const events = vst3EventAdapter(t.notes, profile, project.bpm, { endTick });
       nextChannel += physicalToTonejs(midi, events, { trackName: t.name, endTick, cc7Value: cc7ForWeight(acousticWeightForTrack(t)) / 127 });
     } else {
-      writeInstrumentTrack(midi, t, endTick, nextChannel % 16, project.libraryGroups, project.bpm, pedalEventsFor(t, project, endTick));
+      writeInstrumentTrack(midi, t, endTick, nextChannel % 16, project.libraryGroups, project.bpm, pedalEventsFor(t, project, endTick), panForTrack(project, t));
       nextChannel += 1;
     }
   }
@@ -318,7 +323,7 @@ export function exportPerTrackMidi(
       const events = vst3EventAdapter(t.notes, profile, project.bpm, { endTick });
       physicalToTonejs(midi, events, { trackName: t.name, endTick, cc7Value: cc7ForWeight(acousticWeightForTrack(t)) / 127 });
     } else {
-      writeInstrumentTrack(midi, t, endTick, 0, project.libraryGroups, project.bpm, pedalEventsFor(t, project, endTick));
+      writeInstrumentTrack(midi, t, endTick, 0, project.libraryGroups, project.bpm, pedalEventsFor(t, project, endTick), panForTrack(project, t));
     }
     const idx = String(nextChannel + 1).padStart(2, "0");
     nextChannel += 1;

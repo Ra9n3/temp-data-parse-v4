@@ -82,6 +82,13 @@ export const PROJECT_JSON_SCHEMA = {
             breakdownExposedLayer: { type: "string", enum: ["SOLO_CELLO", "SOLO_WOODWIND", "HARP_PAD", "PIANO_ONLY"] },
           },
         },
+        strings: {
+          type: "object",
+          properties: {
+            sectionProfile: { type: "string", enum: ["SYMPHONIC_60", "STUDIO_34", "CHAMBER_12", "QUARTET_4"] },
+            panningProfile: { type: "string", enum: ["CLASSICAL", "STUDIO_CENTERED_BASS"] },
+          },
+        },
       },
     },
     sections: {

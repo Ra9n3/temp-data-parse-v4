@@ -6,6 +6,7 @@ import { type ModeName, type Project, type TimeSignature } from "../shared/schem
 import { msToTicks, ticksPerBar, ticksPerBeat } from "../shared/schema/time";
 import { validateProject } from "../shared/schema/validate";
 import { exportMergedMidi, exportPerTrackMidi, midiDurationTicks, parseMidiNotes } from "../export/midi";
+import { validateDoubleStop } from "../generation/strings";
 import { exportProjectJson, importProjectJson, projectsEqual } from "../export/json";
 import {
   applyEfgEngines,
@@ -872,6 +873,47 @@ export function runUnitTests(): TestResult[] {
       badRoll.tracks.find((t) => t.id === "trk_aux")!.notes.push({ pitch: 51, startTick: 0, durationTicks: 480, velocity: 20, isRoll: "yes" as unknown as boolean });
       assert(!validateProject(badRoll).ok, "non-boolean isRoll accepted");
       return "malletType ≤32 chars, velocityTier enum, isRoll boolean validated";
+    }),
+    timed("Strings module: double-stop validator vectors + panning profiles (export CC10 + config)", () => {
+      // Module STRINGS — decision 1 vectors (BOTH S.7 cases pinned explicitly,
+      // exact results) and decision 3 export wiring. The sibling cap stays ≤2
+      // and the guard bounds tests above are unmodified; the M13 bass-center
+      // CC10 write is SUPERSEDED — the default profile CLASSICAL now pins the
+      // per-string-track pan (strengthen-only per the scoping note).
+      const sameString = validateDoubleStop(57, 60, "violins1");
+      assert(!sameString.playable && sameString.reason === "same-string", "violin 60+57 must be same-string INVALID (S.7.1)");
+      const nonAdjacent = validateDoubleStop(60, 69, "violins1");
+      assert(!nonAdjacent.playable && nonAdjacent.reason === "non-adjacent", "violin 60+69 must be non-adjacent INVALID (S.7.2)");
+      const openPair = validateDoubleStop(55, 62, "violins1");
+      assert(openPair.playable && !openPair.intonationWarning, "violin 55+62 (open G+D) must be VALID without warning");
+      const celloPair = validateDoubleStop(36, 43, "cellos");
+      assert(celloPair.playable && !celloPair.intonationWarning, "cello C+G must be VALID without warning");
+      const fingered = validateDoubleStop(60, 64, "violins1");
+      assert(fingered.playable === true && fingered.intonationWarning === true, "violin 60+64 (G+D fingered) must be VALID + intonation warning");
+      const stretch = validateDoubleStop(70, 87, "violins1");
+      assert(!stretch.playable && stretch.reason === "hand-stretch", "adjacent-string 17-semitone stretch must be INVALID");
+      const belowFloor = validateDoubleStop(30, 43, "violins1");
+      assert(!belowFloor.playable && belowFloor.reason === "below-open-string-floor", "pitch under the lowest string must be out of range");
+      // Export: CC10@tick0 per string track from CLASSICAL (default); doubleBass 118 —
+      // the STUDIO profile carries M13's centered-bass rule.
+      const project = fixture();
+      const merged = new Midi(exportMergedMidi(project, "all", []));
+      const cc10For = (name: string): number | undefined => {
+        const toneTrack = merged.tracks.find((t) => t.name === name);
+        const events = toneTrack?.controlChanges[10];
+        return events?.[0]?.value !== undefined ? Math.round(events[0]!.value * 127) : undefined;
+      };
+      assert(cc10For("Violins I") === 14, `violins1 CC10 ${cc10For("Violins I")} != 14 (CLASSICAL)`);
+      assert(cc10For("Violins II") === 39 && cc10For("Violas") === 77, "viola/violins2 pans off the CLASSICAL table");
+      assert(cc10For("Cellos/Basses") === 102, "cellos pan right (was M13-centered)");
+      // strings config validation: unknown enums rejected, values accepted
+      const badPan = fixture();
+      badPan.generationSettings = { ...(badPan.generationSettings ?? DEFAULT_GENERATION_SETTINGS), strings: { panningProfile: "MONO" as "CLASSICAL" } };
+      assert(!validateProject(badPan).ok && (validateProject(badPan) as { errors: string[] }).errors.some((e) => e.includes("strings config")), "unknown panningProfile must reject with strings config error");
+      const goodConfig = fixture();
+      goodConfig.generationSettings = { ...(goodConfig.generationSettings ?? DEFAULT_GENERATION_SETTINGS), strings: { sectionProfile: "CHAMBER_12", panningProfile: "STUDIO_CENTERED_BASS" } };
+      assert(validateProject(goodConfig).ok, "valid strings config rejected");
+      return "S.7 both vectors pinned; CLASSICAL pans exported per string track; strings config validated";
     }),
   ];
 }

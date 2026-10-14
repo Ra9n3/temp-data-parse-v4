@@ -17,7 +17,7 @@
    {
     "pitch": 81,
     "startTick": 0,
-    "durationTicks": 979,
+    "durationTicks": 960,
     "velocity": 74,
     "dynamics": {
      "cc11Value": 62,
@@ -45,7 +45,7 @@
    {
     "pitch": 81,
     "startTick": 1920,
-    "durationTicks": 979,
+    "durationTicks": 960,
     "velocity": 74,
     "dynamics": {
      "cc11Value": 62,
@@ -73,7 +73,7 @@
    {
     "pitch": 81,
     "startTick": 3840,
-    "durationTicks": 979,
+    "durationTicks": 960,
     "velocity": 64,
     "dynamics": {
      "cc11Value": 50,
@@ -101,7 +101,7 @@
    {
     "pitch": 81,
     "startTick": 5760,
-    "durationTicks": 979,
+    "durationTicks": 960,
     "velocity": 67,
     "dynamics": {
      "cc11Value": 53,
@@ -129,7 +129,7 @@
    {
     "pitch": 79,
     "startTick": 7680,
-    "durationTicks": 979,
+    "durationTicks": 960,
     "velocity": 70,
     "dynamics": {
      "cc11Value": 57,
@@ -157,7 +157,7 @@
    {
     "pitch": 79,
     "startTick": 9600,
-    "durationTicks": 979,
+    "durationTicks": 960,
     "velocity": 71,
     "dynamics": {
      "cc11Value": 58,
@@ -185,7 +185,7 @@
    {
     "pitch": 79,
     "startTick": 11520,
-    "durationTicks": 979,
+    "durationTicks": 960,
     "velocity": 66,
     "dynamics": {
      "cc11Value": 53,
@@ -213,7 +213,7 @@
    {
     "pitch": 79,
     "startTick": 13440,
-    "durationTicks": 979,
+    "durationTicks": 960,
     "velocity": 73,
     "dynamics": {
      "cc11Value": 60,
@@ -241,7 +241,7 @@
    {
     "pitch": 84,
     "startTick": 15360,
-    "durationTicks": 979,
+    "durationTicks": 960,
     "velocity": 71,
     "dynamics": {
      "cc11Value": 54,
@@ -269,7 +269,7 @@
    {
     "pitch": 86,
     "startTick": 17280,
-    "durationTicks": 979,
+    "durationTicks": 960,
     "velocity": 75,
     "dynamics": {
      "cc11Value": 60,
@@ -297,7 +297,7 @@
    {
     "pitch": 84,
     "startTick": 19200,
-    "durationTicks": 979,
+    "durationTicks": 960,
     "velocity": 71,
     "dynamics": {
      "cc11Value": 55,
@@ -325,7 +325,7 @@
    {
     "pitch": 84,
     "startTick": 21120,
-    "durationTicks": 979,
+    "durationTicks": 960,
     "velocity": 69,
     "dynamics": {
      "cc11Value": 53,
@@ -353,7 +353,7 @@
    {
     "pitch": 84,
     "startTick": 23040,
-    "durationTicks": 979,
+    "durationTicks": 960,
     "velocity": 73,
     "dynamics": {
      "cc11Value": 57,
@@ -381,7 +381,7 @@
    {
     "pitch": 84,
     "startTick": 24960,
-    "durationTicks": 979,
+    "durationTicks": 960,
     "velocity": 74,
     "dynamics": {
      "cc11Value": 59,
@@ -409,7 +409,7 @@
    {
     "pitch": 84,
     "startTick": 26880,
-    "durationTicks": 979,
+    "durationTicks": 960,
     "velocity": 73,
     "dynamics": {
      "cc11Value": 57,
@@ -437,7 +437,7 @@
    {
     "pitch": 84,
     "startTick": 28800,
-    "durationTicks": 979,
+    "durationTicks": 960,
     "velocity": 77,
     "dynamics": {
      "cc11Value": 61,
@@ -465,7 +465,7 @@
    {
     "pitch": 84,
     "startTick": 31200,
-    "durationTicks": 979,
+    "durationTicks": 480,
     "velocity": 116,
     "dynamics": {
      "cc11Value": 109,
@@ -493,7 +493,7 @@
    {
     "pitch": 86,
     "startTick": 32640,
-    "durationTicks": 979,
+    "durationTicks": 960,
     "velocity": 122,
     "dynamics": {
      "cc11Value": 115,
@@ -521,7 +521,7 @@
    {
     "pitch": 84,
     "startTick": 35520,
-    "durationTicks": 14,
+    "durationTicks": 9,
     "velocity": 116,
     "dynamics": {
      "cc11Value": 108,
@@ -563,20 +563,6 @@
     "bowDirection": "DOWN_BOW"
    },
    {
-    "pitch": 84,
-    "startTick": 38400,
-    "durationTicks": 16,
-    "velocity": 122,
-    "dynamics": {
-     "cc11Value": 115,
-     "cc74Value": 122,
-     "attenuationActive": false
-    },
-    "technique": "LEGATO",
-    "bowDirection": "DOWN_BOW",
-    "detuneCents": 0
-   },
-   {
     "pitch": 86,
     "startTick": 38400,
     "durationTicks": 16,
@@ -608,7 +594,7 @@
    {
     "pitch": 86,
     "startTick": 40320,
-    "durationTicks": 979,
+    "durationTicks": 17,
     "velocity": 123,
     "dynamics": {
      "cc11Value": 117,
@@ -637,7 +623,7 @@
    {
     "pitch": 86,
     "startTick": 42240,
-    "durationTicks": 979,
+    "durationTicks": 960,
     "velocity": 120,
     "dynamics": {
      "cc11Value": 113,
@@ -677,20 +663,6 @@
     "detuneCents": 0
    },
    {
-    "pitch": 86,
-    "startTick": 46080,
-    "durationTicks": 960,
-    "velocity": 127,
-    "dynamics": {
-     "cc11Value": 122,
-     "cc74Value": 125,
-     "attenuationActive": false
-    },
-    "technique": "LEGATO",
-    "bowDirection": "DOWN_BOW",
-    "detuneCents": 0
-   },
-   {
     "pitch": 88,
     "startTick": 46080,
     "durationTicks": 960,
@@ -707,7 +679,7 @@
    {
     "pitch": 86,
     "startTick": 47040,
-    "durationTicks": 979,
+    "durationTicks": 960,
     "velocity": 126,
     "dynamics": {
      "cc11Value": 119,
@@ -747,20 +719,6 @@
     "detuneCents": 0
    },
    {
-    "pitch": 84,
-    "startTick": 50880,
-    "durationTicks": 7,
-    "velocity": 116,
-    "dynamics": {
-     "cc11Value": 108,
-     "cc74Value": 119,
-     "attenuationActive": false
-    },
-    "technique": "LEGATO",
-    "bowDirection": "DOWN_BOW",
-    "detuneCents": 0
-   },
-   {
     "pitch": 86,
     "startTick": 50880,
     "durationTicks": 7,
@@ -790,20 +748,6 @@
     "bowDirection": "DOWN_BOW"
    },
    {
-    "pitch": 84,
-    "startTick": 52800,
-    "durationTicks": 979,
-    "velocity": 117,
-    "dynamics": {
-     "cc11Value": 110,
-     "cc74Value": 120,
-     "attenuationActive": false
-    },
-    "technique": "LEGATO",
-    "bowDirection": "DOWN_BOW",
-    "detuneCents": 0
-   },
-   {
     "pitch": 86,
     "startTick": 52800,
     "durationTicks": 979,
@@ -820,7 +764,7 @@
    {
     "pitch": 84,
     "startTick": 54720,
-    "durationTicks": 979,
+    "durationTicks": 960,
     "velocity": 124,
     "dynamics": {
      "cc11Value": 118,
@@ -848,7 +792,7 @@
    {
     "pitch": 84,
     "startTick": 56640,
-    "durationTicks": 979,
+    "durationTicks": 960,
     "velocity": 123,
     "dynamics": {
      "cc11Value": 117,
@@ -890,7 +834,7 @@
    {
     "pitch": 86,
     "startTick": 60480,
-    "durationTicks": 979,
+    "durationTicks": 17,
     "velocity": 125,
     "dynamics": {
      "cc11Value": 118,
@@ -922,20 +866,6 @@
   "id": "trk_violins_ii",
   "notes": [
    {
-    "pitch": 62,
-    "startTick": 0,
-    "durationTicks": 960,
-    "velocity": 61,
-    "dynamics": {
-     "cc11Value": 84,
-     "cc74Value": 94,
-     "attenuationActive": false
-    },
-    "technique": "LEGATO",
-    "bowDirection": "DOWN_BOW",
-    "detuneCents": 0
-   },
-   {
     "pitch": 65,
     "startTick": 0,
     "durationTicks": 960,
@@ -950,20 +880,6 @@
     "detuneCents": 0
    },
    {
-    "pitch": 62,
-    "startTick": 960,
-    "durationTicks": 960,
-    "velocity": 61,
-    "dynamics": {
-     "cc11Value": 84,
-     "cc74Value": 94,
-     "attenuationActive": false
-    },
-    "technique": "LEGATO",
-    "bowDirection": "UP_BOW",
-    "detuneCents": 0
-   },
-   {
     "pitch": 65,
     "startTick": 960,
     "durationTicks": 960,
@@ -978,20 +894,6 @@
     "detuneCents": 0
    },
    {
-    "pitch": 62,
-    "startTick": 1920,
-    "durationTicks": 960,
-    "velocity": 61,
-    "dynamics": {
-     "cc11Value": 84,
-     "cc74Value": 94,
-     "attenuationActive": false
-    },
-    "technique": "LEGATO",
-    "bowDirection": "DOWN_BOW",
-    "detuneCents": 0
-   },
-   {
     "pitch": 65,
     "startTick": 1920,
     "durationTicks": 960,
@@ -1003,20 +905,6 @@
     },
     "technique": "LEGATO",
     "bowDirection": "DOWN_BOW",
-    "detuneCents": 0
-   },
-   {
-    "pitch": 62,
-    "startTick": 2880,
-    "durationTicks": 960,
-    "velocity": 61,
-    "dynamics": {
-     "cc11Value": 84,
-     "cc74Value": 94,
-     "attenuationActive": false
-    },
-    "technique": "LEGATO",
-    "bowDirection": "UP_BOW",
     "detuneCents": 0
    },
    {
@@ -1031,20 +919,6 @@
     },
     "technique": "LEGATO",
     "bowDirection": "UP_BOW",
-    "detuneCents": 0
-   },
-   {
-    "pitch": 62,
-    "startTick": 3840,
-    "durationTicks": 960,
-    "velocity": 61,
-    "dynamics": {
-     "cc11Value": 84,
-     "cc74Value": 94,
-     "attenuationActive": false
-    },
-    "technique": "LEGATO",
-    "bowDirection": "DOWN_BOW",
     "detuneCents": 0
    },
    {
@@ -1062,20 +936,6 @@
     "detuneCents": 0
    },
    {
-    "pitch": 62,
-    "startTick": 4800,
-    "durationTicks": 960,
-    "velocity": 61,
-    "dynamics": {
-     "cc11Value": 84,
-     "cc74Value": 94,
-     "attenuationActive": false
-    },
-    "technique": "LEGATO",
-    "bowDirection": "UP_BOW",
-    "detuneCents": 0
-   },
-   {
     "pitch": 65,
     "startTick": 4800,
     "durationTicks": 960,
@@ -1087,20 +947,6 @@
     },
     "technique": "LEGATO",
     "bowDirection": "UP_BOW",
-    "detuneCents": 0
-   },
-   {
-    "pitch": 62,
-    "startTick": 5760,
-    "durationTicks": 960,
-    "velocity": 61,
-    "dynamics": {
-     "cc11Value": 84,
-     "cc74Value": 94,
-     "attenuationActive": false
-    },
-    "technique": "LEGATO",
-    "bowDirection": "DOWN_BOW",
     "detuneCents": 0
    },
    {
@@ -1118,20 +964,6 @@
     "detuneCents": 0
    },
    {
-    "pitch": 62,
-    "startTick": 6720,
-    "durationTicks": 960,
-    "velocity": 61,
-    "dynamics": {
-     "cc11Value": 84,
-     "cc74Value": 94,
-     "attenuationActive": false
-    },
-    "technique": "LEGATO",
-    "bowDirection": "UP_BOW",
-    "detuneCents": 0
-   },
-   {
     "pitch": 65,
     "startTick": 6720,
     "durationTicks": 960,
@@ -1146,20 +978,6 @@
     "detuneCents": 0
    },
    {
-    "pitch": 65,
-    "startTick": 7680,
-    "durationTicks": 960,
-    "velocity": 70,
-    "dynamics": {
-     "cc11Value": 85,
-     "cc74Value": 102,
-     "attenuationActive": false
-    },
-    "technique": "LEGATO",
-    "bowDirection": "DOWN_BOW",
-    "detuneCents": 0
-   },
-   {
     "pitch": 67,
     "startTick": 7680,
     "durationTicks": 960,
@@ -1171,20 +989,6 @@
     },
     "technique": "LEGATO",
     "bowDirection": "DOWN_BOW",
-    "detuneCents": 0
-   },
-   {
-    "pitch": 65,
-    "startTick": 8640,
-    "durationTicks": 960,
-    "velocity": 69,
-    "dynamics": {
-     "cc11Value": 84,
-     "cc74Value": 102,
-     "attenuationActive": false
-    },
-    "technique": "LEGATO",
-    "bowDirection": "UP_BOW",
     "detuneCents": 0
    },
    {
@@ -1199,20 +1003,6 @@
     },
     "technique": "LEGATO",
     "bowDirection": "UP_BOW",
-    "detuneCents": 0
-   },
-   {
-    "pitch": 65,
-    "startTick": 9600,
-    "durationTicks": 960,
-    "velocity": 69,
-    "dynamics": {
-     "cc11Value": 84,
-     "cc74Value": 102,
-     "attenuationActive": false
-    },
-    "technique": "LEGATO",
-    "bowDirection": "DOWN_BOW",
     "detuneCents": 0
    },
    {
@@ -1230,20 +1020,6 @@
     "detuneCents": 0
    },
    {
-    "pitch": 65,
-    "startTick": 10560,
-    "durationTicks": 960,
-    "velocity": 69,
-    "dynamics": {
-     "cc11Value": 84,
-     "cc74Value": 102,
-     "attenuationActive": false
-    },
-    "technique": "LEGATO",
-    "bowDirection": "UP_BOW",
-    "detuneCents": 0
-   },
-   {
     "pitch": 67,
     "startTick": 10560,
     "durationTicks": 960,
@@ -1255,20 +1031,6 @@
     },
     "technique": "LEGATO",
     "bowDirection": "UP_BOW",
-    "detuneCents": 0
-   },
-   {
-    "pitch": 65,
-    "startTick": 11520,
-    "durationTicks": 960,
-    "velocity": 69,
-    "dynamics": {
-     "cc11Value": 84,
-     "cc74Value": 102,
-     "attenuationActive": false
-    },
-    "technique": "LEGATO",
-    "bowDirection": "DOWN_BOW",
     "detuneCents": 0
    },
    {
@@ -1286,20 +1048,6 @@
     "detuneCents": 0
    },
    {
-    "pitch": 65,
-    "startTick": 12480,
-    "durationTicks": 960,
-    "velocity": 69,
-    "dynamics": {
-     "cc11Value": 84,
-     "cc74Value": 102,
-     "attenuationActive": false
-    },
-    "technique": "LEGATO",
-    "bowDirection": "UP_BOW",
-    "detuneCents": 0
-   },
-   {
     "pitch": 67,
     "startTick": 12480,
     "durationTicks": 960,
@@ -1311,20 +1059,6 @@
     },
     "technique": "LEGATO",
     "bowDirection": "UP_BOW",
-    "detuneCents": 0
-   },
-   {
-    "pitch": 65,
-    "startTick": 13440,
-    "durationTicks": 960,
-    "velocity": 69,
-    "dynamics": {
-     "cc11Value": 84,
-     "cc74Value": 102,
-     "attenuationActive": false
-    },
-    "technique": "LEGATO",
-    "bowDirection": "DOWN_BOW",
     "detuneCents": 0
    },
    {
@@ -1342,20 +1076,6 @@
     "detuneCents": 0
    },
    {
-    "pitch": 65,
-    "startTick": 14400,
-    "durationTicks": 960,
-    "velocity": 69,
-    "dynamics": {
-     "cc11Value": 84,
-     "cc74Value": 102,
-     "attenuationActive": false
-    },
-    "technique": "LEGATO",
-    "bowDirection": "UP_BOW",
-    "detuneCents": 0
-   },
-   {
     "pitch": 67,
     "startTick": 14400,
     "durationTicks": 960,
@@ -1370,20 +1090,6 @@
     "detuneCents": 0
    },
    {
-    "pitch": 62,
-    "startTick": 15360,
-    "durationTicks": 960,
-    "velocity": 61,
-    "dynamics": {
-     "cc11Value": 84,
-     "cc74Value": 94,
-     "attenuationActive": false
-    },
-    "technique": "LEGATO",
-    "bowDirection": "DOWN_BOW",
-    "detuneCents": 0
-   },
-   {
     "pitch": 65,
     "startTick": 15360,
     "durationTicks": 960,
@@ -1398,20 +1104,6 @@
     "detuneCents": 0
    },
    {
-    "pitch": 62,
-    "startTick": 16320,
-    "durationTicks": 960,
-    "velocity": 61,
-    "dynamics": {
-     "cc11Value": 84,
-     "cc74Value": 94,
-     "attenuationActive": false
-    },
-    "technique": "LEGATO",
-    "bowDirection": "UP_BOW",
-    "detuneCents": 0
-   },
-   {
     "pitch": 65,
     "startTick": 16320,
     "durationTicks": 960,
@@ -1423,20 +1115,6 @@
     },
     "technique": "LEGATO",
     "bowDirection": "UP_BOW",
-    "detuneCents": 0
-   },
-   {
-    "pitch": 62,
-    "startTick": 17280,
-    "durationTicks": 960,
-    "velocity": 61,
-    "dynamics": {
-     "cc11Value": 84,
-     "cc74Value": 94,
-     "attenuationActive": false
-    },
-    "technique": "LEGATO",
-    "bowDirection": "DOWN_BOW",
     "detuneCents": 0
    },
    {
@@ -1454,20 +1132,6 @@
     "detuneCents": 0
    },
    {
-    "pitch": 62,
-    "startTick": 18240,
-    "durationTicks": 960,
-    "velocity": 61,
-    "dynamics": {
-     "cc11Value": 84,
-     "cc74Value": 94,
-     "attenuationActive": false
-    },
-    "technique": "LEGATO",
-    "bowDirection": "UP_BOW",
-    "detuneCents": 0
-   },
-   {
     "pitch": 65,
     "startTick": 18240,
     "durationTicks": 960,
@@ -1479,20 +1143,6 @@
     },
     "technique": "LEGATO",
     "bowDirection": "UP_BOW",
-    "detuneCents": 0
-   },
-   {
-    "pitch": 64,
-    "startTick": 19200,
-    "durationTicks": 960,
-    "velocity": 69,
-    "dynamics": {
-     "cc11Value": 84,
-     "cc74Value": 102,
-     "attenuationActive": false
-    },
-    "technique": "LEGATO",
-    "bowDirection": "DOWN_BOW",
     "detuneCents": 0
    },
    {
@@ -1510,20 +1160,6 @@
     "detuneCents": 0
    },
    {
-    "pitch": 64,
-    "startTick": 20160,
-    "durationTicks": 960,
-    "velocity": 69,
-    "dynamics": {
-     "cc11Value": 84,
-     "cc74Value": 102,
-     "attenuationActive": false
-    },
-    "technique": "LEGATO",
-    "bowDirection": "UP_BOW",
-    "detuneCents": 0
-   },
-   {
     "pitch": 65,
     "startTick": 20160,
     "durationTicks": 960,
@@ -1538,20 +1174,6 @@
     "detuneCents": 0
    },
    {
-    "pitch": 64,
-    "startTick": 21120,
-    "durationTicks": 960,
-    "velocity": 69,
-    "dynamics": {
-     "cc11Value": 84,
-     "cc74Value": 102,
-     "attenuationActive": false
-    },
-    "technique": "LEGATO",
-    "bowDirection": "DOWN_BOW",
-    "detuneCents": 0
-   },
-   {
     "pitch": 65,
     "startTick": 21120,
     "durationTicks": 960,
@@ -1563,20 +1185,6 @@
     },
     "technique": "LEGATO",
     "bowDirection": "DOWN_BOW",
-    "detuneCents": 0
-   },
-   {
-    "pitch": 64,
-    "startTick": 22080,
-    "durationTicks": 960,
-    "velocity": 69,
-    "dynamics": {
-     "cc11Value": 84,
-     "cc74Value": 102,
-     "attenuationActive": false
-    },
-    "technique": "LEGATO",
-    "bowDirection": "UP_BOW",
     "detuneCents": 0
    },
    {
@@ -1594,20 +1202,6 @@
     "detuneCents": 0
    },
    {
-    "pitch": 64,
-    "startTick": 23040,
-    "durationTicks": 960,
-    "velocity": 71,
-    "dynamics": {
-     "cc11Value": 86,
-     "cc74Value": 102,
-     "attenuationActive": false
-    },
-    "technique": "LEGATO",
-    "bowDirection": "DOWN_BOW",
-    "detuneCents": 0
-   },
-   {
     "pitch": 67,
     "startTick": 23040,
     "durationTicks": 960,
@@ -1619,20 +1213,6 @@
     },
     "technique": "LEGATO",
     "bowDirection": "DOWN_BOW",
-    "detuneCents": 0
-   },
-   {
-    "pitch": 64,
-    "startTick": 24000,
-    "durationTicks": 960,
-    "velocity": 74,
-    "dynamics": {
-     "cc11Value": 89,
-     "cc74Value": 104,
-     "attenuationActive": false
-    },
-    "technique": "LEGATO",
-    "bowDirection": "UP_BOW",
     "detuneCents": 0
    },
    {
@@ -1650,20 +1230,6 @@
     "detuneCents": 0
    },
    {
-    "pitch": 64,
-    "startTick": 24960,
-    "durationTicks": 960,
-    "velocity": 69,
-    "dynamics": {
-     "cc11Value": 84,
-     "cc74Value": 102,
-     "attenuationActive": false
-    },
-    "technique": "LEGATO",
-    "bowDirection": "DOWN_BOW",
-    "detuneCents": 0
-   },
-   {
     "pitch": 67,
     "startTick": 24960,
     "durationTicks": 960,
@@ -1675,20 +1241,6 @@
     },
     "technique": "LEGATO",
     "bowDirection": "DOWN_BOW",
-    "detuneCents": 0
-   },
-   {
-    "pitch": 64,
-    "startTick": 25920,
-    "durationTicks": 960,
-    "velocity": 70,
-    "dynamics": {
-     "cc11Value": 85,
-     "cc74Value": 102,
-     "attenuationActive": false
-    },
-    "technique": "LEGATO",
-    "bowDirection": "UP_BOW",
     "detuneCents": 0
    },
    {
@@ -1706,20 +1258,6 @@
     "detuneCents": 0
    },
    {
-    "pitch": 64,
-    "startTick": 26880,
-    "durationTicks": 960,
-    "velocity": 74,
-    "dynamics": {
-     "cc11Value": 89,
-     "cc74Value": 104,
-     "attenuationActive": false
-    },
-    "technique": "LEGATO",
-    "bowDirection": "DOWN_BOW",
-    "detuneCents": 0
-   },
-   {
     "pitch": 67,
     "startTick": 26880,
     "durationTicks": 960,
@@ -1731,20 +1269,6 @@
     },
     "technique": "LEGATO",
     "bowDirection": "DOWN_BOW",
-    "detuneCents": 0
-   },
-   {
-    "pitch": 64,
-    "startTick": 27840,
-    "durationTicks": 960,
-    "velocity": 67,
-    "dynamics": {
-     "cc11Value": 83,
-     "cc74Value": 101,
-     "attenuationActive": false
-    },
-    "technique": "LEGATO",
-    "bowDirection": "UP_BOW",
     "detuneCents": 0
    },
    {
@@ -1762,20 +1286,6 @@
     "detuneCents": 0
    },
    {
-    "pitch": 64,
-    "startTick": 28800,
-    "durationTicks": 960,
-    "velocity": 68,
-    "dynamics": {
-     "cc11Value": 84,
-     "cc74Value": 102,
-     "attenuationActive": false
-    },
-    "technique": "LEGATO",
-    "bowDirection": "DOWN_BOW",
-    "detuneCents": 0
-   },
-   {
     "pitch": 67,
     "startTick": 28800,
     "durationTicks": 960,
@@ -1790,20 +1300,6 @@
     "detuneCents": 0
    },
    {
-    "pitch": 64,
-    "startTick": 29760,
-    "durationTicks": 960,
-    "velocity": 67,
-    "dynamics": {
-     "cc11Value": 83,
-     "cc74Value": 101,
-     "attenuationActive": false
-    },
-    "technique": "LEGATO",
-    "bowDirection": "UP_BOW",
-    "detuneCents": 0
-   },
-   {
     "pitch": 67,
     "startTick": 29760,
     "durationTicks": 960,
@@ -1815,20 +1311,6 @@
     },
     "technique": "LEGATO",
     "bowDirection": "UP_BOW",
-    "detuneCents": 0
-   },
-   {
-    "pitch": 62,
-    "startTick": 30720,
-    "durationTicks": 960,
-    "velocity": 110,
-    "dynamics": {
-     "cc11Value": 120,
-     "cc74Value": 108,
-     "attenuationActive": false
-    },
-    "technique": "LEGATO",
-    "bowDirection": "DOWN_BOW",
     "detuneCents": 0
    },
    {
@@ -1839,20 +1321,6 @@
     "dynamics": {
      "cc11Value": 121,
      "cc74Value": 116,
-     "attenuationActive": false
-    },
-    "technique": "LEGATO",
-    "bowDirection": "DOWN_BOW",
-    "detuneCents": 0
-   },
-   {
-    "pitch": 62,
-    "startTick": 31680,
-    "durationTicks": 960,
-    "velocity": 110,
-    "dynamics": {
-     "cc11Value": 120,
-     "cc74Value": 108,
      "attenuationActive": false
     },
     "technique": "LEGATO",
@@ -1874,20 +1342,6 @@
     "detuneCents": 0
    },
    {
-    "pitch": 65,
-    "startTick": 32640,
-    "durationTicks": 960,
-    "velocity": 121,
-    "dynamics": {
-     "cc11Value": 122,
-     "cc74Value": 117,
-     "attenuationActive": false
-    },
-    "technique": "LEGATO",
-    "bowDirection": "DOWN_BOW",
-    "detuneCents": 0
-   },
-   {
     "pitch": 67,
     "startTick": 32640,
     "durationTicks": 960,
@@ -1896,20 +1350,6 @@
      "cc11Value": 120,
      "cc74Value": 116,
      "attenuationActive": false
-    },
-    "technique": "LEGATO",
-    "bowDirection": "DOWN_BOW",
-    "detuneCents": 0
-   },
-   {
-    "pitch": 65,
-    "startTick": 33600,
-    "durationTicks": 960,
-    "velocity": 118,
-    "dynamics": {
-     "cc11Value": 96,
-     "cc74Value": 106,
-     "attenuationActive": true
     },
     "technique": "LEGATO",
     "bowDirection": "DOWN_BOW",
@@ -1923,20 +1363,6 @@
     "dynamics": {
      "cc11Value": 97,
      "cc74Value": 107,
-     "attenuationActive": true
-    },
-    "technique": "LEGATO",
-    "bowDirection": "DOWN_BOW",
-    "detuneCents": 0
-   },
-   {
-    "pitch": 64,
-    "startTick": 34560,
-    "durationTicks": 960,
-    "velocity": 118,
-    "dynamics": {
-     "cc11Value": 96,
-     "cc74Value": 106,
      "attenuationActive": true
     },
     "technique": "LEGATO",
@@ -2943,20 +2369,6 @@
     "detuneCents": 0
    },
    {
-    "pitch": 62,
-    "startTick": 7680,
-    "durationTicks": 960,
-    "velocity": 69,
-    "dynamics": {
-     "cc11Value": 84,
-     "cc74Value": 102,
-     "attenuationActive": false
-    },
-    "technique": "LEGATO",
-    "bowDirection": "DOWN_BOW",
-    "detuneCents": 0
-   },
-   {
     "pitch": 65,
     "startTick": 7680,
     "durationTicks": 960,
@@ -2971,20 +2383,6 @@
     "detuneCents": 0
    },
    {
-    "pitch": 62,
-    "startTick": 8640,
-    "durationTicks": 960,
-    "velocity": 69,
-    "dynamics": {
-     "cc11Value": 84,
-     "cc74Value": 102,
-     "attenuationActive": false
-    },
-    "technique": "LEGATO",
-    "bowDirection": "UP_BOW",
-    "detuneCents": 0
-   },
-   {
     "pitch": 67,
     "startTick": 8640,
     "durationTicks": 960,
@@ -2996,20 +2394,6 @@
     },
     "technique": "LEGATO",
     "bowDirection": "UP_BOW",
-    "detuneCents": 0
-   },
-   {
-    "pitch": 62,
-    "startTick": 9600,
-    "durationTicks": 960,
-    "velocity": 69,
-    "dynamics": {
-     "cc11Value": 84,
-     "cc74Value": 102,
-     "attenuationActive": false
-    },
-    "technique": "LEGATO",
-    "bowDirection": "DOWN_BOW",
     "detuneCents": 0
    },
    {
@@ -3027,20 +2411,6 @@
     "detuneCents": 0
    },
    {
-    "pitch": 62,
-    "startTick": 10560,
-    "durationTicks": 960,
-    "velocity": 69,
-    "dynamics": {
-     "cc11Value": 84,
-     "cc74Value": 102,
-     "attenuationActive": false
-    },
-    "technique": "LEGATO",
-    "bowDirection": "UP_BOW",
-    "detuneCents": 0
-   },
-   {
     "pitch": 67,
     "startTick": 10560,
     "durationTicks": 960,
@@ -3052,20 +2422,6 @@
     },
     "technique": "LEGATO",
     "bowDirection": "UP_BOW",
-    "detuneCents": 0
-   },
-   {
-    "pitch": 62,
-    "startTick": 11520,
-    "durationTicks": 960,
-    "velocity": 69,
-    "dynamics": {
-     "cc11Value": 84,
-     "cc74Value": 102,
-     "attenuationActive": false
-    },
-    "technique": "LEGATO",
-    "bowDirection": "DOWN_BOW",
     "detuneCents": 0
    },
    {
@@ -3083,20 +2439,6 @@
     "detuneCents": 0
    },
    {
-    "pitch": 62,
-    "startTick": 12480,
-    "durationTicks": 960,
-    "velocity": 69,
-    "dynamics": {
-     "cc11Value": 84,
-     "cc74Value": 102,
-     "attenuationActive": false
-    },
-    "technique": "LEGATO",
-    "bowDirection": "UP_BOW",
-    "detuneCents": 0
-   },
-   {
     "pitch": 67,
     "startTick": 12480,
     "durationTicks": 960,
@@ -3111,20 +2453,6 @@
     "detuneCents": 0
    },
    {
-    "pitch": 62,
-    "startTick": 13440,
-    "durationTicks": 960,
-    "velocity": 69,
-    "dynamics": {
-     "cc11Value": 84,
-     "cc74Value": 102,
-     "attenuationActive": false
-    },
-    "technique": "LEGATO",
-    "bowDirection": "DOWN_BOW",
-    "detuneCents": 0
-   },
-   {
     "pitch": 67,
     "startTick": 13440,
     "durationTicks": 960,
@@ -3136,20 +2464,6 @@
     },
     "technique": "LEGATO",
     "bowDirection": "DOWN_BOW",
-    "detuneCents": 0
-   },
-   {
-    "pitch": 62,
-    "startTick": 14400,
-    "durationTicks": 960,
-    "velocity": 69,
-    "dynamics": {
-     "cc11Value": 84,
-     "cc74Value": 102,
-     "attenuationActive": false
-    },
-    "technique": "LEGATO",
-    "bowDirection": "UP_BOW",
     "detuneCents": 0
    },
    {
@@ -3671,20 +2985,6 @@
     "detuneCents": 0
    },
    {
-    "pitch": 62,
-    "startTick": 32640,
-    "durationTicks": 960,
-    "velocity": 118,
-    "dynamics": {
-     "cc11Value": 120,
-     "cc74Value": 116,
-     "attenuationActive": false
-    },
-    "technique": "LEGATO",
-    "bowDirection": "DOWN_BOW",
-    "detuneCents": 0
-   },
-   {
     "pitch": 65,
     "startTick": 32640,
     "durationTicks": 960,
@@ -3693,20 +2993,6 @@
      "cc11Value": 118,
      "cc74Value": 115,
      "attenuationActive": false
-    },
-    "technique": "LEGATO",
-    "bowDirection": "DOWN_BOW",
-    "detuneCents": 0
-   },
-   {
-    "pitch": 62,
-    "startTick": 33600,
-    "durationTicks": 960,
-    "velocity": 118,
-    "dynamics": {
-     "cc11Value": 96,
-     "cc74Value": 106,
-     "attenuationActive": true
     },
     "technique": "LEGATO",
     "bowDirection": "DOWN_BOW",
@@ -3755,20 +3041,6 @@
     "detuneCents": 0
    },
    {
-    "pitch": 69,
-    "startTick": 35520,
-    "durationTicks": 960,
-    "velocity": 118,
-    "dynamics": {
-     "cc11Value": 120,
-     "cc74Value": 116,
-     "attenuationActive": false
-    },
-    "technique": "LEGATO",
-    "bowDirection": "DOWN_BOW",
-    "detuneCents": 0
-   },
-   {
     "pitch": 72,
     "startTick": 35520,
     "durationTicks": 960,
@@ -3783,20 +3055,6 @@
     "detuneCents": 0
    },
    {
-    "pitch": 69,
-    "startTick": 36480,
-    "durationTicks": 960,
-    "velocity": 115,
-    "dynamics": {
-     "cc11Value": 95,
-     "cc74Value": 106,
-     "attenuationActive": true
-    },
-    "technique": "LEGATO",
-    "bowDirection": "DOWN_BOW",
-    "detuneCents": 0
-   },
-   {
     "pitch": 72,
     "startTick": 36480,
     "durationTicks": 960,
@@ -3804,20 +3062,6 @@
     "dynamics": {
      "cc11Value": 120,
      "cc74Value": 116,
-     "attenuationActive": false
-    },
-    "technique": "LEGATO",
-    "bowDirection": "DOWN_BOW",
-    "detuneCents": 0
-   },
-   {
-    "pitch": 69,
-    "startTick": 37440,
-    "durationTicks": 960,
-    "velocity": 114,
-    "dynamics": {
-     "cc11Value": 118,
-     "cc74Value": 115,
      "attenuationActive": false
     },
     "technique": "LEGATO",
@@ -3839,40 +3083,12 @@
     "detuneCents": 0
    },
    {
-    "pitch": 69,
-    "startTick": 38400,
-    "durationTicks": 960,
-    "velocity": 118,
-    "dynamics": {
-     "cc11Value": 120,
-     "cc74Value": 116,
-     "attenuationActive": false
-    },
-    "technique": "LEGATO",
-    "bowDirection": "DOWN_BOW",
-    "detuneCents": 0
-   },
-   {
     "pitch": 72,
     "startTick": 38400,
     "durationTicks": 960,
     "velocity": 118,
     "dynamics": {
      "cc11Value": 120,
-     "cc74Value": 116,
-     "attenuationActive": false
-    },
-    "technique": "LEGATO",
-    "bowDirection": "DOWN_BOW",
-    "detuneCents": 0
-   },
-   {
-    "pitch": 69,
-    "startTick": 39360,
-    "durationTicks": 960,
-    "velocity": 118,
-    "dynamics": {
-     "cc11Value": 121,
      "cc74Value": 116,
      "attenuationActive": false
     },
@@ -4113,20 +3329,6 @@
      "cc11Value": 119,
      "cc74Value": 116,
      "attenuationActive": false
-    },
-    "technique": "LEGATO",
-    "bowDirection": "DOWN_BOW",
-    "detuneCents": 0
-   },
-   {
-    "pitch": 70,
-    "startTick": 48000,
-    "durationTicks": 960,
-    "velocity": 113,
-    "dynamics": {
-     "cc11Value": 94,
-     "cc74Value": 106,
-     "attenuationActive": true
     },
     "technique": "LEGATO",
     "bowDirection": "DOWN_BOW",
@@ -4518,7 +3720,7 @@
    {
     "pitch": 38,
     "startTick": 0,
-    "durationTicks": 979,
+    "durationTicks": 960,
     "velocity": 62,
     "dynamics": {
      "cc11Value": 54,
@@ -4546,7 +3748,7 @@
    {
     "pitch": 38,
     "startTick": 1920,
-    "durationTicks": 979,
+    "durationTicks": 960,
     "velocity": 65,
     "dynamics": {
      "cc11Value": 57,
@@ -4574,7 +3776,7 @@
    {
     "pitch": 38,
     "startTick": 3840,
-    "durationTicks": 979,
+    "durationTicks": 960,
     "velocity": 60,
     "dynamics": {
      "cc11Value": 51,
@@ -4602,7 +3804,7 @@
    {
     "pitch": 38,
     "startTick": 5760,
-    "durationTicks": 979,
+    "durationTicks": 960,
     "velocity": 63,
     "dynamics": {
      "cc11Value": 54,
@@ -4616,7 +3818,7 @@
    {
     "pitch": 38,
     "startTick": 6720,
-    "durationTicks": 960,
+    "durationTicks": 979,
     "velocity": 61,
     "dynamics": {
      "cc11Value": 52,
@@ -4630,7 +3832,7 @@
    {
     "pitch": 43,
     "startTick": 7680,
-    "durationTicks": 979,
+    "durationTicks": 960,
     "velocity": 57,
     "dynamics": {
      "cc11Value": 48,
@@ -4658,7 +3860,7 @@
    {
     "pitch": 43,
     "startTick": 9600,
-    "durationTicks": 979,
+    "durationTicks": 960,
     "velocity": 65,
     "dynamics": {
      "cc11Value": 57,
@@ -4686,7 +3888,7 @@
    {
     "pitch": 43,
     "startTick": 11520,
-    "durationTicks": 979,
+    "durationTicks": 960,
     "velocity": 57,
     "dynamics": {
      "cc11Value": 48,
@@ -4714,7 +3916,7 @@
    {
     "pitch": 43,
     "startTick": 13440,
-    "durationTicks": 979,
+    "durationTicks": 960,
     "velocity": 60,
     "dynamics": {
      "cc11Value": 51,
@@ -4728,7 +3930,7 @@
    {
     "pitch": 43,
     "startTick": 14400,
-    "durationTicks": 960,
+    "durationTicks": 979,
     "velocity": 57,
     "dynamics": {
      "cc11Value": 48,
@@ -4742,7 +3944,7 @@
    {
     "pitch": 38,
     "startTick": 15360,
-    "durationTicks": 979,
+    "durationTicks": 960,
     "velocity": 64,
     "dynamics": {
      "cc11Value": 56,
@@ -4770,7 +3972,7 @@
    {
     "pitch": 38,
     "startTick": 17280,
-    "durationTicks": 979,
+    "durationTicks": 960,
     "velocity": 59,
     "dynamics": {
      "cc11Value": 50,
@@ -4798,7 +4000,7 @@
    {
     "pitch": 41,
     "startTick": 19200,
-    "durationTicks": 979,
+    "durationTicks": 960,
     "velocity": 66,
     "dynamics": {
      "cc11Value": 58,
@@ -4826,7 +4028,7 @@
    {
     "pitch": 41,
     "startTick": 21120,
-    "durationTicks": 979,
+    "durationTicks": 960,
     "velocity": 65,
     "dynamics": {
      "cc11Value": 57,
@@ -4854,7 +4056,7 @@
    {
     "pitch": 36,
     "startTick": 23040,
-    "durationTicks": 979,
+    "durationTicks": 960,
     "velocity": 66,
     "dynamics": {
      "cc11Value": 58,
@@ -4882,7 +4084,7 @@
    {
     "pitch": 36,
     "startTick": 24960,
-    "durationTicks": 979,
+    "durationTicks": 960,
     "velocity": 59,
     "dynamics": {
      "cc11Value": 50,
@@ -4896,7 +4098,7 @@
    {
     "pitch": 36,
     "startTick": 25920,
-    "durationTicks": 960,
+    "durationTicks": 979,
     "velocity": 57,
     "dynamics": {
      "cc11Value": 47,
@@ -4910,7 +4112,7 @@
    {
     "pitch": 45,
     "startTick": 26880,
-    "durationTicks": 979,
+    "durationTicks": 960,
     "velocity": 70,
     "dynamics": {
      "cc11Value": 57,
@@ -4938,7 +4140,7 @@
    {
     "pitch": 45,
     "startTick": 28800,
-    "durationTicks": 979,
+    "durationTicks": 960,
     "velocity": 69,
     "dynamics": {
      "cc11Value": 56,
@@ -4952,7 +4154,7 @@
    {
     "pitch": 45,
     "startTick": 29760,
-    "durationTicks": 960,
+    "durationTicks": 979,
     "velocity": 68,
     "dynamics": {
      "cc11Value": 55,
@@ -4966,7 +4168,7 @@
    {
     "pitch": 38,
     "startTick": 30720,
-    "durationTicks": 979,
+    "durationTicks": 960,
     "velocity": 109,
     "dynamics": {
      "cc11Value": 109,
@@ -4980,7 +4182,7 @@
    {
     "pitch": 38,
     "startTick": 31680,
-    "durationTicks": 960,
+    "durationTicks": 979,
     "velocity": 107,
     "dynamics": {
      "cc11Value": 106,
@@ -4994,7 +4196,7 @@
    {
     "pitch": 43,
     "startTick": 32640,
-    "durationTicks": 979,
+    "durationTicks": 960,
     "velocity": 113,
     "dynamics": {
      "cc11Value": 113,
@@ -5022,7 +4224,7 @@
    {
     "pitch": 45,
     "startTick": 34560,
-    "durationTicks": 979,
+    "durationTicks": 960,
     "velocity": 117,
     "dynamics": {
      "cc11Value": 113,
@@ -5036,7 +4238,7 @@
    {
     "pitch": 45,
     "startTick": 35520,
-    "durationTicks": 960,
+    "durationTicks": 979,
     "velocity": 117,
     "dynamics": {
      "cc11Value": 113,
@@ -5050,7 +4252,7 @@
    {
     "pitch": 41,
     "startTick": 36480,
-    "durationTicks": 979,
+    "durationTicks": 960,
     "velocity": 113,
     "dynamics": {
      "cc11Value": 114,
@@ -5078,7 +4280,7 @@
    {
     "pitch": 38,
     "startTick": 38400,
-    "durationTicks": 979,
+    "durationTicks": 960,
     "velocity": 111,
     "dynamics": {
      "cc11Value": 111,
@@ -5092,7 +4294,7 @@
    {
     "pitch": 38,
     "startTick": 39360,
-    "durationTicks": 960,
+    "durationTicks": 979,
     "velocity": 113,
     "dynamics": {
      "cc11Value": 114,
@@ -5106,7 +4308,7 @@
    {
     "pitch": 43,
     "startTick": 40320,
-    "durationTicks": 979,
+    "durationTicks": 960,
     "velocity": 104,
     "dynamics": {
      "cc11Value": 104,
@@ -5120,7 +4322,7 @@
    {
     "pitch": 43,
     "startTick": 41280,
-    "durationTicks": 960,
+    "durationTicks": 979,
     "velocity": 111,
     "dynamics": {
      "cc11Value": 111,
@@ -5134,7 +4336,7 @@
    {
     "pitch": 36,
     "startTick": 42240,
-    "durationTicks": 979,
+    "durationTicks": 960,
     "velocity": 112,
     "dynamics": {
      "cc11Value": 112,
@@ -5148,7 +4350,7 @@
    {
     "pitch": 36,
     "startTick": 43200,
-    "durationTicks": 960,
+    "durationTicks": 979,
     "velocity": 114,
     "dynamics": {
      "cc11Value": 116,
@@ -5162,7 +4364,7 @@
    {
     "pitch": 45,
     "startTick": 44160,
-    "durationTicks": 979,
+    "durationTicks": 960,
     "velocity": 113,
     "dynamics": {
      "cc11Value": 108,
@@ -5190,7 +4392,7 @@
    {
     "pitch": 46,
     "startTick": 46080,
-    "durationTicks": 979,
+    "durationTicks": 960,
     "velocity": 119,
     "dynamics": {
      "cc11Value": 115,
@@ -5204,7 +4406,7 @@
    {
     "pitch": 46,
     "startTick": 47040,
-    "durationTicks": 960,
+    "durationTicks": 979,
     "velocity": 118,
     "dynamics": {
      "cc11Value": 114,
@@ -5218,7 +4420,7 @@
    {
     "pitch": 36,
     "startTick": 48000,
-    "durationTicks": 979,
+    "durationTicks": 960,
     "velocity": 105,
     "dynamics": {
      "cc11Value": 105,
@@ -5246,7 +4448,7 @@
    {
     "pitch": 38,
     "startTick": 49920,
-    "durationTicks": 979,
+    "durationTicks": 960,
     "velocity": 111,
     "dynamics": {
      "cc11Value": 112,
@@ -5260,7 +4462,7 @@
    {
     "pitch": 38,
     "startTick": 50880,
-    "durationTicks": 960,
+    "durationTicks": 979,
     "velocity": 105,
     "dynamics": {
      "cc11Value": 105,
@@ -5274,7 +4476,7 @@
    {
     "pitch": 43,
     "startTick": 51840,
-    "durationTicks": 979,
+    "durationTicks": 960,
     "velocity": 106,
     "dynamics": {
      "cc11Value": 105,
@@ -5302,7 +4504,7 @@
    {
     "pitch": 45,
     "startTick": 53760,
-    "durationTicks": 979,
+    "durationTicks": 960,
     "velocity": 119,
     "dynamics": {
      "cc11Value": 115,
@@ -5330,7 +4532,7 @@
    {
     "pitch": 45,
     "startTick": 55680,
-    "durationTicks": 979,
+    "durationTicks": 960,
     "velocity": 113,
     "dynamics": {
      "cc11Value": 108,
@@ -5344,7 +4546,7 @@
    {
     "pitch": 45,
     "startTick": 56640,
-    "durationTicks": 960,
+    "durationTicks": 979,
     "velocity": 110,
     "dynamics": {
      "cc11Value": 105,
@@ -5358,7 +4560,7 @@
    {
     "pitch": 38,
     "startTick": 57600,
-    "durationTicks": 979,
+    "durationTicks": 960,
     "velocity": 115,
     "dynamics": {
      "cc11Value": 116,
@@ -5386,7 +4588,7 @@
    {
     "pitch": 38,
     "startTick": 59520,
-    "durationTicks": 979,
+    "durationTicks": 960,
     "velocity": 107,
     "dynamics": {
      "cc11Value": 107,
