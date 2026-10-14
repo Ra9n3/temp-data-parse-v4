@@ -32,6 +32,7 @@ import {
   type TimeSignature,
 } from "./shared/schema";
 import { generate, fillRandomNotes, generationSummary } from "./generation/generate";
+import { parseChord } from "./shared/schema/chords";
 import { importProjectJson } from "./export/json";
 import { loadAutosave, saveAutosave } from "./state/persistence";
 import { runAlignmentTest, runUnitTests, type TestResult } from "./tests/runTests";
@@ -53,6 +54,7 @@ function loadStartup(): Project {
   // one-shot toast after mount ("saved project was invalid, loaded default").
   // P2 version guard: a payload whose schemaVersion ≠ 1 is DISCARDED (future-
   // schema safeness). P5: no save present = plain fixture boot, no warning.
+  // Chord v2: editingChord lifted — see the Arranger props + TopBar wiring.
   // P6: undo/redo history is deliberately NOT persisted (documented in
   // persistence.ts) — the project is; restoring edit-history stacks across
   // reloads invites stack bugs with no user value.
@@ -101,6 +103,10 @@ export default function App() {
   const [toasts, setToasts] = useState<ToastItem[]>([]);
   const [selectedTrackId, setSelectedTrackId] = useState<string | null>(null);
   const [pianoTrackId, setPianoTrackId] = useState<string | null>(null);
+  // Chord v2 — the editing chord id is LIFTED here (was local to the Arranger
+  // lane) so the top-bar panel and the in-lane editor share one source of
+  // truth: creation/retarget/Esc/delete all stay in sync. No schema change.
+  const [editingChordId, setEditingChordId] = useState<string | null>(null);
   const [audioBuffer, setAudioBuffer] = useState<AudioBuffer | null>(null);
   const [audioName, setAudioName] = useState("");
   const [harness, setHarness] = useState<string | null>(null);
@@ -296,6 +302,23 @@ export default function App() {
         onToggleMetronome={() => playback.setMetronome(!playback.metronome)}
         onCompose={compose}
         onExport={() => setExportOpen(true)}
+        editingChord={editingChordId}
+        editingChordObj={editingChordId ? project.chords.find((c) => c.id === editingChordId) ?? null : null}
+        onCloseEditingChord={() => setEditingChordId(null)}
+        onDeleteEditingChord={() => {
+          if (!editingChordId) return;
+          // Deleting the chord being edited closes the panel with it.
+          patch({ chords: project.chords.filter((c) => c.id !== editingChordId) });
+          setEditingChordId(null);
+        }}
+        onChangeChordSymbol={(id, symbol) => {
+          const parsed = parseChord(symbol);
+          if (!parsed.ok) return; // no commit for invalid parse (red ring only)
+          const quality = parsed.chord.quality === "minor" || parsed.chord.quality.startsWith("m") ? "Min" : parsed.chord.quality === "diminished" || parsed.chord.quality === "dim7" ? "Dim" : parsed.chord.quality === "augmented" || parsed.chord.quality === "aug7" ? "Aug" : parsed.chord.quality === "sus2" ? "Sus2" : parsed.chord.quality === "sus4" || parsed.chord.quality === "7sus4" ? "Sus4" : "Maj";
+          patch({
+            chords: project.chords.map((x) => (x.id === id ? { ...x, symbol, quality, extensions: parsed.chord.extensions, bassOverride: parsed.chord.bass ?? undefined } : x)),
+          });
+        }}
       />
 
       <Arranger
@@ -310,6 +333,8 @@ export default function App() {
         onPixelsPerTick={setPpt}
         onSeek={playback.seek}
         onPatchProject={patch}
+        editingChord={editingChordId}
+        onEditChord={setEditingChordId}
         onToggleMute={(id) =>
           commit({
             ...project,

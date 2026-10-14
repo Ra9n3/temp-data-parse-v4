@@ -65,6 +65,9 @@ interface Props {
   onAddTrack: (family: Family) => void;
   onSelectTrack: (id: string | null) => void;
   onOpenPianoRoll: (id: string) => void;
+  // Chord v2 — editing chord id is owned by App (top-bar panel needs it).
+  editingChord: string | null;
+  onEditChord: (id: string | null) => void;
 }
 
 function hexRgb(hex: string): [number, number, number] {
@@ -207,6 +210,8 @@ export function Arranger(props: Props) {
     onAddTrack,
     onSelectTrack,
     onOpenPianoRoll,
+    editingChord,
+    onEditChord,
   } = props;
 
   const ts = project.timeSignature;
@@ -218,7 +223,7 @@ export function Arranger(props: Props) {
   const [drag, setDrag] = useState<Drag | null>(null);
   const [selSection, setSelSection] = useState<string | null>(null);
   const [selChord, setSelChord] = useState<string | null>(null);
-  const [editingChord, setEditingChord] = useState<string | null>(null);
+  // Chord v2 — editingChord is LIFTED to App (top-bar panel); arrives via props.
   const [editingSection, setEditingSection] = useState<string | null>(null);
   const [addOpen, setAddOpen] = useState(false);
   const dragRef = useRef<Drag | null>(null);
@@ -268,6 +273,8 @@ export function Arranger(props: Props) {
         if (selChord) {
           onPatchProject({ chords: project.chords.filter((c) => c.id !== selChord) });
           setSelChord(null);
+          // Chord v2 — deleting the chord being edited must close the panel.
+          if (editingChord === selChord) onEditChord(null);
         } else if (selSection) {
           onPatchProject({ sections: project.sections.filter((s) => s.id !== selSection) });
           setSelSection(null);
@@ -276,7 +283,7 @@ export function Arranger(props: Props) {
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [selChord, selSection, project.chords, project.sections, onPatchProject]);
+  }, [selChord, selSection, editingChord, project.chords, project.sections, onPatchProject, onEditChord]);
 
   const onMove = useCallback(
     (e: MouseEvent) => {
@@ -323,9 +330,9 @@ export function Arranger(props: Props) {
         chords: [...project.chords, { id, symbol: "C", startTick: start, durationTicks: dur }],
       });
       setSelChord(id);
-      setEditingChord(id);
+      onEditChord(id); // Chord v2 — lifted: opens the top-bar panel too.
     }
-  }, [project.chords, project.sections, onPatchProject, tpBar, tpb, ts]);
+  }, [project.chords, project.sections, onPatchProject, tpBar, tpb, ts, onEditChord]);
 
   useEffect(() => {
     window.addEventListener("mousemove", onMove);
@@ -406,7 +413,7 @@ export function Arranger(props: Props) {
               setSelChord(id);
               setSelSection(null);
             }}
-            onEditChord={setEditingChord}
+            onEditChord={onEditChord}
             onEditSection={setEditingSection}
             onPatchProject={onPatchProject}
             onStartDrag={setDrag}

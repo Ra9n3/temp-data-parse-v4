@@ -1,4 +1,4 @@
-import type { ReactNode } from "react";
+import { useEffect, useState, type ReactNode } from "react";
 import { Ph } from "../icons";
 import {
   MODE_LABELS,
@@ -8,8 +8,10 @@ import {
   type PitchClass,
   type Project,
   type TimeSignature,
+  type Chord,
 } from "../shared/schema/types";
 import { formatTimecode } from "../shared/schema/time";
+import { parseChord, type ChordQuality } from "../shared/schema/chords";
 import { cn } from "../utils/cn";
 
 const TIME_SIGNATURES: TimeSignature[] = [
@@ -42,6 +44,13 @@ interface Props {
   onToggleMetronome: () => void;
   onCompose: () => void;
   onExport: () => void;
+  // Chord v2 — the Lifted editing chord id; App owns it so the top-bar panel
+  // and the lane editor stay in sync (retarget, Esc, delete all flow here).
+  editingChord: string | null;
+  editingChordObj: Chord | null;
+  onCloseEditingChord: () => void;
+  onDeleteEditingChord: () => void;
+  onChangeChordSymbol: (id: string, symbol: string) => void;
 }
 
 export function TopBar({
@@ -63,11 +72,15 @@ export function TopBar({
   onToggleMetronome,
   onCompose,
   onExport,
+  editingChord,
+  editingChordObj,
+  onCloseEditingChord,
+  onDeleteEditingChord,
+  onChangeChordSymbol,
 }: Props) {
   const tsValue = `${project.timeSignature.numerator}/${project.timeSignature.denominator}`;
-
   return (
-    <header className="flex h-14 shrink-0 items-center gap-3 border-b border-white/10 bg-[#0e1016] px-3">
+    <header className="flex min-h-14 shrink-0 items-center gap-3 border-b border-white/10 bg-[#0e1016] px-3 py-1">
       {/* Patch 1a: the brand block (ScorchMark + wordmark) is gone; ScorchMark
        * remains used by AboutDialog, so its import survives there. Patch 1b:
        * the settings pill owns the leftover flex region — it must SHRINK: the
@@ -148,6 +161,20 @@ export function TopBar({
         Compose All
       </button>
 
+      {/* Chord v2 — top-bar chord editor panel: opens (only) when a chord is
+       * selected-for-editing. Same design language as the pill (stone/orange
+       * rings, black/30 fields); min-w-0 + wrap so 1200px squeezes instead of
+       * overlapping (patch-1 flex lessons). */}
+      {editingChord && editingChordObj && (
+        <ChordPanel
+          key={editingChord}
+          chord={editingChordObj}
+          onSymbol={(symbol) => onChangeChordSymbol(editingChord, symbol)}
+          onClose={onCloseEditingChord}
+          onDelete={onDeleteEditingChord}
+        />
+      )}
+
       <div className="flex min-w-0 flex-1 items-center justify-end gap-2">
         <div className="font-mono hidden text-[11px] text-stone-500 lg:block">
           {formatTimecode(playheadTick, project.timeSignature)}
@@ -186,6 +213,107 @@ export function TopBar({
         </button>
       </div>
     </header>
+  );
+}
+
+// Chord v2 — inline top-bar editor panel (P1/P3). Ported field-for-field from
+// the old in-lane ChordEditor popup: symbol text input (parseChord-validated
+// live — invalid = red ring, no commit), quality buttons, extension toggles,
+// and a slash-bass override select. Esc / ✕ close; Delete removes the chord.
+function ChordPanel({ chord, onSymbol, onClose, onDelete }: { chord: Chord; onSymbol: (symbol: string) => void; onClose: () => void; onDelete: () => void }) {
+  const [v, setV] = useState(chord.symbol);
+  const parsed = parseChord(v);
+  const parsedRoot = parsed.ok ? parsed.chord.root : 0;
+  const parsedBass = parsed.ok ? parsed.chord.bass : null;
+  const rootName = PITCH_CLASS_NAMES[parsedRoot];
+  const parsedQuality = parsed.ok ? parsed.chord.quality : "major";
+  const quality: ChordQuality | "major" = parsedQuality === "minor" || parsedQuality === "m7" || parsedQuality === "m7b5" || parsedQuality === "m6" || parsedQuality === "m9" ? "minor"
+    : parsedQuality === "diminished" || parsedQuality === "dim7" ? "diminished"
+    : parsedQuality === "augmented" || parsedQuality === "aug7" ? "augmented"
+    : parsedQuality === "sus2" ? "sus2" : parsedQuality === "sus4" || parsedQuality === "7sus4" ? "sus4" : "major";
+  const extensionNames = ["7", "maj7", "9", "b9", "#9", "11", "#11", "13", "b13"];
+  const selectedExtensions = parsed.ok ? parsed.chord.extensions : [];
+  const update = (nextRoot: string = rootName, nextQuality: ChordQuality | string = quality, nextExtensions: string[] = selectedExtensions, nextBass: PitchClass | null = parsedBass) => {
+    const qualityToken = nextQuality === "major" ? "" : nextQuality === "minor" ? "m" : nextQuality === "diminished" ? "dim" : nextQuality === "augmented" ? "aug" : nextQuality === "sus2" || nextQuality === "sus4" ? nextQuality : "";
+    const extensionOrder = ["maj7", "7", "b9", "#9", "9", "#11", "11", "b13", "13"];
+    const formattedExtensions = [...nextExtensions].sort((left, right) => extensionOrder.indexOf(left) - extensionOrder.indexOf(right));
+    let prefix = `${nextRoot}${qualityToken}`;
+    if (nextQuality === "major" || nextQuality === "minor") {
+      const hasMajorSeventh = formattedExtensions.includes("maj7");
+      const hasSeventh = formattedExtensions.includes("7");
+      const hasNinth = formattedExtensions.includes("9");
+      if (hasMajorSeventh) prefix = `${nextRoot}${nextQuality === "minor" ? "mmaj7" : "maj7"}`;
+      else if (hasSeventh) prefix = `${nextRoot}${nextQuality === "minor" ? "m7" : "7"}`;
+      else if (hasNinth) prefix = `${nextRoot}${nextQuality === "minor" ? "m9" : "9"}`;
+    }
+    const consumedExtension = prefix.endsWith("maj7") ? "maj7" : prefix.endsWith("m7") || prefix.endsWith("7") ? "7" : prefix.endsWith("m9") || prefix.endsWith("9") ? "9" : null;
+    const extensionSuffix = formattedExtensions.filter((extension) => extension !== consumedExtension).join("");
+    const bassSuffix = nextBass === null ? "" : `/${PITCH_CLASS_NAMES[nextBass]}`;
+    const next = `${prefix}${extensionSuffix}${bassSuffix}`;
+    setV(next);
+    if (parseChord(next).ok) onSymbol(next);
+  };
+
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key !== "Escape") return;
+      e.stopPropagation();
+      onClose();
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [onClose]);
+
+  return (
+    <div
+      data-chord-panel
+      className="flex min-w-0 flex-1 items-center gap-2 overflow-x-auto rounded-2xl border border-white/10 bg-[#161922] px-2 py-1"
+    >
+      <span className="shrink-0 text-[10px] font-semibold uppercase tracking-wider text-orange-300">Chord</span>
+      <input
+        aria-label="Chord symbol"
+        autoFocus
+        value={v}
+        onChange={(e) => {
+          const next = e.target.value;
+          setV(next);
+          // Parse-validate live: invalid = red ring, no commit.
+          if (parseChord(next).ok) onSymbol(next.trim());
+        }}
+        onKeyDown={(e) => {
+          if (e.key === "Enter" && parsed.ok) { onSymbol(v.trim() || chord.symbol); onClose(); }
+          e.stopPropagation();
+        }}
+        className={cn(
+          "min-w-0 flex-1 rounded-md bg-black/30 px-1.5 py-0.5 font-mono text-xs outline-none ring-1",
+          parsed.ok ? "text-sky-100 ring-white/10 focus:ring-orange-400/50" : "text-red-300 ring-red-500",
+        )}
+      />
+      <div role="group" aria-label="Chord quality" className="flex shrink-0 gap-0.5">
+        {([["major", "Maj"], ["minor", "Min"], ["diminished", "Dim"], ["augmented", "Aug"], ["sus2", "Sus2"], ["sus4", "Sus4"]] as const).map(([value, label]) => (
+          <button key={value} type="button" aria-pressed={quality === value} title={`Quality: ${label}`} className={cn("rounded px-1 py-0.5 text-[9px]", quality === value ? "bg-sky-500/40 text-white" : "bg-white/5 text-stone-400 hover:text-stone-200")} onClick={() => update(rootName, value)}>{label}</button>
+        ))}
+      </div>
+      <div role="group" aria-label="Chord extensions" className="flex min-w-0 flex-wrap gap-0.5">
+        {extensionNames.map((extension) => {
+          const active = selectedExtensions.includes(extension);
+          return (
+            <button key={extension} type="button" aria-pressed={active} title={`Extension: ${extension}`} className={cn("rounded px-1 py-0.5 text-[9px]", active ? "bg-orange-500/40 text-orange-100" : "bg-white/5 text-stone-400 hover:text-stone-200")} onClick={() => update(rootName, quality, active ? selectedExtensions.filter((item) => item !== extension) : [...selectedExtensions, extension])}>{extension}</button>
+          );
+        })}
+      </div>
+      <select
+        aria-label="Slash chord bass"
+        className="min-w-0 rounded-md bg-black/30 px-1 py-0.5 text-[10px] text-stone-200 outline-none ring-1 ring-white/10"
+        value={parsedBass === null ? "none" : parsedBass}
+        onChange={(e) => update(rootName, quality, selectedExtensions, e.target.value === "none" ? null : Number(e.target.value) as PitchClass)}
+      >
+        <option value="none">/—</option>
+        {PITCH_CLASS_NAMES.map((name, index) => <option key={name} value={index}>/{name}</option>)}
+      </select>
+      <button type="button" aria-label="Delete this chord" title="Delete chord (Del)" className="shrink-0 rounded-md bg-red-500/15 px-2 py-1 text-[10px] text-red-200 ring-1 ring-red-400/20 hover:bg-red-500/25" onClick={onDelete}>Delete</button>
+      <button type="button" aria-label="Close chord editor (Esc)" title="Close (Esc)" className="shrink-0 rounded-md bg-white/5 px-1.5 py-1 text-[10px] text-stone-300 hover:bg-white/10" onClick={onClose}>✕</button>
+    </div>
   );
 }
 
