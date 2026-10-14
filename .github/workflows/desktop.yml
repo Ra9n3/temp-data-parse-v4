@@ -1,0 +1,71 @@
+name: Desktop (Tauri build, Windows)
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "src/**"
+      - "src-tauri/**"
+      - "package.json"
+      - "package-lock.json"
+      - "vite.config.ts"
+      - "tsconfig.json"
+      - "index.html"
+      - ".github/workflows/desktop.yml"
+  workflow_dispatch:
+
+concurrency:
+  group: desktop-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+
+      - run: npm ci
+
+      - name: Build web (vite)
+        run: npm run build
+
+      - name: tsc --noEmit (gate)
+        run: npx tsc --noEmit
+
+      - name: Tauri build (msi + nsis + raw exe)
+        run: npx tauri build
+
+      - name: Upload MSI installer
+        uses: actions/upload-artifact@v4
+        with:
+          name: scorch-windows-msi
+          path: src-tauri/target/release/bundle/msi/*.msi
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Upload NSIS installer
+        uses: actions/upload-artifact@v4
+        with:
+          name: scorch-windows-nsis
+          path: src-tauri/target/release/bundle/nsis/*.exe
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Upload raw scorch.exe
+        uses: actions/upload-artifact@v4
+        with:
+          name: scorch-windows-exe
+          path: src-tauri/target/release/scorch.exe
+          if-no-files-found: error
+          retention-days: 14

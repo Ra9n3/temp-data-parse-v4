@@ -8,7 +8,10 @@
     "dev": "vite",
     "build": "vite build",
     "preview": "vite preview",
-    "test:cli": "jiti scripts/run-cli-tests.mts"
+    "test:cli": "jiti scripts/run-cli-tests.mts",
+    "tauri": "tauri",
+    "tauri:dev": "tauri dev",
+    "tauri:build": "tauri build"
   },
   "dependencies": {
     "@iconify/react": "^6.0.2",
@@ -23,6 +26,7 @@
   },
   "devDependencies": {
     "@tailwindcss/vite": "4.1.17",
+    "@tauri-apps/cli": "^2.12.2",
     "@types/node": "22.19.17",
     "@types/react": "19.2.7",
     "@types/react-dom": "19.2.3",
