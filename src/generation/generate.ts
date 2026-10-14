@@ -1293,7 +1293,7 @@ export function generate(project: Project, options: GenerateOptions): Track[] {
   // stays the FINAL invariant below. Deterministic, no RNG; the engine bakes
   // its own dynamics/cc11/cc74 at note creation (balance never touches the
   // battery), and non-percussion tracks pass through untouched.
-  const percussed = generatePercussion(returned, { project, measures: arrangementInfo.measures, config: arrangement });
+  const percussed = generatePercussion(returned, { project, measures: arrangementInfo.measures, config: arrangement, seed: options.seed });
   // Module 13 — bass pocket (decision 2): ONE live duty — BASS-role notes on
   // bass-carrying tracks sharing a beat window with an M12 aux-kick event
   // (pitch 36) shift a flat deterministic +4 ms behind the kick, ledger-checked

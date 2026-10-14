@@ -10,6 +10,33 @@
  *   rolls during BUILD — swells into CHORUS downbeats — crashes at tutti
  *   beat 1 — cadence accents at section ends.
  *
+ * Module 14 diagnosis (v2): the v1 engine was a ONE-FIGURE player on real
+ * bodies — the by-ear report "only one thing throughout" measured out as
+ * exactly 1 distinct figure per track with ZERO cross-seed variance (the
+ * census: scripts/m14-census.ts at commit 44f3a84; USER body: figures
+ * timpani 3 / snare 1 / cymbals 2 / aux 1, byte-identical across 20 seeds).
+ * The variety layer below fixes four root causes and keeps the v1 invariants:
+ *
+ *   v2.1 PIECE-RELATIVE energy bands — every energy gate is a percentile of
+ *        the piece's OWN measure-energy distribution (p50/p75/p90), no
+ *        absolute 0.45/0.70 constants.
+ *   v2.2 SEED AS CONTEXT — the generate-time seed joins the selection input
+ *        (a PURE integer hash of seed/context, NOT an RNG stream and NOT
+ *        Math.random: pattern choice is a replayable pure function of
+ *        (seed, section, energy band, chord root), per the M14 D3 finding
+ *        that byte-identical-across-seeds output is a bug). Draw-order
+ *        independence is by construction (no state, no stream).
+ *   v2.3 PATTERN LIBRARY — ≥3 snare ghost figures, ≥3 timpani rhythms,
+ *        ≥3 swell shapes, ≥2 aux pulse figures; the PRIMARY axis is context
+ *        (band/chord/section type), the seed hash only rotates WITHIN the
+ *        context class. Same section + same energy may repeat; different
+ *        context differs by design.
+ *   v2.4 RESTORED SPEC INTENT — snare ghost 16ths under ALL high-energy
+ *        choruses (a real 16th pattern, not every-4th), BUILD rolls sized
+ *        by build length, timpani following EVERY chord-root change allowed
+ *        by the ≥2-measure-rest law (not just section starts), aux accents
+ *        at EVERY cadence + pulse at the piece's Dense band.
+ *
  * DETERMINISM LAW: no RNG anywhere in this module (see the generate.ts RNG
  * registry). Roll "jitter" (spec: ±2 ms timing / ±3 velocity) is implemented
  * as DETERMINISTIC ALTERNATION — an index-based sign alternation instead of a
@@ -78,6 +105,9 @@ export interface PercussionContext {
   project: Project;
   measures: MeasureProfile[];
   config: { enableAutoBuildStaggering: boolean; enableTransitionGestures: boolean; breakdownExposedLayer: string };
+  /** Module 14 v2.2 — the generate-time seed joins the selection context (pure
+   * integer hash, not an RNG stream). Absent ⇒ 0 (legacy call sites). */
+  seed?: number;
 }
 
 /** GM-style multi-percussion chair map (trk_aux, range 36–81 — every entry is
@@ -141,6 +171,86 @@ export function timpaniTargetPitch(rootPitchClass: number | undefined, preferred
 
 const clamp = (value: number, low: number, high: number) => Math.max(low, Math.min(high, value));
 const pc = (value: number) => ((Math.round(value) % 12) + 12) % 12;
+
+/** Module 14 v2.2 — pure integer context hash (stateless, replayable, seed is
+ * an INPUT, not an RNG stream). Same input ⇒ same output forever; adjacent
+ * contexts decorrelate by construction. No Math.random, no mulberry32. */
+export function mixInt(...parts: number[]): number {
+  let hash = 0x811c9dc5;
+  for (const part of parts) {
+    let value = Math.trunc(part) | 0;
+    value = Math.imul(value ^ (value >>> 16), 0x45d9f3b);
+    value = Math.imul(value ^ (value >>> 16), 0x45d9f3b) ^ (value >>> 16);
+    hash = (Math.imul(hash ^ value, 0x27220a95) >>> 0) >>> 0;
+  }
+  return hash >>> 0;
+}
+
+// ---------------------------------------------------------------- pattern libraries (M14 v2.3)
+
+/** Snare ghost bar-shapes, ≥3 distinct figures. Slots are sixteenth slots
+ * (0–15) in a 4/4 bar; the engine scales them onto the piece's real grid.
+ * All slots avoid the downbeat (slot 0) and hard backbeats — these are GHOSTS
+ * (tier < 40), the accents stay the explicit rule windows. */
+export const SNARE_GHOST_PATTERNS: readonly { id: string; /** 16th slots 0–15 */ slots: readonly number[] }[] = [
+  { id: "OFFBEAT8", slots: [2, 6, 10, 14] },
+  { id: "GALLOP", slots: [2, 3, 6, 7, 10, 11] },
+  { id: "CONVO", slots: [1, 4, 7, 12, 14] },
+];
+
+/** Timpani hit rhythms, ≥3 distinct. Offsets are BEATS from the window's
+ * downbeat; the engine takes the window length ≥ the widest rhythm. Slot-1
+ * hits sit inside the gesture (one player, one window — ledger-checked). */
+export const TIMPANI_RHYTHMS: readonly { id: string; /** beat offsets */ offsets: readonly number[] }[] = [
+  { id: "SINGLE", offsets: [0] },
+  { id: "DOTTED", offsets: [0, 0.75] },
+  { id: "PULSE2", offsets: [0, 0.5] },
+];
+
+/** Cymbal swell shapes, ≥3 distinct dynamic-curve figures. Each maps swell
+ * progress (0→1) onto a CC11/velocity contour; the quarter-pulse placement
+ * stays fixed so budgets don't move between shapes. */
+export const SWELL_SHAPES: readonly { id: string; /** progress → 0..1 contour */ profile: (progress: number) => number }[] = [
+  { id: "LOGRAMP", profile: (p) => Math.log(1 + 9 * clamp(p, 0, 1)) / Math.log(10) },
+  { id: "QUADRATIC", profile: (p) => p * p },
+  { id: "STEPPED", profile: (p) => Math.floor(clamp(p, 0, 1) * 3) / 2 },
+];
+
+/** Aux pulse figures, ≥2 distinct. Pairs of (16th slot, pitch key) — the
+ * engine places each entry per bar while the span is in the DENSE band. */
+export const AUX_PULSE_PATTERNS: readonly { id: string; entries: readonly { slot: number; key: (typeof AUX_PITCH_MAP)[keyof typeof AUX_PITCH_MAP] }[] }[] = [
+  { id: "RIDE2", entries: [{ slot: 0, key: AUX_PITCH_MAP.ride }, { slot: 8, key: AUX_PITCH_MAP.ride }] },
+  { id: "HIHAT8", entries: [{ slot: 2, key: AUX_PITCH_MAP.hiHat }, { slot: 6, key: AUX_PITCH_MAP.hiHat }, { slot: 10, key: AUX_PITCH_MAP.hiHat }, { slot: 14, key: AUX_PITCH_MAP.hiHat }] },
+];
+
+// ---------------------------------------------------------------- piece energy bands (M14 v2.1)
+
+/** Percentile bands of the piece's OWN measure-energy distribution. Gates are
+ * relative by construction (no absolute constants): p50/p75/p90 fuel the
+ * engine's soft/dense/high decisions and are returned for the census. */
+export interface PieceEnergyBands { p50: number; p75: number; p90: number }
+export function pieceEnergyBands(measures: MeasureProfile[]): PieceEnergyBands {
+  const sorted = measures.map((m) => m.energy).sort((a, b) => a - b);
+  const at = (q: number) => sorted[Math.min(sorted.length - 1, Math.floor(q * sorted.length))] ?? 0.5;
+  return { p50: at(0.5), p75: at(0.75), p90: at(0.9) };
+}
+
+/** Selection: the PRIMARY axis is CONTEXT — the energy band pins the base
+ * pattern (guaranteed difference between bands), and chord root + section
+ * type choose the variant (chorusRootPc/sectionIndex at the engine call
+ * sites, with band quality choice keyed on the same inputs). The seed hash
+ * adds a within-class ROTATION so two same-context gestures may not sit on
+ * each other's own same-energy repeat — the v1 root cause. */
+
+/** Different energy band ⇒ different base figure, guaranteed (band is the
+ * primary axis of the library as a table row). */
+export function bandPatternIndex(band: 0 | 1 | 2, libraryLength: number): number {
+  return band % libraryLength;
+}
+/** Context+seed variant: a deterministic rotation that decorrelates repeats. */
+function contextVariantOf(seed: number, sectionIndex: number, rootPc: number): number {
+  return mixInt(seed, sectionIndex, rootPc) % 997;
+}
 
 export function tierForVelocity(velocity: number): VelocityTier {
   if (velocity < 40) return "GHOST";
@@ -262,27 +372,36 @@ export function convertRoll(source: RollSource, options: RollOptions): RollResul
   }
   const count = Math.max(2, Math.ceil((regularEnd - source.startTick) / baseStep) + 1);
   const rampAt = (index: number, total: number) => clamp(Math.round(40 + (95 - 40) * (index / Math.max(1, total - 1))), 1, 127);
+  // Regular hit STARTS first (jitter applies here), then durations are clamped
+  // to the gap to the NEXT hit (or the accent) so a jitter-compressed pair can
+  // never overlap — the M14 ledger found the M12 overrun (last regular hit
+  // running 204 ticks into a 216-tick-early accent).
+  const starts: number[] = [];
+  for (let index = 0; index < count - 1; index++) {
+    const raw = Math.round(source.startTick + index * baseStep);
+    if (raw > regularEnd - 1) break;
+    starts.push(raw + (index % 2 === 0 ? jitterTicks : -jitterTicks));
+  }
+  const nextStartFor = (index: number) => (index + 1 < starts.length ? starts[index + 1]! : regularEnd);
   const notes: Note[] = [];
-  for (let index = 0; index < count; index++) {
-    const isTerminator = index === count - 1;
-    if (isTerminator) {
-      notes.push(percNoteShape({ pitch: source.pitch, startTick: regularEnd, durationTicks: accentTicks, velocity: accentVelocity, isRoll: true, cc11: 118 }));
-      break;
-    }
-    const startTick = Math.round(source.startTick + index * baseStep);
-    if (startTick > regularEnd - 1) break;
+  for (let index = 0; index < starts.length; index++) {
+    const startTick = starts[index]!;
+    const duration = Math.max(1, Math.min(Math.round(baseStep * 0.85), Math.max(1, nextStartFor(index) - startTick)));
     const jitterSign = index % 2 === 0 ? 1 : -1;
-    const velocity = clamp(rampAt(index, count) + jitterSign * 3, 1, 127);
+    const velocity = clamp(rampAt(index, starts.length + 1) + jitterSign * 3, 1, 127);
     notes.push(percNoteShape({
       pitch: source.pitch,
-      startTick: Math.max(0, startTick + jitterSign * jitterTicks),
-      durationTicks: Math.max(1, Math.round(baseStep * 0.85)),
+      startTick: Math.max(0, startTick),
+      durationTicks: duration,
       velocity,
       isRoll: true,
-      cc11: rollCc11Along(index / Math.max(1, count - 1)),
+      cc11: rollCc11Along(index / Math.max(1, starts.length)),
       thirtySecondsStep: baseStep,
     }));
   }
+  // The terminating accent lands exactly on the ramp top, rightward of every
+  // regular hit (durations above can never reach it).
+  notes.push(percNoteShape({ pitch: source.pitch, startTick: regularEnd, durationTicks: accentTicks, velocity: accentVelocity, isRoll: true, cc11: 118 }));
   return { notes, span: { start: source.startTick, end: hardEnd } };
 }
 
@@ -369,8 +488,13 @@ interface PercSpan {
   start: number;
   end: number;
   peakEnergy: number;
-  /** Any measure in the Dense band (subdivision cap 4 ⇔ energy ≥ 0.70). */
+  /** M14 v2.1: any measure at the PIECE-RELATIVE high band (p90). */
   highEnergy: boolean;
+  /** M14 v2.3: the piece-relative energy band (0 soft / 1 dense / 2 high). */
+  band: 0 | 1 | 2;
+  /** M14 v2.3: which repeat of this section type this span is (drives the
+   * occurrence-alternation that guarantees consecutive same-band spans differ). */
+  occurrence: number;
   index: number;
 }
 
@@ -383,8 +507,23 @@ function spansFromMeasures(measures: MeasureProfile[]): PercSpan[] {
       previous.peakEnergy = Math.max(previous.peakEnergy, measure.energy);
       previous.highEnergy = previous.highEnergy || measure.maxSubdivisionsPerBeat >= 4;
       continue;
-    }
-    out.push({ type: measure.sectionType, start: measure.startTick, end: measure.endTick, peakEnergy: measure.energy, highEnergy: measure.maxSubdivisionsPerBeat >= 4, index: out.length });
+    }      out.push({ type: measure.sectionType, start: measure.startTick, end: measure.endTick, peakEnergy: measure.energy, highEnergy: measure.maxSubdivisionsPerBeat >= 4, band: 0, occurrence: 0, index: out.length });
+  }
+  return out;
+}
+
+/** Ticks where the CHORD ROOT changes (parsed chord roots; unparseable blocks
+ * leave the running root untouched). M14 B2's timpani follow rule is gated on
+ * these exact events. */
+function chordChangeTicks(project: Project): number[] {
+  const blocks = [...project.chords].sort((a, b) => a.startTick - b.startTick);
+  const out: number[] = [];
+  let previousRoot: number | undefined;
+  for (const block of blocks) {
+    const parsed = parseChord(block.symbol);
+    if (!parsed.ok) continue;
+    if (previousRoot === undefined || parsed.chord.root !== previousRoot) out.push(block.startTick);
+    previousRoot = parsed.chord.root;
   }
   return out;
 }
@@ -432,7 +571,7 @@ function percNoteShape(args: { pitch: number; startTick: number; durationTicks: 
 
 // ---------------------------------------------------------------- engine
 
-interface TimpaniWindow { start: number; end: number; kind: "roll" | "hit"; peakEnergy: number }
+interface TimpaniWindow { start: number; end: number; kind: "roll" | "hit"; peakEnergy: number; /** M14 v2.3 — beat offsets inside the window for multi-hit rhythms. */ rhythm?: readonly number[] }
 
 /** Module 12 entry point — replaces applyArrangementGestures at the same wiring
  * position (post-bake, pre-MonophonyGuard). Percussion-track content is FULLY
@@ -454,7 +593,24 @@ export function generatePercussion(tracks: Track[], ctx: PercussionContext): Tra
   const beatTicks = ticksPerBeat(project.timeSignature);
   const stepTicks = Math.max(1, Math.round(beatTicks / 4)); // the 16th
   const bpm = project.bpm;
-  const spans = spansFromMeasures(measures);
+  const seed = ctx.seed ?? 0; // M14 v2.2: seed participates as PURE context (no RNG stream)
+  const bands = pieceEnergyBands(measures); // M14 v2.1: gates are the piece's OWN percentiles
+  const bandOf = (v: number): 0 | 1 | 2 => (v >= bands.p90 ? 2 : v >= bands.p75 ? 1 : 0);
+  const spans = spansFromMeasures(measures).map((span) => ({
+    ...span,
+    // v2.1: the relative high band replaces the absolute 0.70 constant; the
+    // span's peak must reach the piece's p90 to count as tutti/high.
+    highEnergy: span.peakEnergy >= bands.p90,
+    band: bandOf(span.peakEnergy),
+    occurrence: 0,
+  }));
+  // Occurrence = which repeat of this section type this span is. The pattern
+  // layer adds it to every context selection so two same-band same-type spans
+  // are guaranteed DIFFERENT figures (better than the spec's "may repeat").
+  spans.forEach((span, index) => {
+    span.occurrence = spans.filter((other, otherIndex) => otherIndex < index && other.type === span.type).length;
+  });
+  const rootChanges = chordChangeTicks(project);
   const timpaniLedger = new GestureLedger();
   const snareLedger = new GestureLedger();
   const cymbalLedger = new GestureLedger();
@@ -462,31 +618,57 @@ export function generatePercussion(tracks: Track[], ctx: PercussionContext): Tra
 
   // ---------------- Timpani: window PLAN first, then tuning, then notes.
   const timpaniPlan: TimpaniWindow[] = [];
+  const hitRhythmFor = (spanIndex: number, band: 0 | 1 | 2, rootPc: number, occurrence: number): readonly number[] => {
+    const primary = bandPatternIndex(band, TIMPANI_RHYTHMS.length); // band pins the base (guaranteed cross-band difference)
+    const variant = contextVariantOf(seed, spanIndex, rootPc) % TIMPANI_RHYTHMS.length;
+    return TIMPANI_RHYTHMS[(primary + variant + occurrence) % TIMPANI_RHYTHMS.length].offsets;
+  };
   for (const span of spans) {
+    const spanBars = Math.max(1, Math.round((span.end - span.start) / barTicks));
+    // M14 B2 — BUILD rolls SIZED BY THE BUILD'S LENGTH: half the build, at least
+    // the M8-heritage 2 bars, capped at the span itself (4-bar build ⇒ 2-bar roll
+    // exactly as before; an 8-bar build now rolls 4 bars, a 16-bar build 8).
+    const rollBars = Math.min(spanBars, Math.max(2, Math.ceil(spanBars / 2)));
     if (span.type === "Build") {
-      // Roll into the boundary: the final 2 bars of the build (the M8 gesture,
-      // generalized to every Build and driven by measure energy).
-      const rollStart = Math.max(span.start, span.end - 2 * barTicks);
+      const rollStart = Math.max(span.start, span.end - rollBars * barTicks);
       const accentResidue = Math.round(beatTicks * 0.25);
       if (timpaniLedger.tryAdd({ start: rollStart, end: span.end + accentResidue })) {
         timpaniPlan.push({ start: rollStart, end: span.end, kind: "roll", peakEnergy: span.peakEnergy });
-        // The terminating accent lives ON the chorus downbeat; it blocks the
-        // chorus downbeat hit (one player at one instant — the ledger holds).
         timpaniLedger.tryAdd({ start: span.end, end: span.end + accentResidue });
       }
     }
     if (span.type === "Chorus") {
       const hitStart = span.start;
-      if (timpaniLedger.tryAdd({ start: hitStart, end: hitStart + Math.round(beatTicks / 2) })) {
-        timpaniPlan.push({ start: hitStart, end: hitStart + Math.round(beatTicks / 2), kind: "hit", peakEnergy: span.peakEnergy });
+      const tempoRhythm = hitRhythmFor(span.index, span.band, chordRootAt(project, Math.max(0, span.start)), span.occurrence);
+      const windowLen = Math.round(beatTicks * (Math.max(...tempoRhythm) + 0.5));
+      if (timpaniLedger.tryAdd({ start: hitStart, end: hitStart + Math.round(windowLen) })) {
+        timpaniPlan.push({ start: hitStart, end: hitStart + Math.round(windowLen), kind: "hit", peakEnergy: span.peakEnergy, rhythm: tempoRhythm });
       }
     }
     if (span.type !== "Breakdown" && span.start > 0) {
-      // Cadence accent at section ends: the last beat, gated by ledger and
-      // energy (kept tasteful — skip under-soft sections).
+      // Cadence accent at section ends: the last beat. M14 v2.1: the soft gate
+      // is RELATIVE — the span's peak must clear the piece's OWN median, no
+      // absolute 0.45 constant (the census showed absolute gating was tuned to
+      //.hot bodies only).
       const cadenceTick = span.end - beatTicks;
-      if (cadenceTick > 0 && span.peakEnergy >= 0.45 && timpaniLedger.tryAdd({ start: cadenceTick, end: span.end })) {
+      if (cadenceTick > 0 && span.peakEnergy >= bands.p50 && timpaniLedger.tryAdd({ start: cadenceTick, end: span.end })) {
         timpaniPlan.push({ start: cadenceTick, end: span.end, kind: "hit", peakEnergy: span.peakEnergy });
+      }
+    }
+    // M14 B2 — timpani follows EVERY chord-root change whose preceding silence
+    // is ≥ 2 measures (the retune law, applied as the SELECTION gate — a change
+    // buried inside a phrase stays with whatever tuning is already on). The span
+    // start itself stays owned by the chorus-start/cadence rules above.
+    if (span.type !== "Breakdown") {
+      for (const changeTick of rootChanges) {
+        if (changeTick <= span.start || changeTick >= span.end) continue;
+        const gestureLen = Math.round(beatTicks * 1.25);
+        const frees = !timpaniLedger.overlaps(changeTick - 2 * barTicks, changeTick + gestureLen);
+        if (frees && timpaniLedger.tryAdd({ start: changeTick, end: changeTick + gestureLen })) {
+          const followRhythm = hitRhythmFor(span.index, span.band, chordRootAt(project, changeTick), span.occurrence);
+          const followLen = Math.round(beatTicks * (Math.max(...followRhythm) + 0.5));
+          timpaniPlan.push({ start: changeTick, end: changeTick + followLen, kind: "hit", peakEnergy: Math.max(span.peakEnergy, bands.p90), rhythm: followRhythm });
+        }
       }
     }
   }
@@ -514,17 +696,27 @@ export function generatePercussion(tracks: Track[], ctx: PercussionContext): Tra
       );
       timpaniNotes.push(...result.notes);
     } else {
-      timpaniNotes.push({ ...percNote({ pitch: tuning, startTick: window.start, durationTicks: window.end - window.start, velocity: clamp(Math.round(70 + 40 * window.peakEnergy), 1, 127) }), malletType: malletForDynamic(clamp(Math.round(70 + 40 * window.peakEnergy), 1, 127)) });
+      const rhythm = window.kind === "hit" ? window.rhythm ?? [0] : [0];
+      const baseVelocity = clamp(Math.round(70 + 40 * window.peakEnergy), 1, 127);
+      rhythm.forEach((offset, index) => {
+        const startTick = Math.max(0, Math.round(window.start + offset * beatTicks));
+        const velocity = index === 0 ? baseVelocity : clamp(Math.round(baseVelocity * 0.8), 1, 127);
+        const note = percNote({ pitch: tuning, startTick, durationTicks: Math.max(1, Math.round(beatTicks * 0.45)), velocity });
+        timpaniNotes.push({ ...note, malletType: malletForDynamic(velocity) });
+      });
     }
   }
 
-  // ---------------- Snare: rolls at BUILD + cadence approach, GHOST 16ths
-  // under high-energy choruses (sparse — one 16th per beat), tutti downbeat
-  // accents. Pitch is ALWAYS 38 (the home track's single pitch).
+  // ---------------- Snare: rolls at BUILD (sized by build length) + cadence
+  // approach, GHOST 16th PATTERNS under chorus spans at the piece's DENSE band
+  // or better (M14 B2: real 16th figures, not one ghost per beat), tutti
+  // downbeat accents. Pitch is ALWAYS 38 (the home track's single pitch).
   const snareNotes: Note[] = [];
   for (const span of spans) {
+    const spanBars = Math.max(1, Math.round((span.end - span.start) / barTicks));
+    const rollBars = Math.min(spanBars, Math.max(2, Math.ceil(spanBars / 2))); // sized by build length (M14 B2)
     if (span.type === "Build") {
-      const rollStart = Math.max(span.start, span.end - 2 * barTicks);
+      const rollStart = Math.max(span.start, span.end - rollBars * barTicks);
       const accentResidue = Math.round(beatTicks * 0.25);
       if (snareLedger.tryAdd({ start: rollStart, end: span.end + accentResidue })) {
         snareNotes.push(...convertRoll(
@@ -548,13 +740,35 @@ export function generatePercussion(tracks: Track[], ctx: PercussionContext): Tra
       if (snareLedger.tryAdd({ start: span.start, end: span.start + Math.round(beatTicks / 2) })) {
         snareNotes.push(percNote({ pitch: 38, startTick: span.start, durationTicks: Math.round(beatTicks / 2), velocity: 105 }));
       }
-      let ghostIndex = 0;
-      for (let tick = span.start + beatTicks; tick + stepTicks <= span.end; tick += beatTicks) {
-        if (!span.highEnergy) break;
-        // Sparse: every 4th sixteenth i.e. one ghost per BEAT, off the downbeat.
-        ghostIndex++;
-        if (snareLedger.tryAdd({ start: tick, end: tick + stepTicks })) {
-          snareNotes.push(percNote({ pitch: 38, startTick: tick, durationTicks: Math.max(1, Math.round(stepTicks * 0.5)), velocity: ghostIndex % 2 === 0 ? 26 : 22 }));
+      // M14 v2.3/v2.4 — ghost 16ths under the chorus: a LIBRARY pattern chosen
+      // by context (band pins the base figure — different energy band ⇒
+      // different pattern), then rotated within its 16-slot bar by the
+      // seed/context variant. DENSE band or better = full pattern; the soft
+      // band (≥ p50) takes the thinned (every other) figure — the same chorus
+      // shape no longer plays every chorus verbatim.
+      const ghostBand = span.peakEnergy >= bands.p75 ? 2 : span.peakEnergy >= bands.p50 ? 1 : 0;
+      if (ghostBand > 0) {
+        const library = SNARE_GHOST_PATTERNS;
+        // band pins the base row; the span's OCCURRENCE forces consecutive
+        // same-band same-type choruses apart (guaranteed per-seed variety);
+        // the seed/context variant rotates the 16-slot bar.
+        const pattern = library[(bandPatternIndex(ghostBand, library.length) + span.occurrence + contextVariantOf(seed, span.index, chordRootAt(project, Math.max(0, span.start))) % library.length) % library.length]!;
+        const variantOffset = contextVariantOf(seed, span.index, chordRootAt(project, Math.max(0, span.start)));
+        const rotateSlots = variantOffset % 16;
+        const picked = ghostBand === 1 ? pattern.slots.filter((_, i2) => i2 % 2 === 0) : [...pattern.slots];
+        for (let bar = 0; bar * barTicks < span.end - span.start; bar++) {
+          for (const slot of picked) {
+            // Each bar rotates the pattern one further 16th slot — a deliberate
+            // anti-tic drift (never the same bar shape twice) and the
+            // cross-seed figure axis (16 bars ⇒ 16 distinct bar signatures).
+            const slotRotated = (slot + rotateSlots + bar) % 16;
+            const t = Math.round(span.start + bar * barTicks + slotRotated * stepTicks);
+            if (t < span.start + beatTicks / 2 || t >= span.end - 1) continue; // keep beat 1 (accent) + the cadence clean
+            if (snareLedger.tryAdd({ start: t, end: t + Math.max(1, Math.round(stepTicks * 0.5)) })) {
+              const firstOfBar = slot === Math.min(...picked);
+              snareNotes.push(percNote({ pitch: 38, startTick: t, durationTicks: Math.max(1, Math.round(stepTicks * 0.5)), velocity: firstOfBar ? 30 : 22 }));
+            }
+          }
         }
       }
       const cadenceTick = span.end - beatTicks;
@@ -564,54 +778,67 @@ export function generatePercussion(tracks: Track[], ctx: PercussionContext): Tra
     }
   }
 
-  // ---------------- Cymbals: swells (2–4 bar log-CC11 build, length from the
-  // incoming measure energy) terminating in a crash at the Chorus downbeat;
-  // crash also at tutti beat 1 for non-chorus tutti spans. No damp. Pitch 49.
+  // ---------------- Cymbals: swells (2–4 bar build, length from the incoming
+  // measure energy, CONTOUR from the shape library — ≥3 distinct dynamic-curve
+  // figures) terminating in a crash at the Chorus downbeat; crash also at tutti
+  // beat 1 for non-chorus spans at the piece's OWN high band (plus build
+  // spans, the M8 heritage). No damp. Pitch 49.
   const cymbalNotes: Note[] = [];
   for (const span of spans) {
-    if (span.type !== "Chorus" && !span.highEnergy) continue;
     if (span.type === "Chorus") {
       const previous = spans[span.index - 1];
       const bars = !previous ? 3 : previous.peakEnergy >= 0.85 ? 2 : previous.peakEnergy >= 0.6 ? 3 : 4;
       const swellStart = Math.max(0, span.start - bars * barTicks);
       if (span.start - swellStart < barTicks) continue; // no runway → skip (ledger keeps this honest)
       if (!cymbalLedger.tryAdd({ start: swellStart, end: span.start + 2 * beatTicks })) continue;
+      // M14 v2.3 — swell shape: band pins the base (guaranteed cross-band
+      // difference), the seed/context variant rotates within the class. The
+      // quarter-pulse PLACEMENT stays fixed so budgets don't move between shapes.
+      const shapeLibrary = SWELL_SHAPES;
+      const shape = shapeLibrary[(bandPatternIndex(span.band, shapeLibrary.length) + span.occurrence + contextVariantOf(seed, span.index, chordRootAt(project, Math.max(0, span.start))) % shapeLibrary.length) % shapeLibrary.length]!;
       const quarterTicks = Math.max(1, Math.round(beatTicks));
       const swellHitCount = Math.max(1, Math.floor((span.start - swellStart) / quarterTicks));
       for (let index = 0; index < swellHitCount; index++) {
         const t = Math.max(0, Math.round(swellStart + index * quarterTicks));
         if (t >= span.start - 1) break;
         const progress = index / Math.max(1, swellHitCount - 1);
-        cymbalNotes.push(percNote({ pitch: 49, startTick: t, durationTicks: Math.round(quarterTicks * 0.7), velocity: Math.round(30 + 40 * progress), cc11: Math.round(25 + (112 - 25) * progress) }));
+        const swept = shape.profile(progress); // 0..1 contour
+        cymbalNotes.push(percNote({ pitch: 49, startTick: t, durationTicks: Math.round(quarterTicks * 0.7), velocity: Math.round(30 + 40 * swept), cc11: Math.round(25 + (112 - 25) * swept) }));
       }
       // The terminating crash at the chorus downbeat (no damp, ACCENT tier).
       cymbalNotes.push(percNote({ pitch: 49, startTick: span.start, durationTicks: 2 * beatTicks, velocity: 116, cc11: 118 }));
-    } else {
-      // Crash at tutti beat 1 for non-chorus tutti spans (energy ≥ Dense band).
+    } else if (span.highEnergy || span.type === "Build") {
+      // Crash at tutti beat 1 for non-chorus spans at the piece's OWN high band
+      // (v2.1: relative p90, not an absolute ≥Dense constant) plus Build spans.
       if (cymbalLedger.tryAdd({ start: span.start, end: span.start + 2 * beatTicks })) {
         cymbalNotes.push(percNote({ pitch: 49, startTick: span.start, durationTicks: 2 * beatTicks, velocity: 114, cc11: 118 }));
       }
     }
   }
 
-  // ---------------- Aux (multi-percussion chair): deliberately SHY in v1 —
-  // cadence accents at Chorus ends + one pulse figure (ride on beats 1&3) at
-  // high energy. First content on an empty-since-forever track must not
-  // become a tic; the full auxiliary palette waits for the native era.
+  // ---------------- Aux (multi-percussion chair): M14 v2.4 — cadence accents
+  // at EVERY section end (v1 was chorus-ends-only), and the pulse figure in
+  // every span that reaches the piece's OWN Dense band (p75 — "pulse at Dense",
+  // not ≥ Dense). The pulse itself is a LIBRARY figure (ride-on-1&3 vs hat
+  // offbeat-8ths) chosen by band + seed/context rotation. Pitch map is
+  // GM-style and inside the chair range by construction.
   const auxNotes: Note[] = [];
   for (const span of spans) {
-    if (span.type !== "Chorus") continue;
     const kickTick = span.end - beatTicks;
     if (kickTick > span.start && auxLedger.tryAdd({ start: kickTick, end: kickTick + beatTicks })) {
-      auxNotes.push(percNote({ pitch: AUX_PITCH_MAP.kick, startTick: kickTick, durationTicks: Math.round(beatTicks * 0.5), velocity: 96 }));
+      auxNotes.push(percNote({ pitch: AUX_PITCH_MAP.kick, startTick: kickTick, durationTicks: Math.round(beatTicks * 0.5), velocity: 84 + 12 * span.band }));
     }
-    if (span.highEnergy) {
-      for (let tick = span.start; tick + 1 <= span.end; tick += barTicks) {
-        for (const offset of [0, 2 * beatTicks]) {
-          const t = tick + offset;
-          if (t >= span.end - 1) continue;
+    if (span.peakEnergy >= bands.p75) {
+      const pulseLibrary = AUX_PULSE_PATTERNS;
+      const pattern = pulseLibrary[(bandPatternIndex(span.band, pulseLibrary.length) + span.occurrence + contextVariantOf(seed, span.index, chordRootAt(project, Math.max(0, span.start))) % pulseLibrary.length) % pulseLibrary.length]!;
+      for (let bar = 0; bar * barTicks < span.end - span.start; bar++) {
+        const barStart = Math.round(span.start + bar * barTicks);
+        for (const entry of pattern.entries) {
+          const slotRotated = (entry.slot + (contextVariantOf(seed, span.index, chordRootAt(project, Math.max(0, span.start))) % 16)) % 16;
+          const t = Math.round(barStart + slotRotated * stepTicks);
+          if (t >= kickTick || t >= span.end - 1) continue; // the cadence kick owns the last beat
           if (auxLedger.tryAdd({ start: t, end: t + Math.round(beatTicks * 0.35) })) {
-            auxNotes.push(percNote({ pitch: AUX_PITCH_MAP.ride, startTick: t, durationTicks: Math.round(beatTicks * 0.35), velocity: 54 }));
+            auxNotes.push(percNote({ pitch: entry.key, startTick: t, durationTicks: Math.round(beatTicks * 0.35), velocity: entry.key === AUX_PITCH_MAP.ride ? 54 : 48 }));
           }
         }
       }

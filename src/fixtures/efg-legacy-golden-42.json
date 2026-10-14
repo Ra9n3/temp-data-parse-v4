@@ -13396,9 +13396,74 @@
   "id": "trk_timpani",
   "notes": [
    {
+    "pitch": 43,
+    "startTick": 7680,
+    "durationTicks": 432,
+    "velocity": 107,
+    "dynamics": {
+     "cc11Value": 96,
+     "cc74Value": 88,
+     "attenuationActive": false
+    },
+    "velocityTier": "ACCENT",
+    "malletType": "HARD_WOOD"
+   },
+   {
+    "pitch": 43,
+    "startTick": 8400,
+    "durationTicks": 432,
+    "velocity": 86,
+    "dynamics": {
+     "cc11Value": 77,
+     "cc74Value": 79,
+     "attenuationActive": false
+    },
+    "velocityTier": "GROOVE",
+    "malletType": "SOFT_FELT"
+   },
+   {
+    "pitch": 41,
+    "startTick": 19200,
+    "durationTicks": 432,
+    "velocity": 107,
+    "dynamics": {
+     "cc11Value": 96,
+     "cc74Value": 88,
+     "attenuationActive": false
+    },
+    "velocityTier": "ACCENT",
+    "malletType": "HARD_WOOD"
+   },
+   {
     "pitch": 50,
     "startTick": 30720,
-    "durationTicks": 480,
+    "durationTicks": 432,
+    "velocity": 110,
+    "dynamics": {
+     "cc11Value": 99,
+     "cc74Value": 90,
+     "attenuationActive": false
+    },
+    "velocityTier": "ACCENT",
+    "malletType": "HARD_WOOD"
+   },
+   {
+    "pitch": 43,
+    "startTick": 40320,
+    "durationTicks": 432,
+    "velocity": 110,
+    "dynamics": {
+     "cc11Value": 99,
+     "cc74Value": 90,
+     "attenuationActive": false
+    },
+    "velocityTier": "ACCENT",
+    "malletType": "HARD_WOOD"
+   },
+   {
+    "pitch": 50,
+    "startTick": 49920,
+    "durationTicks": 432,
     "velocity": 110,
     "dynamics": {
      "cc11Value": 99,
@@ -13411,7 +13476,7 @@
    {
     "pitch": 50,
     "startTick": 60480,
-    "durationTicks": 960,
+    "durationTicks": 432,
     "velocity": 110,
     "dynamics": {
      "cc11Value": 99,
@@ -13454,10 +13519,10 @@
     "pitch": 38,
     "startTick": 32640,
     "durationTicks": 120,
-    "velocity": 26,
+    "velocity": 22,
     "dynamics": {
-     "cc11Value": 23,
-     "cc74Value": 52,
+     "cc11Value": 20,
+     "cc74Value": 50,
      "attenuationActive": false
     },
     "velocityTier": "GHOST"
@@ -13476,43 +13541,19 @@
    },
    {
     "pitch": 38,
-    "startTick": 34560,
+    "startTick": 34800,
     "durationTicks": 120,
-    "velocity": 26,
+    "velocity": 30,
     "dynamics": {
-     "cc11Value": 23,
-     "cc74Value": 52,
+     "cc11Value": 27,
+     "cc74Value": 54,
      "attenuationActive": false
     },
     "velocityTier": "GHOST"
    },
    {
     "pitch": 38,
-    "startTick": 35520,
-    "durationTicks": 120,
-    "velocity": 22,
-    "dynamics": {
-     "cc11Value": 20,
-     "cc74Value": 50,
-     "attenuationActive": false
-    },
-    "velocityTier": "GHOST"
-   },
-   {
-    "pitch": 38,
-    "startTick": 36480,
-    "durationTicks": 120,
-    "velocity": 26,
-    "dynamics": {
-     "cc11Value": 23,
-     "cc74Value": 52,
-     "attenuationActive": false
-    },
-    "velocityTier": "GHOST"
-   },
-   {
-    "pitch": 38,
-    "startTick": 37440,
+    "startTick": 35760,
     "durationTicks": 120,
     "velocity": 22,
     "dynamics": {
@@ -13524,19 +13565,7 @@
    },
    {
     "pitch": 38,
-    "startTick": 38400,
-    "durationTicks": 120,
-    "velocity": 26,
-    "dynamics": {
-     "cc11Value": 23,
-     "cc74Value": 52,
-     "attenuationActive": false
-    },
-    "velocityTier": "GHOST"
-   },
-   {
-    "pitch": 38,
-    "startTick": 39360,
+    "startTick": 36720,
     "durationTicks": 120,
     "velocity": 22,
     "dynamics": {
@@ -13548,19 +13577,7 @@
    },
    {
     "pitch": 38,
-    "startTick": 40320,
-    "durationTicks": 120,
-    "velocity": 26,
-    "dynamics": {
-     "cc11Value": 23,
-     "cc74Value": 52,
-     "attenuationActive": false
-    },
-    "velocityTier": "GHOST"
-   },
-   {
-    "pitch": 38,
-    "startTick": 41280,
+    "startTick": 37680,
     "durationTicks": 120,
     "velocity": 22,
     "dynamics": {
@@ -13572,19 +13589,19 @@
    },
    {
     "pitch": 38,
-    "startTick": 42240,
+    "startTick": 38880,
     "durationTicks": 120,
-    "velocity": 26,
+    "velocity": 30,
     "dynamics": {
-     "cc11Value": 23,
-     "cc74Value": 52,
+     "cc11Value": 27,
+     "cc74Value": 54,
      "attenuationActive": false
     },
     "velocityTier": "GHOST"
    },
    {
     "pitch": 38,
-    "startTick": 43200,
+    "startTick": 39840,
     "durationTicks": 120,
     "velocity": 22,
     "dynamics": {
@@ -13596,19 +13613,67 @@
    },
    {
     "pitch": 38,
-    "startTick": 44160,
+    "startTick": 40800,
     "durationTicks": 120,
-    "velocity": 26,
+    "velocity": 22,
     "dynamics": {
-     "cc11Value": 23,
-     "cc74Value": 52,
+     "cc11Value": 20,
+     "cc74Value": 50,
      "attenuationActive": false
     },
     "velocityTier": "GHOST"
    },
    {
     "pitch": 38,
-    "startTick": 45120,
+    "startTick": 41760,
+    "durationTicks": 120,
+    "velocity": 22,
+    "dynamics": {
+     "cc11Value": 20,
+     "cc74Value": 50,
+     "attenuationActive": false
+    },
+    "velocityTier": "GHOST"
+   },
+   {
+    "pitch": 38,
+    "startTick": 42960,
+    "durationTicks": 120,
+    "velocity": 30,
+    "dynamics": {
+     "cc11Value": 27,
+     "cc74Value": 54,
+     "attenuationActive": false
+    },
+    "velocityTier": "GHOST"
+   },
+   {
+    "pitch": 38,
+    "startTick": 43920,
+    "durationTicks": 120,
+    "velocity": 22,
+    "dynamics": {
+     "cc11Value": 20,
+     "cc74Value": 50,
+     "attenuationActive": false
+    },
+    "velocityTier": "GHOST"
+   },
+   {
+    "pitch": 38,
+    "startTick": 44880,
+    "durationTicks": 120,
+    "velocity": 22,
+    "dynamics": {
+     "cc11Value": 20,
+     "cc74Value": 50,
+     "attenuationActive": false
+    },
+    "velocityTier": "GHOST"
+   },
+   {
+    "pitch": 38,
+    "startTick": 45840,
     "durationTicks": 120,
     "velocity": 22,
     "dynamics": {
@@ -13622,18 +13687,6 @@
     "pitch": 38,
     "startTick": 46080,
     "durationTicks": 120,
-    "velocity": 26,
-    "dynamics": {
-     "cc11Value": 23,
-     "cc74Value": 52,
-     "attenuationActive": false
-    },
-    "velocityTier": "GHOST"
-   },
-   {
-    "pitch": 38,
-    "startTick": 47040,
-    "durationTicks": 120,
     "velocity": 22,
     "dynamics": {
      "cc11Value": 20,
@@ -13644,12 +13697,24 @@
    },
    {
     "pitch": 38,
+    "startTick": 47040,
+    "durationTicks": 120,
+    "velocity": 30,
+    "dynamics": {
+     "cc11Value": 27,
+     "cc74Value": 54,
+     "attenuationActive": false
+    },
+    "velocityTier": "GHOST"
+   },
+   {
+    "pitch": 38,
     "startTick": 48000,
     "durationTicks": 120,
-    "velocity": 26,
+    "velocity": 22,
     "dynamics": {
-     "cc11Value": 23,
-     "cc74Value": 52,
+     "cc11Value": 20,
+     "cc74Value": 50,
      "attenuationActive": false
     },
     "velocityTier": "GHOST"
@@ -13668,19 +13733,7 @@
    },
    {
     "pitch": 38,
-    "startTick": 49920,
-    "durationTicks": 120,
-    "velocity": 26,
-    "dynamics": {
-     "cc11Value": 23,
-     "cc74Value": 52,
-     "attenuationActive": false
-    },
-    "velocityTier": "GHOST"
-   },
-   {
-    "pitch": 38,
-    "startTick": 50880,
+    "startTick": 50160,
     "durationTicks": 120,
     "velocity": 22,
     "dynamics": {
@@ -13692,43 +13745,19 @@
    },
    {
     "pitch": 38,
-    "startTick": 51840,
+    "startTick": 51120,
     "durationTicks": 120,
-    "velocity": 26,
+    "velocity": 30,
     "dynamics": {
-     "cc11Value": 23,
-     "cc74Value": 52,
+     "cc11Value": 27,
+     "cc74Value": 54,
      "attenuationActive": false
     },
     "velocityTier": "GHOST"
    },
    {
     "pitch": 38,
-    "startTick": 52800,
-    "durationTicks": 120,
-    "velocity": 22,
-    "dynamics": {
-     "cc11Value": 20,
-     "cc74Value": 50,
-     "attenuationActive": false
-    },
-    "velocityTier": "GHOST"
-   },
-   {
-    "pitch": 38,
-    "startTick": 53760,
-    "durationTicks": 120,
-    "velocity": 26,
-    "dynamics": {
-     "cc11Value": 23,
-     "cc74Value": 52,
-     "attenuationActive": false
-    },
-    "velocityTier": "GHOST"
-   },
-   {
-    "pitch": 38,
-    "startTick": 54720,
+    "startTick": 52080,
     "durationTicks": 120,
     "velocity": 22,
     "dynamics": {
@@ -13740,19 +13769,7 @@
    },
    {
     "pitch": 38,
-    "startTick": 55680,
-    "durationTicks": 120,
-    "velocity": 26,
-    "dynamics": {
-     "cc11Value": 23,
-     "cc74Value": 52,
-     "attenuationActive": false
-    },
-    "velocityTier": "GHOST"
-   },
-   {
-    "pitch": 38,
-    "startTick": 56640,
+    "startTick": 53040,
     "durationTicks": 120,
     "velocity": 22,
     "dynamics": {
@@ -13764,19 +13781,7 @@
    },
    {
     "pitch": 38,
-    "startTick": 57600,
-    "durationTicks": 120,
-    "velocity": 26,
-    "dynamics": {
-     "cc11Value": 23,
-     "cc74Value": 52,
-     "attenuationActive": false
-    },
-    "velocityTier": "GHOST"
-   },
-   {
-    "pitch": 38,
-    "startTick": 58560,
+    "startTick": 54240,
     "durationTicks": 120,
     "velocity": 22,
     "dynamics": {
@@ -13788,19 +13793,79 @@
    },
    {
     "pitch": 38,
-    "startTick": 59520,
+    "startTick": 55200,
     "durationTicks": 120,
-    "velocity": 26,
+    "velocity": 30,
     "dynamics": {
-     "cc11Value": 23,
-     "cc74Value": 52,
+     "cc11Value": 27,
+     "cc74Value": 54,
      "attenuationActive": false
     },
     "velocityTier": "GHOST"
    },
    {
     "pitch": 38,
-    "startTick": 60480,
+    "startTick": 56160,
+    "durationTicks": 120,
+    "velocity": 22,
+    "dynamics": {
+     "cc11Value": 20,
+     "cc74Value": 50,
+     "attenuationActive": false
+    },
+    "velocityTier": "GHOST"
+   },
+   {
+    "pitch": 38,
+    "startTick": 57120,
+    "durationTicks": 120,
+    "velocity": 22,
+    "dynamics": {
+     "cc11Value": 20,
+     "cc74Value": 50,
+     "attenuationActive": false
+    },
+    "velocityTier": "GHOST"
+   },
+   {
+    "pitch": 38,
+    "startTick": 58320,
+    "durationTicks": 120,
+    "velocity": 22,
+    "dynamics": {
+     "cc11Value": 20,
+     "cc74Value": 50,
+     "attenuationActive": false
+    },
+    "velocityTier": "GHOST"
+   },
+   {
+    "pitch": 38,
+    "startTick": 59280,
+    "durationTicks": 120,
+    "velocity": 30,
+    "dynamics": {
+     "cc11Value": 27,
+     "cc74Value": 54,
+     "attenuationActive": false
+    },
+    "velocityTier": "GHOST"
+   },
+   {
+    "pitch": 38,
+    "startTick": 60240,
+    "durationTicks": 120,
+    "velocity": 22,
+    "dynamics": {
+     "cc11Value": 20,
+     "cc74Value": 50,
+     "attenuationActive": false
+    },
+    "velocityTier": "GHOST"
+   },
+   {
+    "pitch": 38,
+    "startTick": 61200,
     "durationTicks": 120,
     "velocity": 22,
     "dynamics": {
@@ -13831,10 +13896,10 @@
     "pitch": 49,
     "startTick": 16320,
     "durationTicks": 672,
-    "velocity": 33,
+    "velocity": 38,
     "dynamics": {
-     "cc11Value": 31,
-     "cc74Value": 55,
+     "cc11Value": 43,
+     "cc74Value": 57,
      "attenuationActive": false
     },
     "velocityTier": "GHOST"
@@ -13843,69 +13908,21 @@
     "pitch": 49,
     "startTick": 17280,
     "durationTicks": 672,
-    "velocity": 35,
+    "velocity": 44,
     "dynamics": {
-     "cc11Value": 37,
-     "cc74Value": 56,
+     "cc11Value": 55,
+     "cc74Value": 60,
      "attenuationActive": false
     },
-    "velocityTier": "GHOST"
+    "velocityTier": "GROOVE"
    },
    {
     "pitch": 49,
     "startTick": 18240,
     "durationTicks": 672,
-    "velocity": 38,
+    "velocity": 48,
     "dynamics": {
-     "cc11Value": 42,
-     "cc74Value": 57,
-     "attenuationActive": false
-    },
-    "velocityTier": "GHOST"
-   },
-   {
-    "pitch": 49,
-    "startTick": 19200,
-    "durationTicks": 672,
-    "velocity": 41,
-    "dynamics": {
-     "cc11Value": 48,
-     "cc74Value": 58,
-     "attenuationActive": false
-    },
-    "velocityTier": "GROOVE"
-   },
-   {
-    "pitch": 49,
-    "startTick": 20160,
-    "durationTicks": 672,
-    "velocity": 43,
-    "dynamics": {
-     "cc11Value": 54,
-     "cc74Value": 59,
-     "attenuationActive": false
-    },
-    "velocityTier": "GROOVE"
-   },
-   {
-    "pitch": 49,
-    "startTick": 21120,
-    "durationTicks": 672,
-    "velocity": 46,
-    "dynamics": {
-     "cc11Value": 60,
-     "cc74Value": 61,
-     "attenuationActive": false
-    },
-    "velocityTier": "GROOVE"
-   },
-   {
-    "pitch": 49,
-    "startTick": 22080,
-    "durationTicks": 672,
-    "velocity": 49,
-    "dynamics": {
-     "cc11Value": 66,
+     "cc11Value": 64,
      "cc74Value": 62,
      "attenuationActive": false
     },
@@ -13913,7 +13930,7 @@
    },
    {
     "pitch": 49,
-    "startTick": 23040,
+    "startTick": 19200,
     "durationTicks": 672,
     "velocity": 51,
     "dynamics": {
@@ -13925,7 +13942,7 @@
    },
    {
     "pitch": 49,
-    "startTick": 24000,
+    "startTick": 20160,
     "durationTicks": 672,
     "velocity": 54,
     "dynamics": {
@@ -13937,7 +13954,7 @@
    },
    {
     "pitch": 49,
-    "startTick": 24960,
+    "startTick": 21120,
     "durationTicks": 672,
     "velocity": 57,
     "dynamics": {
@@ -13949,11 +13966,11 @@
    },
    {
     "pitch": 49,
-    "startTick": 25920,
+    "startTick": 22080,
     "durationTicks": 672,
     "velocity": 59,
     "dynamics": {
-     "cc11Value": 89,
+     "cc11Value": 87,
      "cc74Value": 67,
      "attenuationActive": false
     },
@@ -13961,7 +13978,19 @@
    },
    {
     "pitch": 49,
-    "startTick": 26880,
+    "startTick": 23040,
+    "durationTicks": 672,
+    "velocity": 61,
+    "dynamics": {
+     "cc11Value": 91,
+     "cc74Value": 67,
+     "attenuationActive": false
+    },
+    "velocityTier": "GROOVE"
+   },
+   {
+    "pitch": 49,
+    "startTick": 24000,
     "durationTicks": 672,
     "velocity": 62,
     "dynamics": {
@@ -13973,12 +14002,48 @@
    },
    {
     "pitch": 49,
-    "startTick": 27840,
+    "startTick": 24960,
+    "durationTicks": 672,
+    "velocity": 64,
+    "dynamics": {
+     "cc11Value": 99,
+     "cc74Value": 69,
+     "attenuationActive": false
+    },
+    "velocityTier": "GROOVE"
+   },
+   {
+    "pitch": 49,
+    "startTick": 25920,
     "durationTicks": 672,
     "velocity": 65,
     "dynamics": {
-     "cc11Value": 100,
+     "cc11Value": 102,
      "cc74Value": 69,
+     "attenuationActive": false
+    },
+    "velocityTier": "GROOVE"
+   },
+   {
+    "pitch": 49,
+    "startTick": 26880,
+    "durationTicks": 672,
+    "velocity": 67,
+    "dynamics": {
+     "cc11Value": 105,
+     "cc74Value": 70,
+     "attenuationActive": false
+    },
+    "velocityTier": "GROOVE"
+   },
+   {
+    "pitch": 49,
+    "startTick": 27840,
+    "durationTicks": 672,
+    "velocity": 68,
+    "dynamics": {
+     "cc11Value": 107,
+     "cc74Value": 71,
      "attenuationActive": false
     },
     "velocityTier": "GROOVE"
@@ -13987,10 +14052,10 @@
     "pitch": 49,
     "startTick": 28800,
     "durationTicks": 672,
-    "velocity": 67,
+    "velocity": 69,
     "dynamics": {
-     "cc11Value": 106,
-     "cc74Value": 70,
+     "cc11Value": 110,
+     "cc74Value": 71,
      "attenuationActive": false
     },
     "velocityTier": "GROOVE"
@@ -14025,8 +14090,20 @@
   "id": "trk_aux",
   "notes": [
    {
+    "pitch": 36,
+    "startTick": 29760,
+    "durationTicks": 480,
+    "velocity": 84,
+    "dynamics": {
+     "cc11Value": 76,
+     "cc74Value": 78,
+     "attenuationActive": false
+    },
+    "velocityTier": "GROOVE"
+   },
+   {
     "pitch": 51,
-    "startTick": 30720,
+    "startTick": 32160,
     "durationTicks": 336,
     "velocity": 54,
     "dynamics": {
@@ -14038,7 +14115,7 @@
    },
    {
     "pitch": 51,
-    "startTick": 32640,
+    "startTick": 34080,
     "durationTicks": 336,
     "velocity": 54,
     "dynamics": {
@@ -14050,7 +14127,7 @@
    },
    {
     "pitch": 51,
-    "startTick": 34560,
+    "startTick": 36000,
     "durationTicks": 336,
     "velocity": 54,
     "dynamics": {
@@ -14062,7 +14139,7 @@
    },
    {
     "pitch": 51,
-    "startTick": 36480,
+    "startTick": 37920,
     "durationTicks": 336,
     "velocity": 54,
     "dynamics": {
@@ -14074,7 +14151,7 @@
    },
    {
     "pitch": 51,
-    "startTick": 38400,
+    "startTick": 39840,
     "durationTicks": 336,
     "velocity": 54,
     "dynamics": {
@@ -14086,7 +14163,7 @@
    },
    {
     "pitch": 51,
-    "startTick": 40320,
+    "startTick": 41760,
     "durationTicks": 336,
     "velocity": 54,
     "dynamics": {
@@ -14098,7 +14175,7 @@
    },
    {
     "pitch": 51,
-    "startTick": 42240,
+    "startTick": 43680,
     "durationTicks": 336,
     "velocity": 54,
     "dynamics": {
@@ -14110,7 +14187,7 @@
    },
    {
     "pitch": 51,
-    "startTick": 44160,
+    "startTick": 45600,
     "durationTicks": 336,
     "velocity": 54,
     "dynamics": {
@@ -14122,7 +14199,7 @@
    },
    {
     "pitch": 51,
-    "startTick": 46080,
+    "startTick": 47520,
     "durationTicks": 336,
     "velocity": 54,
     "dynamics": {
@@ -14134,7 +14211,7 @@
    },
    {
     "pitch": 51,
-    "startTick": 48000,
+    "startTick": 49440,
     "durationTicks": 336,
     "velocity": 54,
     "dynamics": {
@@ -14146,7 +14223,7 @@
    },
    {
     "pitch": 51,
-    "startTick": 49920,
+    "startTick": 51360,
     "durationTicks": 336,
     "velocity": 54,
     "dynamics": {
@@ -14158,7 +14235,7 @@
    },
    {
     "pitch": 51,
-    "startTick": 51840,
+    "startTick": 53280,
     "durationTicks": 336,
     "velocity": 54,
     "dynamics": {
@@ -14170,7 +14247,7 @@
    },
    {
     "pitch": 51,
-    "startTick": 53760,
+    "startTick": 55200,
     "durationTicks": 336,
     "velocity": 54,
     "dynamics": {
@@ -14182,7 +14259,7 @@
    },
    {
     "pitch": 51,
-    "startTick": 55680,
+    "startTick": 57120,
     "durationTicks": 336,
     "velocity": 54,
     "dynamics": {
@@ -14194,19 +14271,7 @@
    },
    {
     "pitch": 51,
-    "startTick": 57600,
-    "durationTicks": 336,
-    "velocity": 54,
-    "dynamics": {
-     "cc11Value": 49,
-     "cc74Value": 64,
-     "attenuationActive": false
-    },
-    "velocityTier": "GROOVE"
-   },
-   {
-    "pitch": 51,
-    "startTick": 59520,
+    "startTick": 59040,
     "durationTicks": 336,
     "velocity": 54,
     "dynamics": {
@@ -14220,10 +14285,10 @@
     "pitch": 36,
     "startTick": 60480,
     "durationTicks": 480,
-    "velocity": 96,
+    "velocity": 108,
     "dynamics": {
-     "cc11Value": 86,
-     "cc74Value": 83,
+     "cc11Value": 97,
+     "cc74Value": 89,
      "attenuationActive": false
     },
     "velocityTier": "ACCENT"

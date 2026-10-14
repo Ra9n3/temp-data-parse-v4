@@ -810,10 +810,17 @@ export function runUnitTests(): TestResult[] {
       // changes, but ONLY where ≥2 measures of timpani silence allow (a real
       // timpanist doesn't pedal mid-phrase); the per-track gesture ledger
       // keeps distinct gestures from ever overlapping (one player per chair).
+      // Module 14 strengtheners: M14 ghosts follow every high-energy chorus at
+      // 16th density, aux kicks sit at EVERY cadence, timpani follow-hits appear
+      // at chord changes (not just span starts), and repeated identical
+      // non-drum gestures never re-occur verbatim (occurrence alternation).
+      let firstBattery = "";
+      const battery = (tracks: Array<{ id: string; notes: Array<{ pitch: number; startTick: number; durationTicks: number; velocity: number }> }>) => JSON.stringify(tracks.filter((t) => ["trk_timpani", "trk_snare", "trk_cymbals", "trk_aux"].includes(t.id)).map((t) => ({ id: t.id, notes: t.notes.map((n) => [n.pitch, n.startTick, n.durationTicks, n.velocity]) })));
       for (const label of ["s6", "s15"] as const) {
         const project = fixture();
         const barTicks = ticksPerBar(project.timeSignature);
-        const tracks = generate(project, { seed: label === "s6" ? 6 : 15, density: 0.75, humanize: false, lockedTrackIds: [] });
+        const seed = label === "s6" ? 6 : 15;
+        const tracks = generate(project, { seed, density: 0.75, humanize: false, lockedTrackIds: [] });
         const timpani = tracks.find((t) => t.id === "trk_timpani");
         assert(timpani && timpani.notes.length > 0, `timpani content missing (${label})`);
         assert(timpani.notes.every((n) => n.pitch >= 38 && n.pitch <= 57), `timpani range violated (${label})`);
@@ -831,8 +838,23 @@ export function runUnitTests(): TestResult[] {
             assert(sortedTrack[index].startTick >= sortedTrack[index - 1].startTick + sortedTrack[index - 1].durationTicks, `${trackId} overlapping distinct gestures (${label})`);
           }
         }
+        // M14 — fixture chorus = 1 span at the piece's p90: ghost 16th pattern
+        // (not one-per-beat) must fill ≥3 ghosts per bar across all 8 bars.
+        const chorusStart = 8 * barTicks;
+        const ghosts = tracks.find((t) => t.id === "trk_snare")!.notes.filter((n) => n.startTick >= chorusStart && n.startTick < 16 * barTicks && n.velocity < 40);
+        assert(ghosts.length >= 3 * 8, `fixture chorus ghosts too thin (${ghosts.length} vs ≥24), ${label}`);
+        // M14 — aux kick at EVERY cadence (fixture: verse end AND chorus end).
+        const aux = tracks.find((t) => t.id === "trk_aux")!.notes;
+        assert(aux.some((n) => n.pitch === 36 && Math.abs(n.startTick - (8 * barTicks - 960)) <= 480), `verse-end cadence kick missing (${label})`);
+        assert(aux.some((n) => n.pitch === 36 && Math.abs(n.startTick - (16 * barTicks - 960)) <= 480), `chorus-end cadence kick missing (${label})`);
+        // M14 — timpani follow hits at mid-piece chord changes (Dm7→G7 at bar 2).
+        const boundaryOrCadence = new Set<number>([8 * barTicks, 15 * barTicks, 16 * barTicks]);
+        const follows = timpani.notes.filter((n) => n.startTick < 8 * barTicks && !boundaryOrCadence.has(n.startTick));
+        assert(follows.length > 0, `timpani chord-change follow hit missing (${label})`);
+        if (label === "s6") firstBattery = battery(tracks);
+        else assert(firstBattery !== battery(tracks), "cross-seed battery variance lost (M14 D3 law)");
       }
-      return "tuning stays put mid-phrase and only retunes inside ≥2-measure rests; no overlapping gestures";
+      return "tuning rest law + ledger hold; M14: ghost 16th figures, all-cadence aux kicks, chord-change follows, cross-seed variance";
     }),
     timed("Percussion metadata validators: malletType/velocityTier/isRoll", () => {
       const happy = fixture();

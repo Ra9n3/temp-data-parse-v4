@@ -13139,9 +13139,48 @@
   "id": "trk_timpani",
   "notes": [
    {
+    "pitch": 43,
+    "startTick": 7680,
+    "durationTicks": 432,
+    "velocity": 107,
+    "dynamics": {
+     "cc11Value": 96,
+     "cc74Value": 88,
+     "attenuationActive": false
+    },
+    "velocityTier": "ACCENT",
+    "malletType": "HARD_WOOD"
+   },
+   {
+    "pitch": 43,
+    "startTick": 8400,
+    "durationTicks": 432,
+    "velocity": 86,
+    "dynamics": {
+     "cc11Value": 77,
+     "cc74Value": 79,
+     "attenuationActive": false
+    },
+    "velocityTier": "GROOVE",
+    "malletType": "SOFT_FELT"
+   },
+   {
+    "pitch": 41,
+    "startTick": 19200,
+    "durationTicks": 432,
+    "velocity": 107,
+    "dynamics": {
+     "cc11Value": 96,
+     "cc74Value": 88,
+     "attenuationActive": false
+    },
+    "velocityTier": "ACCENT",
+    "malletType": "HARD_WOOD"
+   },
+   {
     "pitch": 50,
     "startTick": 30720,
-    "durationTicks": 480,
+    "durationTicks": 432,
     "velocity": 110,
     "dynamics": {
      "cc11Value": 99,
@@ -13153,8 +13192,73 @@
    },
    {
     "pitch": 50,
+    "startTick": 31200,
+    "durationTicks": 432,
+    "velocity": 88,
+    "dynamics": {
+     "cc11Value": 79,
+     "cc74Value": 80,
+     "attenuationActive": false
+    },
+    "velocityTier": "GROOVE",
+    "malletType": "SOFT_FELT"
+   },
+   {
+    "pitch": 43,
+    "startTick": 40320,
+    "durationTicks": 432,
+    "velocity": 110,
+    "dynamics": {
+     "cc11Value": 99,
+     "cc74Value": 90,
+     "attenuationActive": false
+    },
+    "velocityTier": "ACCENT",
+    "malletType": "HARD_WOOD"
+   },
+   {
+    "pitch": 43,
+    "startTick": 40800,
+    "durationTicks": 432,
+    "velocity": 88,
+    "dynamics": {
+     "cc11Value": 79,
+     "cc74Value": 80,
+     "attenuationActive": false
+    },
+    "velocityTier": "GROOVE",
+    "malletType": "SOFT_FELT"
+   },
+   {
+    "pitch": 50,
+    "startTick": 49920,
+    "durationTicks": 432,
+    "velocity": 110,
+    "dynamics": {
+     "cc11Value": 99,
+     "cc74Value": 90,
+     "attenuationActive": false
+    },
+    "velocityTier": "ACCENT",
+    "malletType": "HARD_WOOD"
+   },
+   {
+    "pitch": 50,
+    "startTick": 50400,
+    "durationTicks": 432,
+    "velocity": 88,
+    "dynamics": {
+     "cc11Value": 79,
+     "cc74Value": 80,
+     "attenuationActive": false
+    },
+    "velocityTier": "GROOVE",
+    "malletType": "SOFT_FELT"
+   },
+   {
+    "pitch": 50,
     "startTick": 60480,
-    "durationTicks": 960,
+    "durationTicks": 432,
     "velocity": 110,
     "dynamics": {
      "cc11Value": 99,
@@ -13195,12 +13299,24 @@
    },
    {
     "pitch": 38,
-    "startTick": 32640,
+    "startTick": 32160,
     "durationTicks": 120,
-    "velocity": 26,
+    "velocity": 22,
     "dynamics": {
-     "cc11Value": 23,
-     "cc74Value": 52,
+     "cc11Value": 20,
+     "cc74Value": 50,
+     "attenuationActive": false
+    },
+    "velocityTier": "GHOST"
+   },
+   {
+    "pitch": 38,
+    "startTick": 32880,
+    "durationTicks": 120,
+    "velocity": 30,
+    "dynamics": {
+     "cc11Value": 27,
+     "cc74Value": 54,
      "attenuationActive": false
     },
     "velocityTier": "GHOST"
@@ -13219,19 +13335,31 @@
    },
    {
     "pitch": 38,
+    "startTick": 34320,
+    "durationTicks": 120,
+    "velocity": 22,
+    "dynamics": {
+     "cc11Value": 20,
+     "cc74Value": 50,
+     "attenuationActive": false
+    },
+    "velocityTier": "GHOST"
+   },
+   {
+    "pitch": 38,
     "startTick": 34560,
     "durationTicks": 120,
-    "velocity": 26,
+    "velocity": 22,
     "dynamics": {
-     "cc11Value": 23,
-     "cc74Value": 52,
+     "cc11Value": 20,
+     "cc74Value": 50,
      "attenuationActive": false
     },
     "velocityTier": "GHOST"
    },
    {
     "pitch": 38,
-    "startTick": 35520,
+    "startTick": 35760,
     "durationTicks": 120,
     "velocity": 22,
     "dynamics": {
@@ -13243,19 +13371,7 @@
    },
    {
     "pitch": 38,
-    "startTick": 36480,
-    "durationTicks": 120,
-    "velocity": 26,
-    "dynamics": {
-     "cc11Value": 23,
-     "cc74Value": 52,
-     "attenuationActive": false
-    },
-    "velocityTier": "GHOST"
-   },
-   {
-    "pitch": 38,
-    "startTick": 37440,
+    "startTick": 36240,
     "durationTicks": 120,
     "velocity": 22,
     "dynamics": {
@@ -13267,19 +13383,43 @@
    },
    {
     "pitch": 38,
-    "startTick": 38400,
+    "startTick": 36960,
     "durationTicks": 120,
-    "velocity": 26,
+    "velocity": 30,
     "dynamics": {
-     "cc11Value": 23,
-     "cc74Value": 52,
+     "cc11Value": 27,
+     "cc74Value": 54,
      "attenuationActive": false
     },
     "velocityTier": "GHOST"
    },
    {
     "pitch": 38,
-    "startTick": 39360,
+    "startTick": 37680,
+    "durationTicks": 120,
+    "velocity": 22,
+    "dynamics": {
+     "cc11Value": 20,
+     "cc74Value": 50,
+     "attenuationActive": false
+    },
+    "velocityTier": "GHOST"
+   },
+   {
+    "pitch": 38,
+    "startTick": 38640,
+    "durationTicks": 120,
+    "velocity": 22,
+    "dynamics": {
+     "cc11Value": 20,
+     "cc74Value": 50,
+     "attenuationActive": false
+    },
+    "velocityTier": "GHOST"
+   },
+   {
+    "pitch": 38,
+    "startTick": 39840,
     "durationTicks": 120,
     "velocity": 22,
     "dynamics": {
@@ -13293,17 +13433,29 @@
     "pitch": 38,
     "startTick": 40320,
     "durationTicks": 120,
-    "velocity": 26,
+    "velocity": 22,
     "dynamics": {
-     "cc11Value": 23,
-     "cc74Value": 52,
+     "cc11Value": 20,
+     "cc74Value": 50,
      "attenuationActive": false
     },
     "velocityTier": "GHOST"
    },
    {
     "pitch": 38,
-    "startTick": 41280,
+    "startTick": 41040,
+    "durationTicks": 120,
+    "velocity": 30,
+    "dynamics": {
+     "cc11Value": 27,
+     "cc74Value": 54,
+     "attenuationActive": false
+    },
+    "velocityTier": "GHOST"
+   },
+   {
+    "pitch": 38,
+    "startTick": 41760,
     "durationTicks": 120,
     "velocity": 22,
     "dynamics": {
@@ -13315,19 +13467,7 @@
    },
    {
     "pitch": 38,
-    "startTick": 42240,
-    "durationTicks": 120,
-    "velocity": 26,
-    "dynamics": {
-     "cc11Value": 23,
-     "cc74Value": 52,
-     "attenuationActive": false
-    },
-    "velocityTier": "GHOST"
-   },
-   {
-    "pitch": 38,
-    "startTick": 43200,
+    "startTick": 42720,
     "durationTicks": 120,
     "velocity": 22,
     "dynamics": {
@@ -13339,12 +13479,24 @@
    },
    {
     "pitch": 38,
-    "startTick": 44160,
+    "startTick": 43920,
     "durationTicks": 120,
-    "velocity": 26,
+    "velocity": 22,
     "dynamics": {
-     "cc11Value": 23,
-     "cc74Value": 52,
+     "cc11Value": 20,
+     "cc74Value": 50,
+     "attenuationActive": false
+    },
+    "velocityTier": "GHOST"
+   },
+   {
+    "pitch": 38,
+    "startTick": 44400,
+    "durationTicks": 120,
+    "velocity": 22,
+    "dynamics": {
+     "cc11Value": 20,
+     "cc74Value": 50,
      "attenuationActive": false
     },
     "velocityTier": "GHOST"
@@ -13352,6 +13504,18 @@
    {
     "pitch": 38,
     "startTick": 45120,
+    "durationTicks": 120,
+    "velocity": 30,
+    "dynamics": {
+     "cc11Value": 27,
+     "cc74Value": 54,
+     "attenuationActive": false
+    },
+    "velocityTier": "GHOST"
+   },
+   {
+    "pitch": 38,
+    "startTick": 45840,
     "durationTicks": 120,
     "velocity": 22,
     "dynamics": {
@@ -13365,17 +13529,17 @@
     "pitch": 38,
     "startTick": 46080,
     "durationTicks": 120,
-    "velocity": 26,
+    "velocity": 22,
     "dynamics": {
-     "cc11Value": 23,
-     "cc74Value": 52,
+     "cc11Value": 20,
+     "cc74Value": 50,
      "attenuationActive": false
     },
     "velocityTier": "GHOST"
    },
    {
     "pitch": 38,
-    "startTick": 47040,
+    "startTick": 46800,
     "durationTicks": 120,
     "velocity": 22,
     "dynamics": {
@@ -13389,17 +13553,17 @@
     "pitch": 38,
     "startTick": 48000,
     "durationTicks": 120,
-    "velocity": 26,
+    "velocity": 22,
     "dynamics": {
-     "cc11Value": 23,
-     "cc74Value": 52,
+     "cc11Value": 20,
+     "cc74Value": 50,
      "attenuationActive": false
     },
     "velocityTier": "GHOST"
    },
    {
     "pitch": 38,
-    "startTick": 48960,
+    "startTick": 48480,
     "durationTicks": 120,
     "velocity": 22,
     "dynamics": {
@@ -13411,12 +13575,24 @@
    },
    {
     "pitch": 38,
-    "startTick": 49920,
+    "startTick": 49200,
     "durationTicks": 120,
-    "velocity": 26,
+    "velocity": 30,
     "dynamics": {
-     "cc11Value": 23,
-     "cc74Value": 52,
+     "cc11Value": 27,
+     "cc74Value": 54,
+     "attenuationActive": false
+    },
+    "velocityTier": "GHOST"
+   },
+   {
+    "pitch": 38,
+    "startTick": 50160,
+    "durationTicks": 120,
+    "velocity": 22,
+    "dynamics": {
+     "cc11Value": 20,
+     "cc74Value": 50,
      "attenuationActive": false
     },
     "velocityTier": "GHOST"
@@ -13435,19 +13611,7 @@
    },
    {
     "pitch": 38,
-    "startTick": 51840,
-    "durationTicks": 120,
-    "velocity": 26,
-    "dynamics": {
-     "cc11Value": 23,
-     "cc74Value": 52,
-     "attenuationActive": false
-    },
-    "velocityTier": "GHOST"
-   },
-   {
-    "pitch": 38,
-    "startTick": 52800,
+    "startTick": 52080,
     "durationTicks": 120,
     "velocity": 22,
     "dynamics": {
@@ -13459,19 +13623,7 @@
    },
    {
     "pitch": 38,
-    "startTick": 53760,
-    "durationTicks": 120,
-    "velocity": 26,
-    "dynamics": {
-     "cc11Value": 23,
-     "cc74Value": 52,
-     "attenuationActive": false
-    },
-    "velocityTier": "GHOST"
-   },
-   {
-    "pitch": 38,
-    "startTick": 54720,
+    "startTick": 52560,
     "durationTicks": 120,
     "velocity": 22,
     "dynamics": {
@@ -13483,12 +13635,48 @@
    },
    {
     "pitch": 38,
-    "startTick": 55680,
+    "startTick": 53280,
     "durationTicks": 120,
-    "velocity": 26,
+    "velocity": 30,
     "dynamics": {
-     "cc11Value": 23,
-     "cc74Value": 52,
+     "cc11Value": 27,
+     "cc74Value": 54,
+     "attenuationActive": false
+    },
+    "velocityTier": "GHOST"
+   },
+   {
+    "pitch": 38,
+    "startTick": 54240,
+    "durationTicks": 120,
+    "velocity": 22,
+    "dynamics": {
+     "cc11Value": 20,
+     "cc74Value": 50,
+     "attenuationActive": false
+    },
+    "velocityTier": "GHOST"
+   },
+   {
+    "pitch": 38,
+    "startTick": 54960,
+    "durationTicks": 120,
+    "velocity": 22,
+    "dynamics": {
+     "cc11Value": 20,
+     "cc74Value": 50,
+     "attenuationActive": false
+    },
+    "velocityTier": "GHOST"
+   },
+   {
+    "pitch": 38,
+    "startTick": 56160,
+    "durationTicks": 120,
+    "velocity": 22,
+    "dynamics": {
+     "cc11Value": 20,
+     "cc74Value": 50,
      "attenuationActive": false
     },
     "velocityTier": "GHOST"
@@ -13507,19 +13695,31 @@
    },
    {
     "pitch": 38,
-    "startTick": 57600,
+    "startTick": 57360,
     "durationTicks": 120,
-    "velocity": 26,
+    "velocity": 30,
     "dynamics": {
-     "cc11Value": 23,
-     "cc74Value": 52,
+     "cc11Value": 27,
+     "cc74Value": 54,
      "attenuationActive": false
     },
     "velocityTier": "GHOST"
    },
    {
     "pitch": 38,
-    "startTick": 58560,
+    "startTick": 57600,
+    "durationTicks": 120,
+    "velocity": 30,
+    "dynamics": {
+     "cc11Value": 27,
+     "cc74Value": 54,
+     "attenuationActive": false
+    },
+    "velocityTier": "GHOST"
+   },
+   {
+    "pitch": 38,
+    "startTick": 58320,
     "durationTicks": 120,
     "velocity": 22,
     "dynamics": {
@@ -13531,19 +13731,31 @@
    },
    {
     "pitch": 38,
-    "startTick": 59520,
+    "startTick": 59040,
     "durationTicks": 120,
-    "velocity": 26,
+    "velocity": 22,
     "dynamics": {
-     "cc11Value": 23,
-     "cc74Value": 52,
+     "cc11Value": 20,
+     "cc74Value": 50,
      "attenuationActive": false
     },
     "velocityTier": "GHOST"
    },
    {
     "pitch": 38,
-    "startTick": 60480,
+    "startTick": 60240,
+    "durationTicks": 120,
+    "velocity": 22,
+    "dynamics": {
+     "cc11Value": 20,
+     "cc74Value": 50,
+     "attenuationActive": false
+    },
+    "velocityTier": "GHOST"
+   },
+   {
+    "pitch": 38,
+    "startTick": 60720,
     "durationTicks": 120,
     "velocity": 22,
     "dynamics": {
@@ -13574,10 +13786,10 @@
     "pitch": 49,
     "startTick": 16320,
     "durationTicks": 672,
-    "velocity": 33,
+    "velocity": 30,
     "dynamics": {
-     "cc11Value": 31,
-     "cc74Value": 55,
+     "cc11Value": 25,
+     "cc74Value": 54,
      "attenuationActive": false
     },
     "velocityTier": "GHOST"
@@ -13586,10 +13798,10 @@
     "pitch": 49,
     "startTick": 17280,
     "durationTicks": 672,
-    "velocity": 35,
+    "velocity": 30,
     "dynamics": {
-     "cc11Value": 37,
-     "cc74Value": 56,
+     "cc11Value": 25,
+     "cc74Value": 54,
      "attenuationActive": false
     },
     "velocityTier": "GHOST"
@@ -13598,10 +13810,10 @@
     "pitch": 49,
     "startTick": 18240,
     "durationTicks": 672,
-    "velocity": 38,
+    "velocity": 30,
     "dynamics": {
-     "cc11Value": 42,
-     "cc74Value": 57,
+     "cc11Value": 25,
+     "cc74Value": 54,
      "attenuationActive": false
     },
     "velocityTier": "GHOST"
@@ -13610,22 +13822,22 @@
     "pitch": 49,
     "startTick": 19200,
     "durationTicks": 672,
-    "velocity": 41,
+    "velocity": 30,
     "dynamics": {
-     "cc11Value": 48,
-     "cc74Value": 58,
+     "cc11Value": 25,
+     "cc74Value": 54,
      "attenuationActive": false
     },
-    "velocityTier": "GROOVE"
+    "velocityTier": "GHOST"
    },
    {
     "pitch": 49,
     "startTick": 20160,
     "durationTicks": 672,
-    "velocity": 43,
+    "velocity": 50,
     "dynamics": {
-     "cc11Value": 54,
-     "cc74Value": 59,
+     "cc11Value": 69,
+     "cc74Value": 63,
      "attenuationActive": false
     },
     "velocityTier": "GROOVE"
@@ -13634,10 +13846,10 @@
     "pitch": 49,
     "startTick": 21120,
     "durationTicks": 672,
-    "velocity": 46,
+    "velocity": 50,
     "dynamics": {
-     "cc11Value": 60,
-     "cc74Value": 61,
+     "cc11Value": 69,
+     "cc74Value": 63,
      "attenuationActive": false
     },
     "velocityTier": "GROOVE"
@@ -13646,10 +13858,10 @@
     "pitch": 49,
     "startTick": 22080,
     "durationTicks": 672,
-    "velocity": 49,
+    "velocity": 50,
     "dynamics": {
-     "cc11Value": 66,
-     "cc74Value": 62,
+     "cc11Value": 69,
+     "cc74Value": 63,
      "attenuationActive": false
     },
     "velocityTier": "GROOVE"
@@ -13658,9 +13870,9 @@
     "pitch": 49,
     "startTick": 23040,
     "durationTicks": 672,
-    "velocity": 51,
+    "velocity": 50,
     "dynamics": {
-     "cc11Value": 71,
+     "cc11Value": 69,
      "cc74Value": 63,
      "attenuationActive": false
     },
@@ -13670,10 +13882,10 @@
     "pitch": 49,
     "startTick": 24000,
     "durationTicks": 672,
-    "velocity": 54,
+    "velocity": 50,
     "dynamics": {
-     "cc11Value": 77,
-     "cc74Value": 64,
+     "cc11Value": 69,
+     "cc74Value": 63,
      "attenuationActive": false
     },
     "velocityTier": "GROOVE"
@@ -13682,10 +13894,10 @@
     "pitch": 49,
     "startTick": 24960,
     "durationTicks": 672,
-    "velocity": 57,
+    "velocity": 70,
     "dynamics": {
-     "cc11Value": 83,
-     "cc74Value": 66,
+     "cc11Value": 112,
+     "cc74Value": 72,
      "attenuationActive": false
     },
     "velocityTier": "GROOVE"
@@ -13694,10 +13906,10 @@
     "pitch": 49,
     "startTick": 25920,
     "durationTicks": 672,
-    "velocity": 59,
+    "velocity": 70,
     "dynamics": {
-     "cc11Value": 89,
-     "cc74Value": 67,
+     "cc11Value": 112,
+     "cc74Value": 72,
      "attenuationActive": false
     },
     "velocityTier": "GROOVE"
@@ -13706,10 +13918,10 @@
     "pitch": 49,
     "startTick": 26880,
     "durationTicks": 672,
-    "velocity": 62,
+    "velocity": 70,
     "dynamics": {
-     "cc11Value": 95,
-     "cc74Value": 68,
+     "cc11Value": 112,
+     "cc74Value": 72,
      "attenuationActive": false
     },
     "velocityTier": "GROOVE"
@@ -13718,10 +13930,10 @@
     "pitch": 49,
     "startTick": 27840,
     "durationTicks": 672,
-    "velocity": 65,
+    "velocity": 70,
     "dynamics": {
-     "cc11Value": 100,
-     "cc74Value": 69,
+     "cc11Value": 112,
+     "cc74Value": 72,
      "attenuationActive": false
     },
     "velocityTier": "GROOVE"
@@ -13730,10 +13942,10 @@
     "pitch": 49,
     "startTick": 28800,
     "durationTicks": 672,
-    "velocity": 67,
+    "velocity": 70,
     "dynamics": {
-     "cc11Value": 106,
-     "cc74Value": 70,
+     "cc11Value": 112,
+     "cc74Value": 72,
      "attenuationActive": false
     },
     "velocityTier": "GROOVE"
@@ -13742,10 +13954,10 @@
     "pitch": 49,
     "startTick": 29760,
     "durationTicks": 672,
-    "velocity": 70,
+    "velocity": 90,
     "dynamics": {
-     "cc11Value": 112,
-     "cc74Value": 72,
+     "cc11Value": 127,
+     "cc74Value": 81,
      "attenuationActive": false
     },
     "velocityTier": "GROOVE"
@@ -13767,6 +13979,18 @@
  {
   "id": "trk_aux",
   "notes": [
+   {
+    "pitch": 36,
+    "startTick": 29760,
+    "durationTicks": 480,
+    "velocity": 84,
+    "dynamics": {
+     "cc11Value": 76,
+     "cc74Value": 78,
+     "attenuationActive": false
+    },
+    "velocityTier": "GROOVE"
+   },
    {
     "pitch": 51,
     "startTick": 30720,
@@ -13963,10 +14187,10 @@
     "pitch": 36,
     "startTick": 60480,
     "durationTicks": 480,
-    "velocity": 96,
+    "velocity": 108,
     "dynamics": {
-     "cc11Value": 86,
-     "cc74Value": 83,
+     "cc11Value": 97,
+     "cc74Value": 89,
      "attenuationActive": false
     },
     "velocityTier": "ACCENT"
