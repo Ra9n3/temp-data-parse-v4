@@ -1,6 +1,5 @@
 import type { ReactNode } from "react";
 import { Ph } from "../icons";
-import { ScorchMark } from "./ScorchMark";
 import {
   MODE_LABELS,
   MODE_NAMES,
@@ -69,14 +68,18 @@ export function TopBar({
 
   return (
     <header className="flex h-14 shrink-0 items-center gap-3 border-b border-white/10 bg-[#0e1016] px-3">
+      {/* Patch 1a: the brand block (ScorchMark + wordmark) is gone; ScorchMark
+       * remains used by AboutDialog, so its import survives there. Patch 1b:
+       * the settings pill owns the leftover flex region — it must SHRINK: the
+       * root cause of the Compose All overlap was the native <select> children's
+       * min-width:auto, which kept the pill wider than its flex-1 area. Chosen
+       * approach (first preference): crush — pill min-w-0 + overflow-hidden,
+       * every select min-w-0 (closed value truncates), Orchestration shrink-0.
+       * Compose All is a plain flex sibling AFTER this block, so with the pill
+       * clamped it can never be overlapped. */}
       <div className="flex min-w-0 flex-1 items-center gap-2">
-        <ScorchMark className="h-8 w-8 rounded-lg" />
-        <div className="mr-2 hidden leading-tight sm:block">
-          <div className="text-sm font-semibold tracking-wide text-stone-100">SCORCH</div>
-          <div className="font-mono text-[10px] text-stone-500">orchestral midi</div>
-        </div>
-        <div className="flex items-center gap-1.5 rounded-full border border-white/10 bg-[#161922] px-2 py-1">
-          <label className="flex items-center gap-1 text-[11px] text-stone-400">
+        <div className="flex min-w-0 overflow-hidden items-center gap-1.5 rounded-full border border-white/10 bg-[#161922] px-2 py-1">
+          <label className="flex shrink-0 items-center gap-1 text-[11px] text-stone-400">
             BPM
             <input
               type="number"
@@ -90,7 +93,7 @@ export function TopBar({
           <select
             value={project.key}
             onChange={(e) => onKey(Number(e.target.value) as PitchClass)}
-            className="rounded-md bg-black/30 px-1.5 py-0.5 text-xs text-stone-100 outline-none ring-1 ring-white/10"
+            className="min-w-0 rounded-md bg-black/30 px-1.5 py-0.5 text-xs text-stone-100 outline-none ring-1 ring-white/10"
             title="Key"
           >
             {PITCH_CLASS_NAMES.map((n, i) => (
@@ -102,7 +105,7 @@ export function TopBar({
           <select
             value={project.mode}
             onChange={(e) => onMode(e.target.value as ModeName)}
-            className="max-w-[9.5rem] rounded-md bg-black/30 px-1.5 py-0.5 text-xs text-stone-100 outline-none ring-1 ring-white/10"
+            className="min-w-0 max-w-[9.5rem] rounded-md bg-black/30 px-1.5 py-0.5 text-xs text-stone-100 outline-none ring-1 ring-white/10"
             title="Mode"
           >
             {MODE_NAMES.map((m) => (
@@ -117,7 +120,7 @@ export function TopBar({
               const [n, d] = e.target.value.split("/").map(Number);
               onTimeSignature({ numerator: n, denominator: d });
             }}
-            className="font-mono rounded-md bg-black/30 px-1.5 py-0.5 text-xs text-stone-100 outline-none ring-1 ring-white/10"
+            className="font-mono min-w-0 rounded-md bg-black/30 px-1.5 py-0.5 text-xs text-stone-100 outline-none ring-1 ring-white/10"
             title="Time signature"
           >
             {TIME_SIGNATURES.map((ts) => (
@@ -128,11 +131,11 @@ export function TopBar({
           </select>
           <select aria-label="Orchestral style preset" value={project.generationSettings?.orchestralStyle ?? "Classical Symphonic"}
             onChange={(e) => onOrchestralStyle(e.target.value as NonNullable<Project["generationSettings"]>["orchestralStyle"])}
-            className="max-w-[10rem] rounded-md bg-black/30 px-1.5 py-0.5 text-xs text-stone-100 outline-none ring-1 ring-white/10">
+            className="min-w-0 max-w-[10rem] rounded-md bg-black/30 px-1.5 py-0.5 text-xs text-stone-100 outline-none ring-1 ring-white/10">
             {["Epic Cinematic", "Classical Symphonic", "Chamber Strings", "Pop/Rock Studio Orchestra", "Jazz Big Band", "Custom"].map((style) => <option key={style}>{style}</option>)}
           </select>
           <button type="button" aria-label="Orchestral configuration and humanization" title="Orchestral configuration and humanization" onClick={onOpenGenerationSettings}
-            className="rounded-md bg-orange-500/15 px-2 py-1 text-[11px] text-orange-200 ring-1 ring-orange-400/20 hover:bg-orange-500/25">Orchestration</button>
+            className="shrink-0 rounded-md bg-orange-500/15 px-2 py-1 text-[11px] text-orange-200 ring-1 ring-orange-400/20 hover:bg-orange-500/25">Orchestration</button>
         </div>
       </div>
 

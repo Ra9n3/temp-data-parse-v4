@@ -28,7 +28,7 @@ export interface ToastItem {
 
 export function Toasts({ items, onDismiss }: { items: ToastItem[]; onDismiss: (id: string) => void }) {
   return (
-    <div className="pointer-events-none fixed bottom-6 right-6 z-50 flex w-80 flex-col gap-2">
+    <div className="pointer-events-none fixed bottom-6 right-6 z-[70] flex w-80 flex-col gap-2">
       {items.map((t) => (
         <div
           key={t.id}
@@ -588,7 +588,7 @@ function Modal({
   wide?: boolean;
 }) {
   return (
-    <div className="fixed inset-0 z-40 grid place-items-center bg-black/60 p-4" onClick={onClose}>
+    <div className="fixed inset-0 z-[70] grid place-items-center bg-black/60 p-4" onClick={onClose}>
       <div
         className={cn("max-h-[90vh] overflow-auto rounded-xl border border-white/10 bg-[#161821] p-4 shadow-2xl", wide ? "w-[720px]" : "w-[480px]")}
         onClick={(e) => e.stopPropagation()}

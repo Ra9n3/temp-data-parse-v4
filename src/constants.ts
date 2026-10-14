@@ -1,6 +1,7 @@
 export const HEADER_WIDTH = 340;
 export const ROW_HEIGHT = 72;
-export const RULER_HEIGHT = 44;
+/** Patch 2a — the ruler is just bar numbers now: one tight 24px band. */
+export const RULER_HEIGHT = 24;
 export const ADD_ROW_HEIGHT = 48;
 export const DEFAULT_PPT = 0.052;
 export const MIN_PPT = 0.012;

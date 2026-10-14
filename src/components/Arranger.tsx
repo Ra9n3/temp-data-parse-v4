@@ -10,7 +10,6 @@ import { HEADER_WIDTH, ROW_HEIGHT, RULER_HEIGHT, ADD_ROW_HEIGHT, MIN_PPT, MAX_PP
 import { TrackHeader } from "./TrackHeader";
 import { Ph } from "../icons";
 import {
-  DEFAULT_EXPRESSION_MAPPING,
   FAMILIES,
   FAMILY_COLORS,
   PITCH_CLASS_NAMES,
@@ -95,11 +94,13 @@ function drawTimelineGrid(
         : ruler
           ? "rgba(255,255,255,0.08)"
           : "rgba(255,255,255,0.04)";
-      const top = ruler ? (isBar ? 12 : 22) : 0;
+      // Patch 2a — the 24px ruler: bar lines run the FULL band, beat ticks sit
+      // in the lower half, numbers baseline 19 (no dead 44-era offsets).
+      const top = ruler ? (isBar ? 0 : 14) : 0;
       ctx.fillRect(x, top, 1, height - top);
       if (ruler && isBar) {
         ctx.fillStyle = "#a8a29e";
-        ctx.fillText(String(bar + 1), x + 4, 14);
+        ctx.fillText(String(bar + 1), x + 5, 19);
       }
     }
   }
@@ -344,8 +345,15 @@ export function Arranger(props: Props) {
         >
           <span className="font-mono text-[10px] text-stone-500">BAR / BEAT</span>
         </div>
+        {/* Patch 2b — the ruler band: OPAQUE (solid #12141c canvas + solid row
+         * bg), overflow-hidden, and strictly ABOVE every lane layer so content
+         * scrolls UNDER it invisibly. Explicit z hierarchy (audit result):
+         * lanes 0 < lane blocks z-10 < ruler z-30 < sticky headers z-40 <
+         * playhead z-[45] < in-row editor popups z-[50] < app dialogs z-[60] <
+         * toasts z-[70]. */}
         <div
-          className="sticky top-0 z-30 border-b border-white/10 bg-[#12141c]"
+          className="sticky top-0 z-30 overflow-hidden border-b border-white/10 bg-[#12141c]"
+          style={{ zIndex: 30 }}
           onMouseDown={(e) => onSeek(tickFromEvent(e, e.currentTarget))}
         >
           <Ruler width={timelineWidth} height={RULER_HEIGHT} ppt={ppt} tpBar={tpBar} tpb={tpb} />
@@ -402,7 +410,7 @@ export function Arranger(props: Props) {
               Add Track
             </button>
             {addOpen && (
-              <div className="absolute bottom-10 left-3 z-50 w-40 rounded-md border border-white/10 bg-[#1a1d27] py-1 shadow-xl">
+              <div className="absolute bottom-10 left-3 z-[50] w-40 rounded-md border border-white/10 bg-[#1a1d27] py-1 shadow-xl">
                 {FAMILIES.filter((f) => f !== "structure" && f !== "audio").map((f) => (
                   <button
                     key={f}
@@ -423,8 +431,11 @@ export function Arranger(props: Props) {
         </div>
         <div className="border-t border-white/5 bg-[#0e1016]" />
 
+        {/* Playhead: patch 2b hierarchy — starts exactly at the ruler's bottom
+         * edge (top derives from RULER_HEIGHT) and rides ABOVE the sticky
+         * header tier. */}
         <div
-          className="pointer-events-none absolute z-[25] w-0.5 bg-gradient-to-b from-amber-300 via-orange-400 to-rose-500"
+          className="pointer-events-none absolute z-[45] w-0.5 bg-gradient-to-b from-amber-300 via-orange-400 to-rose-500"
           style={{
             left: HEADER_WIDTH + playheadTick * ppt,
             top: RULER_HEIGHT,
@@ -481,7 +492,7 @@ function TrackRow(props: {
           onSolo={props.onToggleSolo}
           onLock={props.onToggleLock}
           onOpenVst={props.onOpenVst}
-          onLoadAudio={props.onLoadAudio}                onExpressionMapping={(expressionMapping) => props.onPatchProject({ tracks: project.tracks.map((item) => ({ ...item, expressionMapping: item.id === track.id ? expressionMapping : (item.expressionMapping ?? DEFAULT_EXPRESSION_MAPPING) })) })}
+          onLoadAudio={props.onLoadAudio}
 
         />
       </div>
@@ -884,7 +895,7 @@ function ChordEditor({ chord, onDone }: { chord: Chord; onDone: (symbol: string)
   };
 
   return (
-    <div className="absolute inset-1 z-30 overflow-auto rounded bg-[#131720] p-1.5 shadow-xl" onMouseDown={(event) => event.stopPropagation()}>
+    <div className="absolute inset-1 z-[50] overflow-auto rounded bg-[#131720] p-1.5 shadow-xl" onMouseDown={(event) => event.stopPropagation()}>
       <div className="flex gap-1"><select aria-label="Chord root" className="w-12 rounded bg-black/60 text-[10px]" value={parsedRoot} onChange={(e) => update(PITCH_CLASS_NAMES[Number(e.target.value)])}>{PITCH_CLASS_NAMES.map((name, index) => <option key={name} value={index}>{name}</option>)}</select><input aria-label="Chord symbol" autoFocus value={v} onChange={(e) => setV(e.target.value)} onKeyDown={(e) => { if (e.key === "Enter") onDone(v.trim() || chord.symbol); if (e.key === "Escape") onDone(chord.symbol); e.stopPropagation(); }} className={cn("min-w-0 flex-1 rounded bg-black/50 px-1 py-0.5 text-[10px] outline-none", parsed.ok ? "text-sky-100" : "text-red-300")} /><select aria-label="Slash chord bass" className="w-12 rounded bg-black/60 text-[10px]" value={parsedBass === null ? "none" : parsedBass} onChange={(e) => update(rootName, quality, selectedExtensions, e.target.value === "none" ? null : Number(e.target.value) as PitchClass)}><option value="none">/—</option>{PITCH_CLASS_NAMES.map((name, index) => <option key={name} value={index}>/{name}</option>)}</select></div>
       <div role="group" aria-label="Chord quality" className="mt-1 flex flex-wrap gap-0.5">{[["major", "Maj"], ["minor", "Min"], ["diminished", "Dim"], ["augmented", "Aug"], ["sus2", "Sus2"], ["sus4", "Sus4"]].map(([value, label]) => <button key={value} type="button" aria-pressed={quality === value} className={cn("rounded px-1 py-0.5 text-[9px]", quality === value ? "bg-sky-500/40 text-white" : "bg-white/5 text-stone-400")} onClick={() => update(rootName, value)}>{label}</button>)}</div>
       <div className="mt-1 flex flex-wrap gap-0.5">{extensionNames.map((extension) => { const active = selectedExtensions.includes(extension); return <button key={extension} type="button" aria-pressed={active} className={cn("rounded px-1 py-0.5 text-[9px]", active ? "bg-orange-500/40 text-orange-100" : "bg-white/5 text-stone-400")} onClick={() => update(rootName, quality, active ? selectedExtensions.filter((item) => item !== extension) : [...selectedExtensions, extension])}>{extension}</button>; })}</div>

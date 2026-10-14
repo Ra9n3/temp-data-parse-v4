@@ -1,7 +1,6 @@
 import type { ReactNode } from "react";
 import { Ph } from "../icons";
-import { useState } from "react";
-import { DEFAULT_EXPRESSION_MAPPING, type ExpressionMapping, type Track } from "../shared/schema/types";
+import { type Track } from "../shared/schema/types";
 import { cn } from "../utils/cn";
 
 interface Props {
@@ -12,7 +11,6 @@ interface Props {
   onLock: () => void;
   onOpenVst: () => void;
   onLoadAudio?: () => void;
-  onExpressionMapping: (mapping: ExpressionMapping) => void;
 }
 
 export function TrackHeader({
@@ -23,10 +21,11 @@ export function TrackHeader({
   onLock,
   onOpenVst,
   onLoadAudio,
-  onExpressionMapping,
 }: Props) {
-  const [expressionOpen, setExpressionOpen] = useState(false);
-  const mapping = track.expressionMapping ?? DEFAULT_EXPRESSION_MAPPING;
+  // Patch 4 — the "CC" button, its popup and the expression-editor callback
+  // are REMOVED from the UI. track.expressionMapping itself stays in the
+  // schema, in exporter defaults/fallbacks and in import/export — only the
+  // manual editor is gone (the pinned custom-CC exporter test is untouched).
   const isAudio = track.role === "audio";
   const isStructure = track.family === "structure";
   const vstDisabled = isStructure || isAudio;
@@ -70,12 +69,6 @@ export function TrackHeader({
               <span className="truncate">{vstDisabled ? "—" : pluginLabel}</span>
             </button>
           )}
-          {!vstDisabled && <button type="button" aria-label={`Expression mapping for ${track.name}`} title="Expression map and CC assignments" onClick={() => setExpressionOpen((open) => !open)} className="mt-1 ml-1 rounded bg-white/5 px-1.5 py-0.5 text-[10px] text-stone-300 ring-1 ring-white/10 hover:bg-white/10">CC</button>}
-          {expressionOpen && !vstDisabled && <div role="dialog" aria-label={`Expression mapping for ${track.name}`} className="absolute left-2 top-11 z-[80] w-64 rounded-lg border border-white/10 bg-[#191c26] p-3 text-stone-200 shadow-2xl" onMouseDown={(event) => event.stopPropagation()}>
-            <div className="mb-2 flex items-center justify-between"><strong className="text-xs">Expression map</strong><button type="button" aria-label="Close expression mapping" onClick={() => setExpressionOpen(false)}>×</button></div>
-            <select aria-label="Expression map preset" className="mb-2 w-full rounded bg-black/40 p-1.5 text-xs" value={mapping.preset} onChange={(event) => onExpressionMapping({ ...mapping, preset: event.target.value as ExpressionMapping["preset"] })}>{["Spitfire UACC", "VSL Synchron", "SINE", "Kontakt Standard", "Custom"].map((preset) => <option key={preset}>{preset}</option>)}</select>
-            {([["dynamicCC", "Dynamic CC"], ["expressionCC", "Expression CC"], ["brightnessCC", "Brightness / Cutoff CC"], ["sustainCC", "Sustain Pedal CC"]] as const).map(([key, label]) => <label key={key} className="mb-1.5 flex items-center justify-between gap-2 text-[11px] text-stone-400">{label}<input aria-label={label} className="w-16 rounded bg-black/40 px-1.5 py-1 text-right text-xs text-stone-100" type="number" min={0} max={127} value={mapping[key]} onChange={(event) => onExpressionMapping({ ...mapping, [key]: Math.max(0, Math.min(127, Number(event.target.value) || 0)) })} /></label>)}
-          </div>}
         </div>
         <div className="relative flex shrink-0 items-center gap-0.5">
           <IconBtn

@@ -456,7 +456,7 @@ export default function App() {
       <Toasts items={toasts} onDismiss={(id) => setToasts((t) => t.filter((x) => x.id !== id))} />
 
       {harness && (
-        <div className="fixed inset-0 z-40 grid place-items-center bg-black/60 p-6" onClick={() => setHarness(null)}>
+        <div className="fixed inset-0 z-[60] grid place-items-center bg-black/60 p-6" onClick={() => setHarness(null)}>
           <pre
             className="max-h-[80vh] w-[800px] overflow-auto rounded-xl border border-white/10 bg-[#0e1016] p-4 font-mono text-[11px] text-stone-300"
             onClick={(e) => e.stopPropagation()}
@@ -538,7 +538,7 @@ function DevMenu({
         Dev
       </button>
       {open && (
-        <div className="absolute bottom-7 right-0 z-50 w-52 rounded-md border border-white/10 bg-[#1a1d27] py-1 text-xs text-stone-200 shadow-xl">
+        <div className="absolute bottom-7 right-0 z-[55] w-52 rounded-md border border-white/10 bg-[#1a1d27] py-1 text-xs text-stone-200 shadow-xl">
           <MenuItem
             onClick={() => {
               onMix();
