@@ -253,3 +253,78 @@ Stage 2 was 97 SLoC. Stage 3a adds `engine.rs` (119 SLoC) + sidecar wiring in `l
 - **Kill-on-close**: the `on_window_event(CloseRequested)` handler calls `kill_engine()`, but the actual "no orphans" verification requires running the app on Windows, closing it, and checking `tasklist`. This is a manual smoke test that can't be automated in CI — documented as a manual verification step, not an automated claim.
 - **Restart contract**: the `check_and_restart()` thread polls every 2s. If the engine is killed mid-session, the restart fires within ~2s. But the "max 3 in 60s" window and the "failed" terminal state are code paths that need a live Windows session to exercise (kill the engine 4 times rapidly and observe the transition). Documented as manual verification.
 - **Loopback proof**: `netstat` showing the listener on `127.0.0.1` only requires running the app on Windows. The engine code binds `127.0.0.1` explicitly (`ix::WebSocketServer server(port, "127.0.0.1")`), but the runtime verification is manual.
+
+## Stage 3b — Note stream over the wire + engine audio rendering
+
+### Protocol v1 extension (additive — v1 handshake messages unchanged)
+
+| Direction | Message | Behavior |
+|---|---|---|
+| client → server | `{"type":"load","events":[...],"meta":{bpm,ppqn,timeSignature,endTick}}` | Full replace of engine's pending score. Idempotent. Events are `PhysicalMidiStreamEvent` objects (NOTE_ON/NOTE_OFF only in the minimal adapter; CC/bend/program-change types exist in the type union but the test synth ignores them v1). |
+| client → server | `{"type":"transport","command":"play"}` | Start playback from tick 0. Resets sample counter. |
+| client → server | `{"type":"transport","command":"stop"}` | Stop playback. Silence all voices. Reset position. |
+| client → server | `{"type":"transport","command":"seek","tick":<n>}` | Re-anchor start tick. Does not change playing state. |
+| client → server | `{"type":"panic"}` | All notes off immediately. Voices killed. |
+| server → client | `{"type":"state","playing":bool,"tick":<n>}` | ~30Hz broadcast. `tick` is the current playback position. UI playhead source when engine-driven. |
+
+Existing v1 messages unchanged: `hello` (on connect), `ping`→`pong`, `shutdown`→exit 0, unknown→`error`.
+
+### Engine audio graph
+
+- **JUCE AudioDeviceManager** opens the default system output (0 inputs, 2 outputs). On init failure (e.g., no audio device on CI), the engine continues — protocol logic still works, just no sound.
+- **AudioIODeviceCallback** renders the test synth in the audio callback (real-time thread).
+- **Test synth**: 64-voice polyphonic. Each voice is a sine oscillator (frequency = `440 * 2^((pitch-69)/12)`) with a gain envelope (10ms attack to unity, 10ms release to zero). Voice allocation: find first free voice, or steal the oldest. Every NoteOn must sound, every NoteOff must stop.
+- **Event scheduling**: tick→sample conversion via `samplesPerTick = sampleRate * 60 / (bpm * ppqn)`. Events dispatched sample-accurately inside the audio callback (M14's parked `ticksToSampleDelta` math, alive at last). Events before the current playhead are skipped; events at/after are dispatched in order.
+- **Reported to stdout at startup**: device name, sample rate, buffer size. (Example: `[engine] audio: Windows DirectSound @ 48000 Hz buffer=480`.)
+
+### Playback source switch (frontend)
+
+The frontend picks the audio source at Play time:
+
+| Condition | Source | Playhead from |
+|---|---|---|
+| Desktop shell + `engineStatus === "ready"` | **Engine** (load + transport play via WS) | Engine `state` messages (~30Hz) |
+| Browser mode OR `engineStatus !== "ready"` | **Webview synth** (`usePlayback`) | `usePlayback.playheadTick` (RAF loop) |
+
+**NO half-states**: either the engine drives or the webview synth drives. The `effectivePlaying` and `effectivePlayheadTick` variables in App.tsx unify both sources for the UI (TopBar, Arranger, auto-scroll, keyboard shortcut).
+
+**Engine drop during playback**: if `engineStatus` leaves "ready" while `enginePlaying`, the frontend sends `panic` to the engine (if still connected) and sets `enginePlaying = false`. The user sees "engine: restarting…" in the footer. No webview fallback mid-playback (that would be a jarring source switch); the user presses Play again after reconnection. Documented choice: silence + status, not webview fallback.
+
+**Project change during engine playback** (e.g., Compose All while playing): the frontend sends `load` with the new events. The engine replaces its score and continues playing from the current position (load is idempotent + does not reset transport state).
+
+### Timing contract
+
+- **Engine owns sample-accurate playback** once it receives `transport play` + events. The audio callback dispatches events at their exact sample positions.
+- **State messages at ~30Hz** (33ms interval) drive the UI playhead. The UI playhead may lag the actual audio by up to ~33ms. This is acceptable v1 (documented tolerance: ±33ms UI vs audio drift).
+- **Constant-BPM v1**: the engine receives a single `bpm` scalar in the `load` meta. The M10 conductor tempo map (multi-point runtime tempo) is NOT sent to the engine — `meta.bpm` is the project's working tempo. Tempo-map extension noted for 3c.
+- **Latency budget**: keypress-to-sound < 100ms on default buffers. Not measured in CI (no audio hardware). The chain is: Play click → WS send (~1ms) → engine receives → audio callback next block (bufferSize/sampleRate seconds, e.g., 480/48000 = 10ms) → first sample. Total: ~11ms + OS audio latency. Well under 100ms on default buffers.
+
+### Ignored features v1 (documented for 3c)
+
+The `PhysicalMidiStreamEvent` type supports 5 event types, but the Stage 3b test synth only processes 2:
+
+| Event type | v1 status | Notes |
+|---|---|---|
+| `NOTE_ON` | ✅ Processed | Triggers voice allocation + sine oscillator |
+| `NOTE_OFF` | ✅ Processed | Triggers release envelope |
+| `CONTROL_CHANGE` | ❌ Ignored | CC1 (dynamic), CC11 (expression), CC74 (filter), sustain — all ignored. The minimal `notesToEngineEvents` adapter doesn't emit them. The full `vst3EventAdapter` does, but it's not called. Listed for 3c. |
+| `PROGRAM_CHANGE` | ❌ Ignored | Articulation patch changes — not emitted by the minimal adapter. |
+| `PITCH_BEND` | ❌ Ignored | Brass gestures (RIP/DOIT/FALL_OFF) — not emitted by the minimal adapter. |
+
+Note metadata fields also ignored v1: `detuneCents`, `bowDirection`, `technique`, `pitchBendPoints`, `cc74Offset`, `dynamics` — none are in the minimal adapter. The full `vst3EventAdapter` uses these; 3c wires them when the engine gets a real sampler.
+
+### Panic safety (stuck-note protection)
+
+- **App close**: Rust `on_window_event(CloseRequested)` → `kill_engine()` → child process killed. The engine's destructor path stops the audio callback and silences all voices. No orphans.
+- **Engine stop**: `transport stop` → all voices set to inactive + env=0 immediately.
+- **Connection drop**: engine's `Close` handler → panic (all voices killed). The frontend's `onclose` handler → `setEnginePlaying(false)`.
+- **Panic message**: `{"type":"panic"}` → all voices killed immediately.
+- **250ms budget**: all sound stops within 250ms of any stop/close/drop event. Cannot be measured in CI (no audio hardware) — documented as a code-path guarantee, not a measured number.
+
+### Rust unchanged
+
+The Rust shell from Stage 3a (sidecar spawn/restart/kill + port selection) is untouched this stage. The `EngineState`, `start_engine`, `check_and_restart`, `kill_engine`, `get_engine_info` are all unchanged. The protocol extension is entirely between the frontend (JS) and the engine (C++) — the Rust shell just pipes the WebSocket.
+
+### Engine C++ SLoC
+
+`engine/src/main.cpp` is ~270 SLoC (up from ~130 in Stage 3a). The growth is the audio graph (AudioDeviceManager + AudioIODeviceCallback), the test synth (64 voices, sine oscillator, gain envelope), event scheduling (tick→sample, sample-accurate dispatch), and the state broadcast thread. No JUCE audio graph UI, no VST hosting, no sample loading — this is the minimum viable test synth.

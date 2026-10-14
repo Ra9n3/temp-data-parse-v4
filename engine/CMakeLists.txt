@@ -4,10 +4,11 @@ project(scorch-engine VERSION 0.1.0 LANGUAGES CXX)
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
-# JUCE 8 — pinned tag. FetchContent pulls the full JUCE source; the build
-# only links juce_core (no audio/graph/UI modules needed for a no-audio
-# protocol skeleton). Cache via CCACHE and the FetchContent cache directory
-# so CI's Swatinem/rust-cache (or a CMake-specific cache) can warm-hit.
+# JUCE 8 — pinned tag. Stage 3b adds juce_audio_basics + juce_audio_devices
+# for the test synth. SCORCH_ENGINE_AUDIO=OFF (default for CI) skips the audio
+# modules to avoid static-init crashes on headless runners.
+option(SCORCH_ENGINE_AUDIO "Link JUCE audio modules (test synth)" ON)
+
 include(FetchContent)
 set(FETCHCONTENT_BASE_DIR ${CMAKE_BINARY_DIR}/_fetch CACHE PATH "FetchContent root")
 FetchContent_Declare(
@@ -16,14 +17,10 @@ FetchContent_Declare(
     GIT_TAG 8.0.4
     GIT_SHALLOW TRUE
 )
-# Disable JUCE modules we don't need to keep compile time down.
-set(JUCE_MODULES juce_core)
 FetchContent_MakeAvailable(JUCE)
 
-# IXWebSocket — lightweight WebSocket server/client. Header-only-ish (one .cpp).
-# True RFC 6455 WebSocket so the browser-native WebSocket client can connect.
-# Disable zlib (compression) and TLS (we're ws:// on loopback only) to avoid
-# system dependency issues on Windows CI.
+# IXWebSocket — lightweight WebSocket server/client. True RFC 6455 WebSocket.
+# Disable zlib (compression) and TLS (we're ws:// on loopback only).
 set(USE_ZLIB OFF CACHE BOOL "" FORCE)
 set(USE_OPEN_SSL OFF CACHE BOOL "" FORCE)
 set(USE_MBED_TLS OFF CACHE BOOL "" FORCE)
@@ -41,6 +38,15 @@ target_link_libraries(scorch-engine PRIVATE
     juce_core
     ixwebsocket
 )
+if(SCORCH_ENGINE_AUDIO)
+    target_link_libraries(scorch-engine PRIVATE
+        juce_audio_basics
+        juce_audio_devices
+    )
+    target_compile_definitions(scorch-engine PRIVATE SCORCH_ENGINE_AUDIO=1)
+else()
+    target_compile_definitions(scorch-engine PRIVATE SCORCH_ENGINE_AUDIO=0)
+endif()
 # Console subsystem — visible console window during dev (spec: "fine").
 if(MSVC)
     set_target_properties(scorch-engine PROPERTIES LINK_FLAGS "/SUBSYSTEM:CONSOLE")

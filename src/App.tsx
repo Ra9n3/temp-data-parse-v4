@@ -5,7 +5,8 @@ import dorianFixture from "./fixtures/dorian-16bars.json";
 import { TopBar } from "./components/TopBar";
 import { Arranger } from "./components/Arranger";
 import { GenerationSettingsPanel } from "./components/GenerationSettingsPanel";
-import { EngineClient, type EngineStatus } from "./engine/engineClient";
+import { EngineClient, notesToEngineEvents, type EngineLoadMeta, type EngineStatus } from "./engine/engineClient";
+import { PPQ, projectEndTick, tickToBar } from "./shared/schema";
 import {
   AboutDialog,
   ExportDialog,
@@ -78,20 +79,28 @@ function takeStartupNoticeOnce(): string | null {
 
 let toastSeq = 0;
 
-// Stage 3a — engine status indicator (display-only). Compact footer element
-// reflecting the WebSocket connection state to the scorch-engine sidecar.
-function EngineIndicator({ status, rtt }: { status: EngineStatus; rtt: number | null }) {
+// Stage 3a/3b — engine status indicator. Shows connection state (3a) and
+// audio playback state (3b: "ENGINE: playing · bar X" during engine playback).
+function EngineIndicator({ status, rtt, playing, playheadTick, timeSignature }: {
+  status: EngineStatus; rtt: number | null; playing: boolean; playheadTick: number; timeSignature: { numerator: number; denominator: number };
+}) {
   const label = (() => {
     switch (status) {
       case "off": return "engine: off";
       case "connecting": return "engine: connecting…";
       case "handshake": return "engine: handshake…";
-      case "ready": return rtt !== null ? `engine: ready · ${rtt}ms` : "engine: ready";
+      case "ready":
+        if (playing) {
+          const bar = tickToBar(playheadTick, timeSignature);
+          return `engine: playing · bar ${bar}`;
+        }
+        return rtt !== null ? `engine: ready · ${rtt}ms` : "engine: ready";
       case "restarting": return "engine: restarting…";
       case "failed": return "engine: failed";
     }
   })();
-  const color = status === "ready" ? "text-emerald-400"
+  const color = status === "ready" && playing ? "text-emerald-300"
+    : status === "ready" ? "text-emerald-400"
     : status === "failed" ? "text-red-400"
     : status === "off" ? "text-stone-500"
     : "text-amber-400";
@@ -131,6 +140,11 @@ export default function App() {
   const [engineStatus, setEngineStatus] = useState<EngineStatus>("off");
   const [engineRtt, setEngineRtt] = useState<number | null>(null);
   const engineClientRef = useRef<EngineClient | null>(null);
+  // Stage 3b: engine-driven playback state. When enginePlaying is true, the
+  // engine process renders audio; playhead comes from state messages, not
+  // usePlayback's RAF loop. When false, usePlayback (webview synth) drives.
+  const [enginePlaying, setEnginePlaying] = useState(false);
+  const [enginePlayheadTick, setEnginePlayheadTick] = useState(0);
   // Chord v2 — the editing chord id is LIFTED here (was local to the Arranger
   // lane) so the top-bar panel and the in-lane editor share one source of
   // truth: creation/retarget/Esc/delete all stay in sync. No schema change.
@@ -174,6 +188,16 @@ export default function App() {
       if (disposed) return;
       setEngineStatus(status);
       setEngineRtt(rtt);
+      // If engine drops while playing, stop engine-driven playback.
+      if (status !== "ready" && status !== "off") {
+        setEnginePlaying(false);
+      }
+    });
+    // Stage 3b: register state callback for engine-driven playhead.
+    client.onState((playing, tick) => {
+      if (disposed) return;
+      setEnginePlaying(playing);
+      setEnginePlayheadTick(tick);
     });
     engineClientRef.current = client;
 
@@ -257,6 +281,80 @@ export default function App() {
     toast("ok", `Composed ${notes} notes in ${ms.toFixed(0)}ms · seed ${seed}`);
   }, [project, generationSettings, commit, toast]);
 
+  // Stage 3b: playback source switch. If engine is ready (desktop + engine
+  // connected), Play sends load+play to the engine and the playhead comes from
+  // engine state messages. Otherwise, usePlayback (webview synth) drives.
+  // NO half-states: either the engine drives or the webview synth drives.
+  const effectivePlaying = enginePlaying || playback.playing;
+  const effectivePlayheadTick = enginePlaying ? enginePlayheadTick : playback.playheadTick;
+
+  const enginePlay = useCallback(() => {
+    const client = engineClientRef.current;
+    if (!client || client.getStatus() !== "ready") {
+      void playback.play();
+      return;
+    }
+    const events = notesToEngineEvents(project);
+    const meta: EngineLoadMeta = {
+      bpm: project.bpm,
+      ppqn: PPQ,
+      timeSignature: project.timeSignature,
+      endTick: projectEndTick(project),
+    };
+    client.load(events, meta);
+    client.transport("play");
+    setEnginePlaying(true);
+  }, [project, playback]);
+
+  const engineStop = useCallback(() => {
+    if (enginePlaying) {
+      engineClientRef.current?.transport("stop");
+      setEnginePlaying(false);
+    } else {
+      playback.stop();
+    }
+  }, [enginePlaying, playback]);
+
+  const engineSeek = useCallback((tick: number) => {
+    if (enginePlaying) {
+      engineClientRef.current?.transport("seek", tick);
+      setEnginePlayheadTick(tick);
+    } else {
+      playback.seek(tick);
+    }
+  }, [enginePlaying, playback]);
+
+  const engineRewind = useCallback(() => {
+    if (enginePlaying) {
+      engineClientRef.current?.transport("seek", 0);
+      setEnginePlayheadTick(0);
+    } else {
+      playback.rewind();
+    }
+  }, [enginePlaying, playback]);
+
+  // Panic on abnormal stop (e.g., engine drop during playback).
+  useEffect(() => {
+    if (engineStatus !== "ready" && enginePlaying) {
+      engineClientRef.current?.panic();
+      setEnginePlaying(false);
+    }
+  }, [engineStatus, enginePlaying]);
+
+  // Reload engine score when project changes during engine playback.
+  useEffect(() => {
+    if (enginePlaying && engineClientRef.current?.getStatus() === "ready") {
+      const events = notesToEngineEvents(project);
+      const meta: EngineLoadMeta = {
+        bpm: project.bpm,
+        ppqn: PPQ,
+        timeSignature: project.timeSignature,
+        endTick: projectEndTick(project),
+      };
+      engineClientRef.current?.load(events, meta);
+    }
+  }, [project, enginePlaying]);
+
   const noteCount = useMemo(
     () => project.tracks.reduce((n, t) => n + t.notes.length, 0),
     [project.tracks],
@@ -285,26 +383,26 @@ export default function App() {
       if (typing) return;
       if (e.key === " ") {
         e.preventDefault();
-        if (playback.playing) playback.stop();
-        else void playback.play();
+        if (effectivePlaying) engineStop();
+        else void enginePlay();
       }
-      if (e.key === "Home") playback.rewind();
+      if (e.key === "Home") engineRewind();
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [doRedo, doUndo, playback]);
+  }, [doRedo, doUndo, enginePlay, engineStop, engineRewind, effectivePlaying]);
 
   useEffect(() => {
-    if (!playback.playing) return;
+    if (!effectivePlaying) return;
     const el = scrollRef.current;
     if (!el) return;
-    const x = playback.playheadTick * ppt;
+    const x = effectivePlayheadTick * ppt;
     const vis = el.clientWidth - HEADER_WIDTH;
     const sl = el.scrollLeft;
     if (x < sl + 40 || x > sl + vis - 80) {
       el.scrollLeft = Math.max(0, x - vis * 0.3);
     }
-  }, [playback.playheadTick, playback.playing, ppt]);
+  }, [effectivePlayheadTick, effectivePlaying, ppt]);
 
   const runTests = useCallback(async () => {
     setTestsRunning(true);
@@ -337,8 +435,8 @@ export default function App() {
     <div className="flex h-full flex-col bg-[#0b0c10] text-stone-100">
       <TopBar
         project={project}
-        playheadTick={playback.playheadTick}
-        playing={playback.playing}
+        playheadTick={effectivePlayheadTick}
+        playing={effectivePlaying}
         looping={playback.looping}
         metronome={playback.metronome}
         onBpm={(bpm) => patch({ bpm: Math.max(20, Math.min(400, bpm)) })}
@@ -359,9 +457,9 @@ export default function App() {
         }
         onOrchestralStyle={(orchestralStyle) => patch({ generationSettings: { ...generationSettings, orchestralStyle } })}
         onOpenGenerationSettings={() => setGenerationSettingsOpen(true)}
-        onPlay={() => void playback.play()}
-        onStop={playback.stop}
-        onRewind={playback.rewind}
+        onPlay={() => void enginePlay()}
+        onStop={engineStop}
+        onRewind={engineRewind}
         onToggleLoop={() => playback.setLooping(!playback.looping)}
         onToggleMetronome={() => playback.setMetronome(!playback.metronome)}
         onCompose={compose}
@@ -388,14 +486,14 @@ export default function App() {
       <Arranger
         project={project}
         pixelsPerTick={ppt}
-        playheadTick={playback.playheadTick}
+        playheadTick={effectivePlayheadTick}
         pluginLabels={pluginLabels}
         audioBuffer={audioBuffer}
         audioName={audioName}
         selectedTrackId={selectedTrackId}
         scrollRef={scrollRef}
         onPixelsPerTick={setPpt}
-        onSeek={playback.seek}
+        onSeek={engineSeek}
         onPatchProject={patch}
         editingChord={editingChordId}
         onEditChord={setEditingChordId}
@@ -459,7 +557,7 @@ export default function App() {
           </span>
         </div>
         <div className="flex items-center gap-2">
-          <EngineIndicator status={engineStatus} rtt={engineRtt} />
+          <EngineIndicator status={engineStatus} rtt={engineRtt} playing={enginePlaying} playheadTick={enginePlayheadTick} timeSignature={project.timeSignature} />
           <button type="button" className="hover:text-stone-200" onClick={() => jsonInputRef.current?.click()} title="Import project JSON">
             Import
           </button>

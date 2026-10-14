@@ -55,7 +55,7 @@ jobs:
       - name: Configure + build engine (CMake + MSVC)
         shell: pwsh
         run: |
-          cmake -S engine -B engine/build -G "Ninja" -DCMAKE_BUILD_TYPE=Release
+          cmake -S engine -B engine/build -G "Ninja" -DCMAKE_BUILD_TYPE=Release -DSCORCH_ENGINE_AUDIO=OFF
           cmake --build engine/build --parallel
           if (-not (Test-Path "engine/build/scorch-engine.exe")) {
             throw "scorch-engine.exe not found after build"
@@ -67,18 +67,32 @@ jobs:
       - name: Engine standalone protocol test
         shell: pwsh
         run: |
-          # Start the engine on a test port
-          $proc = Start-Process -FilePath "engine/build/scorch-engine.exe" -ArgumentList "--port","9378" -PassThru -NoNewWindow
-          Start-Sleep -Seconds 2
-
           # Test 1: --version
           $versionOut = & "engine/build/scorch-engine.exe" --version
           Write-Host "Version output: $versionOut"
           if ($versionOut -notmatch "scorch-engine 0.1.0") { throw "Version check failed" }
 
+          # Start the engine on a test port (audio is compiled out for CI)
+          $proc = Start-Process -FilePath "engine/build/scorch-engine.exe" -ArgumentList "--port","9378" -PassThru -NoNewWindow -RedirectStandardOutput "engine-stdout.txt" -RedirectStandardError "engine-stderr.txt"
+          Start-Sleep -Seconds 3
+
+          if ($proc.HasExited) {
+            Write-Host "Engine exited early (code=$($proc.ExitCode)). stdout:"
+            if (Test-Path engine-stdout.txt) { Get-Content engine-stdout.txt }
+            Write-Host "stderr:"
+            if (Test-Path engine-stderr.txt) { Get-Content engine-stderr.txt }
+            throw "Engine process exited before test could connect"
+          }
+
           # Test 2-4: WebSocket protocol via Node.js test client
           node .github/scripts/test-engine-protocol.mjs 9378
-          if ($LASTEXITCODE -ne 0) { throw "Engine protocol test failed" }
+          if ($LASTEXITCODE -ne 0) {
+            Write-Host "Engine stdout:"
+            if (Test-Path engine-stdout.txt) { Get-Content engine-stdout.txt }
+            Write-Host "Engine stderr:"
+            if (Test-Path engine-stderr.txt) { Get-Content engine-stderr.txt }
+            throw "Engine protocol test failed"
+          }
 
           Write-Host "All engine protocol tests passed"
           Stop-Process -Id $proc.Id -Force -ErrorAction SilentlyContinue

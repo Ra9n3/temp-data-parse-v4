@@ -1,9 +1,10 @@
-// Stage 3a: engine WebSocket client. Connects to the scorch-engine sidecar
-// spawned by the Rust shell. Protocol v1 (4 message types — see engine/src/main.cpp).
-// Deterministic reconnect backoff (NO random jitter — standing rule: no RNG).
-//
-// This module is display-only this stage: the status indicator in the footer
-// reflects connection state. No musical behavior wires to the engine yet (3b).
+// Stage 3a/3b: engine WebSocket client. Connects to the scorch-engine sidecar
+// spawned by the Rust shell. Protocol v1 (handshake) + v1 extension (load/
+// transport/panic/state — Stage 3b additive). Deterministic reconnect backoff
+// (NO random jitter — standing rule: no RNG).
+
+import type { PhysicalMidiStreamEvent } from "../plugins/expressionMaps";
+import type { Project } from "../shared/schema";
 
 export type EngineStatus =
   | "off"            // engine exe not found / not spawned
@@ -30,11 +31,64 @@ export interface ErrorMessage {
   echo: string;
 }
 
-type EngineMessage = HelloMessage | PongMessage | ErrorMessage;
+export interface StateMessage {
+  type: "state";
+  playing: boolean;
+  tick: number;
+}
+
+type EngineMessage = HelloMessage | PongMessage | ErrorMessage | StateMessage;
 
 // Deterministic backoff sequence (seconds): 1, 2, 4, 8, 16 — no jitter.
 const BACKOFF_SEQUENCE = [1, 2, 4, 8, 16] as const;
 const MAX_RECONNECT_ATTEMPTS = 5;
+
+/**
+ * Minimal Note[] → PhysicalMidiStreamEvent[] adapter for the test synth.
+ * Emits NOTE_ON at startTick and NOTE_OFF at startTick+durationTicks.
+ * Reuses the PhysicalMidiStreamEvent TYPE from expressionMaps.ts (M9).
+ * The full vst3EventAdapter (with CCs/bends/articulation switches) is a 3c
+ * concern when the engine gets a real sampler; the test synth ignores CCs/bends.
+ * Key-switch notes (isKeySwitch) are excluded — they're export-only, never
+ * scheduled in playback (same rule as usePlayback.ts:203).
+ */
+export function notesToEngineEvents(project: Project): PhysicalMidiStreamEvent[] {
+  const events: PhysicalMidiStreamEvent[] = [];
+  for (const track of project.tracks) {
+    // Skip structure/chords/audio tracks (no instrument notes)
+    if (track.role === "structure" || track.role === "chords" || track.role === "audio") continue;
+    const channel = track.midiChannel ?? 1;
+    for (const note of track.notes) {
+      if (note.isKeySwitch) continue;
+      if (note.durationTicks <= 0) continue;
+      events.push({
+        eventType: "NOTE_ON",
+        channel,
+        data1: note.pitch,
+        data2: note.velocity,
+        timestampTicks: note.startTick,
+      });
+      events.push({
+        eventType: "NOTE_OFF",
+        channel,
+        data1: note.pitch,
+        data2: 0,
+        timestampTicks: note.startTick + note.durationTicks,
+      });
+    }
+  }
+  // Sort by tick (NOTE_OFF before NOTE_ON at same tick — tie-breaker)
+  events.sort((a, b) => a.timestampTicks - b.timestampTicks ||
+    (a.eventType === "NOTE_OFF" ? -1 : 1) - (b.eventType === "NOTE_OFF" ? -1 : 1));
+  return events;
+}
+
+export interface EngineLoadMeta {
+  bpm: number;
+  ppqn: number;
+  timeSignature: { numerator: number; denominator: number };
+  endTick: number;
+}
 
 export class EngineClient {
   private ws: WebSocket | null = null;
@@ -43,6 +97,7 @@ export class EngineClient {
   private reconnectTimer: number | null = null;
   private lastRtt: number | null = null;
   private onStatusChange: (status: EngineStatus, rtt: number | null) => void;
+  private onStateChange: ((playing: boolean, tick: number) => void) | null = null;
 
   constructor(onStatusChange: (status: EngineStatus, rtt: number | null) => void) {
     this.onStatusChange = onStatusChange;
@@ -50,6 +105,11 @@ export class EngineClient {
 
   getStatus(): EngineStatus { return this.status; }
   getRtt(): number | null { return this.lastRtt; }
+
+  /** Register a callback for engine state messages (playing + tick). */
+  onState(cb: (playing: boolean, tick: number) => void): void {
+    this.onStateChange = cb;
+  }
 
   connect(port: number): void {
     this.currentPort = port;
@@ -76,17 +136,16 @@ export class EngineClient {
           this.reconnectAttempts = 0;
           this.setStatus("ready");
         } else if (msg.type === "pong") {
-          // RTT = round-trip; the engine's t is monotonic ms, but we can't
-          // compute true RTT from it alone. For the indicator we use the
-          // time between our ping send and the pong arrival (measured here).
           if (this.pingSentAt !== null) {
             this.lastRtt = Math.round(performance.now() - this.pingSentAt);
             this.pingSentAt = null;
             this.setStatus("ready");
           }
-        }
-        // Errors are logged to console but don't change status (still connected).
-        if (msg.type === "error") {
+        } else if (msg.type === "state") {
+          if (this.onStateChange) {
+            this.onStateChange(msg.playing, msg.tick);
+          }
+        } else if (msg.type === "error") {
           console.warn("[engine] error:", msg.code, msg.echo);
         }
       } catch {
@@ -95,6 +154,8 @@ export class EngineClient {
     };
     this.ws.onclose = () => {
       this.ws = null;
+      // Panic on disconnect — no stuck notes
+      if (this.onStateChange) this.onStateChange(false, 0);
       if (this.status !== "failed" && this.status !== "off") {
         this.scheduleReconnect();
       }
@@ -110,6 +171,29 @@ export class EngineClient {
     if (this.ws && this.ws.readyState === WebSocket.OPEN) {
       this.pingSentAt = performance.now();
       this.ws.send(JSON.stringify({ type: "ping" }));
+    }
+  }
+
+  /** Load events + meta into the engine (full replace, idempotent). */
+  load(events: PhysicalMidiStreamEvent[], meta: EngineLoadMeta): void {
+    if (this.ws && this.ws.readyState === WebSocket.OPEN) {
+      this.ws.send(JSON.stringify({ type: "load", events, meta }));
+    }
+  }
+
+  /** Transport control: play, stop, or seek. */
+  transport(command: "play" | "stop" | "seek", tick?: number): void {
+    if (this.ws && this.ws.readyState === WebSocket.OPEN) {
+      const msg: Record<string, unknown> = { type: "transport", command };
+      if (tick !== undefined) msg.tick = tick;
+      this.ws.send(JSON.stringify(msg));
+    }
+  }
+
+  /** All notes off immediately (stop safety). */
+  panic(): void {
+    if (this.ws && this.ws.readyState === WebSocket.OPEN) {
+      this.ws.send(JSON.stringify({ type: "panic" }));
     }
   }
 
