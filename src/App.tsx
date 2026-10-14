@@ -79,10 +79,12 @@ function takeStartupNoticeOnce(): string | null {
 
 let toastSeq = 0;
 
-// Stage 3a/3b — engine status indicator. Shows connection state (3a) and
-// audio playback state (3b: "ENGINE: playing · bar X" during engine playback).
-function EngineIndicator({ status, rtt, playing, playheadTick, timeSignature }: {
-  status: EngineStatus; rtt: number | null; playing: boolean; playheadTick: number; timeSignature: { numerator: number; denominator: number };
+// Stage 3a/3b/3b-fix — engine status indicator. Shows connection state (3a),
+// audio playback state (3b: "ENGINE: playing · bar X" during engine playback),
+// and the audio-init failure state (3b-fix: "engine: no audio device" in red
+// when a transport play was rejected because no device was found).
+function EngineIndicator({ status, rtt, playing, playheadTick, timeSignature, audioError }: {
+  status: EngineStatus; rtt: number | null; playing: boolean; playheadTick: number; timeSignature: { numerator: number; denominator: number }; audioError: string | null;
 }) {
   const label = (() => {
     switch (status) {
@@ -90,6 +92,7 @@ function EngineIndicator({ status, rtt, playing, playheadTick, timeSignature }: 
       case "connecting": return "engine: connecting…";
       case "handshake": return "engine: handshake…";
       case "ready":
+        if (audioError === "no_audio_device") return "engine: no audio device";
         if (playing) {
           const bar = tickToBar(playheadTick, timeSignature);
           return `engine: playing · bar ${bar}`;
@@ -99,7 +102,10 @@ function EngineIndicator({ status, rtt, playing, playheadTick, timeSignature }: 
       case "failed": return "engine: failed";
     }
   })();
-  const color = status === "ready" && playing ? "text-emerald-300"
+  // Stage 3b-fix: audio-init failure shows red even though the engine
+  // connection itself is healthy — it's a device problem, not a link problem.
+  const color = status === "ready" && audioError === "no_audio_device" ? "text-red-400"
+    : status === "ready" && playing ? "text-emerald-300"
     : status === "ready" ? "text-emerald-400"
     : status === "failed" ? "text-red-400"
     : status === "off" ? "text-stone-500"
@@ -145,6 +151,10 @@ export default function App() {
   // usePlayback's RAF loop. When false, usePlayback (webview synth) drives.
   const [enginePlaying, setEnginePlaying] = useState(false);
   const [enginePlayheadTick, setEnginePlayheadTick] = useState(0);
+  // Stage 3b-fix: engine audio-init failure code ("no_audio_device") surfaced
+  // by a rejected transport play. Footer shows the failure state; cleared on
+  // reconnect or on a subsequent successful play.
+  const [engineAudioError, setEngineAudioError] = useState<string | null>(null);
   // Chord v2 — the editing chord id is LIFTED here (was local to the Arranger
   // lane) so the top-bar panel and the in-lane editor share one source of
   // truth: creation/retarget/Esc/delete all stay in sync. No schema change.
@@ -198,6 +208,14 @@ export default function App() {
       if (disposed) return;
       setEnginePlaying(playing);
       setEnginePlayheadTick(tick);
+    });
+    // Stage 3b-fix: engine rejected a transport play because lazy audio init
+    // found no device. Revert the optimistic playing flag (play never started)
+    // and surface the failure in the footer.
+    client.onAudioError((code) => {
+      if (disposed) return;
+      setEngineAudioError(code);
+      if (code === "no_audio_device") setEnginePlaying(false);
     });
     engineClientRef.current = client;
 
@@ -302,6 +320,9 @@ export default function App() {
       endTick: projectEndTick(project),
     };
     client.load(events, meta);
+    // Optimistic play — a no_audio_device rejection clears this again via
+    // onAudioError. Clear the stale error so the footer doesn't lag a retry.
+    setEngineAudioError(null);
     client.transport("play");
     setEnginePlaying(true);
   }, [project, playback]);
@@ -557,7 +578,7 @@ export default function App() {
           </span>
         </div>
         <div className="flex items-center gap-2">
-          <EngineIndicator status={engineStatus} rtt={engineRtt} playing={enginePlaying} playheadTick={enginePlayheadTick} timeSignature={project.timeSignature} />
+          <EngineIndicator status={engineStatus} rtt={engineRtt} playing={enginePlaying} playheadTick={enginePlayheadTick} timeSignature={project.timeSignature} audioError={engineAudioError} />
           <button type="button" className="hover:text-stone-200" onClick={() => jsonInputRef.current?.click()} title="Import project JSON">
             Import
           </button>

@@ -328,3 +328,41 @@ The Rust shell from Stage 3a (sidecar spawn/restart/kill + port selection) is un
 ### Engine C++ SLoC
 
 `engine/src/main.cpp` is ~270 SLoC (up from ~130 in Stage 3a). The growth is the audio graph (AudioDeviceManager + AudioIODeviceCallback), the test synth (64 voices, sine oscillator, gain envelope), event scheduling (tick→sample, sample-accurate dispatch), and the state broadcast thread. No JUCE audio graph UI, no VST hosting, no sample loading — this is the minimum viable test synth.
+
+## Stage 3b-fix — Audio init policy (lazy, runtime-graceful; compile gate removed)
+
+### Why compile-time gating was wrong
+
+Stage 3b shipped with a CMake option `SCORCH_ENGINE_AUDIO` that CI set to `OFF` because the engine crashed on headless runners (0xC0000005) when audio was initialized at startup. That decision solved the crash by **amputation**: every installer built by CI contained an engine with the audio code compiled out. The user's by-ear stage gate failed **by construction** — a mute build can never pass a listening test, no matter how correct the protocol layer is. Lesson recorded: a device-availability problem is a **runtime** condition and must be handled at runtime; compile-time gating changes *what the product is*, not where it can run.
+
+### The policy now
+
+- **Audio code is ALWAYS compiled and linked** (`juce_audio_basics` + `juce_audio_devices`, unconditional in `engine/CMakeLists.txt`). The `SCORCH_ENGINE_AUDIO` option no longer exists. `--version` prints `audio: built-in` as a gate-absence proof (a gated mute build cannot print it; CI asserts it).
+- **Lazy initialization.** The engine does NOT construct or initialize an `AudioDeviceManager` at startup (`g_deviceManager` is now a lazily heap-constructed `std::unique_ptr`). A headless machine boots the engine cleanly: hello/ping/load all work with zero audio touched.
+- **Init on FIRST transport play only** (`ensureAudioReady()` in `engine/src/main.cpp`, called from the `play` branch of `handle_transport`):
+  - Device found → real-time rendering starts (the `AudioIODeviceCallback` is attached and state ticks advance).
+  - No device / init returns an error / init throws → the engine replies `{"type":"error","code":"no_audio_device","detail":"<reason>"}` and does NOT start playback. The process stays protocol-functional: `stop`/`seek`/`state`/`panic`/`ping` all still respond. A later play **retries** initialization (so plugging a device in and pressing play again works).
+  - `stop` and `seek` never trigger device init — per the brief, init happens on the first *play* only.
+- **Never crash on audio init.** All init paths are wrapped in `try`/`catch(...)`; the target compiles with MSVC `/EHa` so an SEH access violation (the historical 0xC0000005) is caught and converted into the same clean `no_audio_device` error. Failed attempts release the manager so the subsystem is re-created fresh on the next play.
+- **`--null-audio` flag** (CI + device-less environments): the first play opens the engine's built-in null device (`EngineNullDevice`, a minimal JUCE `AudioIODevice` whose callback thread paces the graph in real time with no hardware — JUCE 8 no longer ships a `NullAudioDevice`, so the engine carries its own ~80-line implementation) instead of scanning for a real device. Transport play then **succeeds**, state messages tick at musical time, and event scheduling is verifiable end-to-end in CI without a sound card.
+- **`--no-audio` flag** (repurposed): forced device-less mode — play always answers `no_audio_device` deterministically. This is the fallback if a future runner image ever ships a virtual audio device and the "no flag" error path needs to be forced.
+- **Protocol impact**: the `no_audio_device` error is a new, additive v1-extension message (`type`/`code`/`detail` — same envelope as existing errors; no existing message changed shape). Suite 40/40 and the v1 handshake are untouched.
+
+### CI proof (desktop.yml)
+
+The engine protocol test now runs BOTH paths on the headless runner:
+
+1. **`--null-audio`**: full protocol suite + transport contract — `play` → state ticks **strictly advance** (asserted numerically) → `stop`. The engine then exits 0 (exit code asserted — a 0xC0000005 would fail this check).
+2. **No flag**: `play` → graceful `no_audio_device` error with a non-empty `detail` → `ping`→`pong` still works → `stop`/`seek`/`panic` sent without a crash → `shutdown` → exit 0.
+
+Both engines must exit cleanly with code 0; the workflow throws otherwise. The shipped installers and the CI-tested engine are now the **same audio-capable binary** (same CMake invocation).
+
+### Frontend
+
+`engineClient` exposes `onAudioError(code, detail)`: fired with `"no_audio_device"` when a play is rejected, cleared on reconnect or when a subsequent play produces `playing=true`. The footer indicator shows **"engine: no audio device"** in red while the failure is active, and the optimistic `enginePlaying` flag is reverted (the playhead does not pretend to run). The engine connection itself stays green-functional throughout — the failure is a device problem, not a link problem.
+
+### Untested claims (fire-rate honesty)
+
+- **By-ear gate**: whether a note *sounds* on real hardware remains the user's manual test on the new installer — CI proves the graph runs (ticks advance on the null device) but cannot prove audibility. The stage gate is unchanged.
+- **Real-device path on Windows** (WASAPI/DirectSound open, actual device names in stdout): exercised only on machines with audio hardware; CI covers the null-device and no-device paths.
+- **/EHa catch coverage**: the /EHa + `catch(...)` conversion of a hard SEH into a protocol error is belt-and-braces for the observed headless crash; the exact faulting instruction of the historical 0xC0000005 was never captured in a dump, so the claim is "init failures cannot crash the process", verified on the runner by the clean-error test.

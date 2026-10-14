@@ -29,6 +29,8 @@ export interface ErrorMessage {
   type: "error";
   code: string;
   echo: string;
+  /** Stage 3b-fix: present on no_audio_device errors (human-readable reason). */
+  detail?: string;
 }
 
 export interface StateMessage {
@@ -98,6 +100,7 @@ export class EngineClient {
   private lastRtt: number | null = null;
   private onStatusChange: (status: EngineStatus, rtt: number | null) => void;
   private onStateChange: ((playing: boolean, tick: number) => void) | null = null;
+  private onAudioErrorChange: ((code: string | null, detail: string) => void) | null = null;
 
   constructor(onStatusChange: (status: EngineStatus, rtt: number | null) => void) {
     this.onStatusChange = onStatusChange;
@@ -109,6 +112,16 @@ export class EngineClient {
   /** Register a callback for engine state messages (playing + tick). */
   onState(cb: (playing: boolean, tick: number) => void): void {
     this.onStateChange = cb;
+  }
+
+  /**
+   * Stage 3b-fix: register a callback for engine audio-init failures.
+   * Fired with ("no_audio_device", detail) when a transport play is rejected
+   * because lazy audio init found no device. Fired with (null, "") when the
+   * failure is cleared (reconnect, or a subsequent successful play).
+   */
+  onAudioError(cb: (code: string | null, detail: string) => void): void {
+    this.onAudioErrorChange = cb;
   }
 
   connect(port: number): void {
@@ -135,6 +148,8 @@ export class EngineClient {
         if (msg.type === "hello") {
           this.reconnectAttempts = 0;
           this.setStatus("ready");
+          // Fresh connection — a previous session's audio error is stale.
+          this.onAudioErrorChange?.(null, "");
         } else if (msg.type === "pong") {
           if (this.pingSentAt !== null) {
             this.lastRtt = Math.round(performance.now() - this.pingSentAt);
@@ -142,11 +157,18 @@ export class EngineClient {
             this.setStatus("ready");
           }
         } else if (msg.type === "state") {
+          // A successful play (playing=true) clears any prior audio failure.
+          if (msg.playing) this.onAudioErrorChange?.(null, "");
           if (this.onStateChange) {
             this.onStateChange(msg.playing, msg.tick);
           }
         } else if (msg.type === "error") {
-          console.warn("[engine] error:", msg.code, msg.echo);
+          console.warn("[engine] error:", msg.code, msg.echo, msg.detail ?? "");
+          // Stage 3b-fix: surface audio-init failure to the UI (footer shows
+          // "engine: no audio device" in red while the connection stays up).
+          if (msg.code === "no_audio_device") {
+            this.onAudioErrorChange?.(msg.code, msg.detail ?? "");
+          }
         }
       } catch {
         // Ignore malformed messages.

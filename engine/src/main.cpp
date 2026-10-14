@@ -9,6 +9,28 @@
 // Test synth: sine oscillator per note, voice allocation (steal oldest),
 // gain envelope (attack/release ~10ms). Every NoteOn must sound, every NoteOff
 // must stop. No VST3, no samples, no CC rendering. Loopback ONLY (127.0.0.1).
+//
+// AUDIO POLICY (Stage 3b-fix):
+//   * Audio code is ALWAYS compiled — the SCORCH_ENGINE_AUDIO compile gate is
+//     gone. A compile-time gate shipped mute installers (the user's by-ear
+//     gate failed by construction).
+//   * The AudioDeviceManager is NOT initialized at engine startup. It is
+//     constructed on the FIRST transport play command only, so headless
+//     machines (CI runners) boot cleanly.
+//   * First transport play:
+//       device found        → render normally
+//       no device / failure → {"type":"error","code":"no_audio_device",
+//                              "detail":"..."} and the engine stays
+//                              protocol-functional (stop/seek/state respond)
+//   * --null-audio: run the graph on the engine's built-in null device (a
+//     minimal JUCE AudioIODevice — JUCE 8 no longer ships one) whose callback
+//     thread paces the graph in real time with no hardware. Transport play
+//     then SUCCEEDS and state ticks advance: CI verifies scheduling without
+//     a sound card.
+//   * --no-audio: forced device-less — play always answers no_audio_device
+//     (deterministic error-path test without relying on runner hardware).
+//   * Every audio init path is exception-wrapped: audio can never crash the
+//     process (MSVC /EHa makes catch(...) catch SEH access violations too).
 
 // MSVC needs _USE_MATH_DEFINES before <cmath> for M_PI.
 // NOMINMAX prevents windows.h (pulled in by JUCE/IXWebSocket) from defining
@@ -30,10 +52,8 @@
 #include <vector>
 
 #include <juce_core/juce_core.h>
-#if SCORCH_ENGINE_AUDIO
 #include <juce_audio_basics/juce_audio_basics.h>
 #include <juce_audio_devices/juce_audio_devices.h>
-#endif
 
 #include <ixwebsocket/IXNetSystem.h>
 #include <ixwebsocket/IXWebSocket.h>
@@ -49,6 +69,8 @@ constexpr double kAttackMs = 10.0;
 constexpr double kReleaseMs = 10.0;
 
 std::atomic<bool> g_should_exit{false};
+bool g_nullAudio = false;      // --null-audio: JUCE null device (CI / device-less)
+bool g_forcedNoAudio = false;  // --no-audio: forced device-less (play → no_audio_device)
 
 // ─── Engine event (parsed from JSON load message) ───────────────────────────
 struct EngineEvent {
@@ -60,7 +82,6 @@ struct EngineEvent {
 };
 
 // ─── Synth voice ────────────────────────────────────────────────────────────
-#if SCORCH_ENGINE_AUDIO
 struct Voice {
     int pitch = -1;
     double freq = 0;
@@ -71,7 +92,6 @@ struct Voice {
     bool releasing = false;  // in release phase
     int64_t age = 0;         // for steal-oldest
 };
-#endif
 
 // ─── Engine state (shared between WS thread, audio thread, state thread) ────
 struct EngineState {
@@ -86,15 +106,9 @@ struct EngineState {
     std::atomic<double> sampleRate{44100.0};
     std::atomic<int64_t> samplesProcessed{0}; // since play start
 
-#if SCORCH_ENGINE_AUDIO
     Voice voices[kMaxVoices];
     std::mutex voicesMutex;
     int64_t voiceAge = 0;
-#else
-    // No audio: voices are stubbed out. The protocol logic still works;
-    // note-on/note-off are accepted but produce no sound.
-    std::mutex voicesMutex; // kept for lock_guard compatibility
-#endif
 
     double samplesPerTick() const {
         return sampleRate.load() * 60.0 / (bpm * ppqn);
@@ -110,7 +124,6 @@ struct EngineState {
 EngineState g_engine;
 
 // ─── Audio callback ─────────────────────────────────────────────────────────
-#if SCORCH_ENGINE_AUDIO
 class EngineAudioCallback : public juce::AudioIODeviceCallback {
 public:
     void audioDeviceIOCallbackWithContext(const float* const* /*inputChannelData*/,
@@ -193,10 +206,11 @@ public:
         }
     }
 
-    void audioDeviceAboutToStart(juce::AudioIODevice* /*device*/) override {
-        double rate = g_engine.sampleRate.load();
-        // Update sample rate if changed
-        // (device->getCurrentSampleRate() would be ideal but we keep it simple)
+    void audioDeviceAboutToStart(juce::AudioIODevice* device) override {
+        // Adopt the device's actual rate (real device or null device) so the
+        // tick→sample scheduling math matches the running callback.
+        if (device != nullptr)
+            g_engine.sampleRate.store(device->getCurrentSampleRate());
     }
 
     void audioDeviceStopped() override {}
@@ -255,8 +269,204 @@ private:
 };
 
 EngineAudioCallback g_audioCallback;
-juce::AudioDeviceManager g_deviceManager;
-#endif // SCORCH_ENGINE_AUDIO
+
+// ─── Null device (Stage 3b-fix) ─────────────────────────────────────────────
+// JUCE 8 no longer ships a NullAudioDevice, so the engine carries its own:
+// a minimal AudioIODevice whose callback thread paces the graph in REAL TIME
+// with zero hardware. --null-audio opens this instead of scanning for a real
+// device — transport play SUCCEEDS and state ticks advance (CI + device-less).
+class EngineNullDevice : public juce::AudioIODevice, private juce::Thread {
+public:
+    EngineNullDevice()
+        : juce::AudioIODevice("scorch-null", "Null"), juce::Thread("scorch-null-audio") {}
+
+    juce::StringArray getOutputChannelNames() override { return { "Output 1", "Output 2" }; }
+    juce::StringArray getInputChannelNames() override { return {}; }
+    juce::Array<double> getAvailableSampleRates() override { return { 44100.0, 48000.0 }; }
+    juce::Array<int> getAvailableBufferSizes() override { return { 128, 256, 512, 1024 }; }
+    int getDefaultBufferSize() override { return 512; }
+
+    juce::String open(const juce::BigInteger& /*inputChannels*/,
+                      const juce::BigInteger& outputChannels,
+                      double sampleRateToUse,
+                      int bufferSizeToUse) override {
+        const juce::ScopedLock sl(stateLock);
+        if (openFlag || running) return "null device already open";
+        sampleRate = sampleRateToUse > 0 ? sampleRateToUse : 44100.0;
+        bufferSize = bufferSizeToUse > 0 ? bufferSizeToUse : 512;
+        activeOut = outputChannels;
+        if (activeOut.countNumberOfSetBits() == 0) activeOut.setRange(0, 2, true);
+        outBuffer.assign(static_cast<size_t>(bufferSize) * 2, 0.0f);
+        inBuffer.assign(static_cast<size_t>(bufferSize), 0.0f);
+        openFlag = true;
+        return {};
+    }
+
+    void close() override {
+        stop();
+        const juce::ScopedLock sl(stateLock);
+        openFlag = false;
+    }
+
+    bool isOpen() override { const juce::ScopedLock sl(stateLock); return openFlag; }
+
+    void start(juce::AudioIODeviceCallback* newCallback) override {
+        if (newCallback == nullptr) return;
+        {
+            const juce::ScopedLock sl(stateLock);
+            if (!openFlag || running) return;
+            deviceCallback = newCallback;
+            running = true;
+        }
+        newCallback->audioDeviceAboutToStart(this);
+        startThread(juce::Thread::Priority::normal);
+    }
+
+    void stop() override {
+        juce::AudioIODeviceCallback* old = nullptr;
+        {
+            const juce::ScopedLock sl(stateLock);
+            if (!running) return;
+            old = deviceCallback;
+            deviceCallback = nullptr;
+            running = false;
+        }
+        stopThread(5000);
+        if (old != nullptr) old->audioDeviceStopped();
+    }
+
+    bool isPlaying() override { const juce::ScopedLock sl(stateLock); return running; }
+    juce::String getLastError() override { return {}; }
+    int getCurrentBufferSizeSamples() override { const juce::ScopedLock sl(stateLock); return bufferSize; }
+    double getCurrentSampleRate() override { const juce::ScopedLock sl(stateLock); return sampleRate; }
+    int getCurrentBitDepth() override { return 32; }
+    juce::BigInteger getActiveOutputChannels() const override { const juce::ScopedLock sl(stateLock); return activeOut; }
+    juce::BigInteger getActiveInputChannels() const override { return {}; }
+    int getOutputLatencyInSamples() override { return 0; }
+    int getInputLatencyInSamples() override { return 0; }
+
+private:
+    void run() override {
+        using Clock = std::chrono::steady_clock;
+        const auto period = std::chrono::duration_cast<Clock::duration>(
+            std::chrono::duration<double>(static_cast<double>(bufferSize) / sampleRate));
+        juce::AudioIODeviceCallbackContext context{};
+        auto nextTick = Clock::now();
+        while (!threadShouldExit()) {
+            std::fill(outBuffer.begin(), outBuffer.end(), 0.0f);
+            float* outPtrs[2] = { outBuffer.data(), outBuffer.data() + bufferSize };
+            const float* inPtrs[1] = { inBuffer.data() };
+            juce::AudioIODeviceCallback* cb = nullptr;
+            { const juce::ScopedLock sl(stateLock); cb = deviceCallback; }
+            if (cb != nullptr)
+                cb->audioDeviceIOCallbackWithContext(inPtrs, 0, outPtrs, 2, bufferSize, context);
+            nextTick += period;
+            std::this_thread::sleep_until(nextTick);
+            if (Clock::now() - nextTick > period * 64) nextTick = Clock::now(); // resync after a stall
+        }
+    }
+
+    juce::CriticalSection stateLock;  // guards open/running/callback + config
+    juce::AudioIODeviceCallback* deviceCallback = nullptr;
+    std::vector<float> outBuffer, inBuffer;
+    juce::BigInteger activeOut;
+    double sampleRate = 44100.0;
+    int bufferSize = 512;
+    bool openFlag = false;
+    bool running = false;
+};
+
+// ─── Lazy audio subsystem (Stage 3b-fix) ────────────────────────────────────
+// NOTHING here touches hardware at startup. The AudioDeviceManager is heap-
+// constructed on the FIRST transport play only; device enumeration (the
+// historical 0xC0000005 source on headless runners) runs inside the guarded
+// ensureAudioReady() below, on the WS thread, with MSVC /EHa so that even an
+// SEH access violation becomes a clean protocol error instead of a crash.
+struct AudioSystem {
+    std::mutex initMutex;
+    std::unique_ptr<juce::AudioDeviceManager> manager;   // real-device path
+    std::unique_ptr<EngineNullDevice> nullDevice;        // --null-audio path
+    bool ready = false;
+};
+
+AudioSystem g_audio;
+
+// Bring up the audio device. Returns "" on success, else a human-readable
+// detail string for the no_audio_device error reply. A failed attempt resets
+// the subsystem so the NEXT play retries (e.g. a device plugged in later).
+std::string ensureAudioReady() {
+    std::lock_guard<std::mutex> lock(g_audio.initMutex);
+    if (g_audio.ready) return "";
+    if (g_forcedNoAudio) return "--no-audio: forced device-less mode";
+
+    try {
+        if (g_nullAudio) {
+            // CI / device-less: the engine's null device — the graph runs in
+            // real time with no hardware. Transport play SUCCEEDS; state
+            // ticks advance.
+            auto dev = std::make_unique<EngineNullDevice>();
+            juce::BigInteger outCh;
+            outCh.setBit(0);
+            outCh.setBit(1);
+            auto err = dev->open(juce::BigInteger(), outCh, 44100.0, 512);
+            if (err.isNotEmpty())
+                return "null audio device open failed: " + err.toStdString();
+            g_engine.sampleRate.store(dev->getCurrentSampleRate());
+            dev->start(&g_audioCallback);
+            g_audio.nullDevice = std::move(dev);
+            g_audio.ready = true;
+            std::cout << "[engine] audio: null device (no hardware) @ "
+                      << g_audio.nullDevice->getCurrentSampleRate() << " Hz" << std::endl;
+            return "";
+        }
+
+        g_audio.manager = std::make_unique<juce::AudioDeviceManager>();
+        auto result = g_audio.manager->initialiseWithDefaultDevices(0, 2);
+        if (result.isNotEmpty()) {
+            std::string detail = result.toStdString();
+            g_audio.manager.reset();  // release; the next play retries
+            return detail.empty() ? "no default audio device" : detail;
+        }
+        auto* device = g_audio.manager->getCurrentAudioDevice();
+        if (device == nullptr) {
+            g_audio.manager.reset();
+            return "audio initialised but no current device";
+        }
+        g_engine.sampleRate.store(device->getCurrentSampleRate());
+        g_audio.manager->addAudioCallback(&g_audioCallback);
+        g_audio.ready = true;
+        std::cout << "[engine] audio: " << device->getName().toStdString()
+                  << " @ " << device->getCurrentSampleRate() << " Hz"
+                  << " buffer=" << device->getCurrentBufferSizeSamples() << std::endl;
+        return "";
+    } catch (const std::exception& e) {
+        g_audio.manager.reset();
+        g_audio.nullDevice.reset();
+        return std::string("audio init exception: ") + (e.what() ? e.what() : "unknown");
+    } catch (...) {
+        g_audio.manager.reset();
+        g_audio.nullDevice.reset();
+        return "audio init failed (SEH / unknown exception caught)";
+    }
+}
+
+// Clean shutdown of whichever audio path is active. Never throws.
+void shutdownAudio() {
+    try {
+        if (g_audio.nullDevice) {
+            g_audio.nullDevice->close();
+            g_audio.nullDevice.reset();
+        }
+        if (g_audio.manager) {
+            g_audio.manager->removeAudioCallback(&g_audioCallback);
+            g_audio.manager->closeAudioDevice();
+            g_audio.manager.reset();
+        }
+        g_audio.ready = false;
+    } catch (...) {
+        // Swallow — shutdown must be robust.
+    }
+}
 
 // JUCE 8 doesn't have juce::JSON::escape — manual JSON string escaper.
 std::string escape_json(const std::string& s) {
@@ -303,7 +513,7 @@ void handle_load(const juce::var& json, ix::WebSocket& ws) {
             ee.channel = eobj->getProperty("channel");
             ee.pitch = eobj->getProperty("data1");
             ee.velocity = eobj->getProperty("data2");
-            ee.tick = static_cast<int64_t>((int64_t)eobj->getProperty("timestampTicks"));
+            ee.tick = static_cast<int64_t>(static_cast<double>(eobj->getProperty("timestampTicks")));
             newEvents.push_back(ee);
         }
     }
@@ -314,7 +524,7 @@ void handle_load(const juce::var& json, ix::WebSocket& ws) {
     if (metaVar.getDynamicObject()) {
         bpm = metaVar.getDynamicObject()->getProperty("bpm");
         ppqn = metaVar.getDynamicObject()->getProperty("ppqn");
-        endTick = static_cast<int64_t>((int64_t)metaVar.getDynamicObject()->getProperty("endTick"));
+        endTick = static_cast<int64_t>(static_cast<double>(metaVar.getDynamicObject()->getProperty("endTick")));
     }
 
     {
@@ -336,6 +546,16 @@ void handle_transport(const juce::var& json, ix::WebSocket& ws) {
     juce::String cmd = obj->getProperty("command").toString();
 
     if (cmd == "play") {
+        // LAZY audio init — the first transport play brings the device up
+        // (Stage 3b-fix policy). Failure → clean no_audio_device error reply,
+        // engine stays protocol-functional; success → normal rendering.
+        std::string audioErr = ensureAudioReady();
+        if (!audioErr.empty()) {
+            ws.send(std::string("{\"type\":\"error\",\"code\":\"no_audio_device\",\"detail\":\"")
+                    + escape_json(audioErr) + "\"}");
+            std::cout << "[engine] play rejected — no audio device: " << audioErr << std::endl;
+            return;
+        }
         g_engine.samplesProcessed.store(0);
         g_engine.playStartTick.store(0);
         g_engine.playing.store(true);
@@ -343,15 +563,13 @@ void handle_transport(const juce::var& json, ix::WebSocket& ws) {
     } else if (cmd == "stop") {
         g_engine.playing.store(false);
         // All notes off
-#if SCORCH_ENGINE_AUDIO
         {
             std::lock_guard<std::mutex> lock(g_engine.voicesMutex);
             for (auto& v : g_engine.voices) { v.releasing = false; v.active = false; v.env = 0; v.pitch = -1; }
         }
-#endif
         std::cout << "[engine] transport stop" << std::endl;
     } else if (cmd == "seek") {
-        int64_t tick = static_cast<int64_t>((int64_t)obj->getProperty("tick"));
+        int64_t tick = static_cast<int64_t>(static_cast<double>(obj->getProperty("tick")));
         g_engine.playStartTick.store(tick);
         g_engine.samplesProcessed.store(0);
         std::cout << "[engine] transport seek to tick " << tick << std::endl;
@@ -360,12 +578,10 @@ void handle_transport(const juce::var& json, ix::WebSocket& ws) {
 
 void handle_panic() {
     g_engine.playing.store(false);
-#if SCORCH_ENGINE_AUDIO
     {
         std::lock_guard<std::mutex> lock(g_engine.voicesMutex);
         for (auto& v : g_engine.voices) { v.releasing = false; v.active = false; v.env = 0; v.pitch = -1; }
     }
-#endif
     std::cout << "[engine] panic — all notes off" << std::endl;
 }
 
@@ -374,16 +590,21 @@ void handle_panic() {
 
 int main(int argc, char** argv) {
     int port = kDefaultPort;
-    bool noAudio = false;
     for (int i = 1; i < argc; ++i) {
         std::string arg = argv[i];
         if (arg == "--version") {
+            // "audio: built-in" is the compile-gate-absence proof: a gated
+            // (mute) build would not report audio support here.
             std::cout << "scorch-engine " << kEngineVersion
-                      << " (protocol " << kProtocolVersion << ")" << std::endl;
+                      << " (protocol " << kProtocolVersion
+                      << ", audio: built-in)" << std::endl;
             return 0;
         }
+        if (arg == "--null-audio") {
+            g_nullAudio = true;
+        }
         if (arg == "--no-audio") {
-            noAudio = true;
+            g_forcedNoAudio = true;
         }
         if (arg == "--port" && i + 1 < argc) {
             port = std::atoi(argv[++i]);
@@ -396,29 +617,14 @@ int main(int argc, char** argv) {
 
     ix::initNetSystem();
 
-    // Setup JUCE audio device manager (default output). Skip on --no-audio
-    // (CI has no audio device; the protocol test still works without sound).
-#if SCORCH_ENGINE_AUDIO
-    if (!noAudio) {
-        auto audioResult = g_deviceManager.initialiseWithDefaultDevices(0, 2);
-        if (audioResult.isNotEmpty()) {
-            std::cerr << "[engine] audio init: " << audioResult << std::endl;
-        } else {
-            auto* device = g_deviceManager.getCurrentAudioDevice();
-            if (device) {
-                g_engine.sampleRate.store(device->getCurrentSampleRate());
-                std::cout << "[engine] audio: " << device->getName().toStdString()
-                          << " @ " << device->getCurrentSampleRate() << " Hz"
-                          << " buffer=" << device->getCurrentBufferSizeSamples() << std::endl;
-            }
-            g_deviceManager.addAudioCallback(&g_audioCallback);
-        }
-    } else {
-        std::cout << "[engine] audio disabled (--no-audio)" << std::endl;
-    }
-#else
-    std::cout << "[engine] audio disabled (build without SCORCH_ENGINE_AUDIO)" << std::endl;
-#endif
+    // Stage 3b-fix: NO audio initialization at startup. Audio is brought up
+    // lazily on the first transport play (or simulated via --null-audio), so
+    // a headless machine boots cleanly and the protocol test does not depend
+    // on audio hardware.
+    std::cout << "[engine] audio policy: lazy init on first transport play";
+    if (g_nullAudio) std::cout << " (--null-audio)";
+    else if (g_forcedNoAudio) std::cout << " (--no-audio: forced device-less)";
+    std::cout << std::endl;
 
     ix::WebSocketServer server(port, "127.0.0.1");
 
@@ -462,12 +668,10 @@ int main(int argc, char** argv) {
             } else if (msg->type == ix::WebSocketMessageType::Close) {
                 // Panic on disconnect — no stuck notes
                 g_engine.playing.store(false);
-#if SCORCH_ENGINE_AUDIO
                 {
                     std::lock_guard<std::mutex> lock(g_engine.voicesMutex);
                     for (auto& v : g_engine.voices) { v.releasing = false; v.active = false; v.env = 0; v.pitch = -1; }
                 }
-#endif
                 std::cout << "[engine] client disconnected (panic)" << std::endl;
             }
         });
@@ -506,10 +710,7 @@ int main(int argc, char** argv) {
     }
     server.stop();
     state_thread.join();
-#if SCORCH_ENGINE_AUDIO
-    g_deviceManager.removeAudioCallback(&g_audioCallback);
-    g_deviceManager.closeAudioDevice();
-#endif
+    shutdownAudio();
     ix::uninitNetSystem();
     std::cout << "[engine] clean exit 0" << std::endl;
     return 0;

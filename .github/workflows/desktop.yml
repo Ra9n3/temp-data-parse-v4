@@ -38,6 +38,9 @@ jobs:
 
       # Stage 3a: build the JUCE engine sidecar BEFORE tauri build, so the
       # exe can be placed in src-tauri/binaries/ for the bundler to pick up.
+      # Stage 3b-fix: NO SCORCH_ENGINE_AUDIO=OFF — audio is ALWAYS compiled in.
+      # The old compile gate shipped mute installers (the user's by-ear gate
+      # failed by construction); headless safety is now runtime-lazy-init.
       - name: Setup CMake
         uses: lukka/get-cmake@latest
 
@@ -55,7 +58,7 @@ jobs:
       - name: Configure + build engine (CMake + MSVC)
         shell: pwsh
         run: |
-          cmake -S engine -B engine/build -G "Ninja" -DCMAKE_BUILD_TYPE=Release -DSCORCH_ENGINE_AUDIO=OFF
+          cmake -S engine -B engine/build -G "Ninja" -DCMAKE_BUILD_TYPE=Release
           cmake --build engine/build --parallel
           if (-not (Test-Path "engine/build/scorch-engine.exe")) {
             throw "scorch-engine.exe not found after build"
@@ -64,38 +67,77 @@ jobs:
           Copy-Item engine/build/scorch-engine.exe src-tauri/binaries/scorch-engine.exe -Force
           Write-Host "Engine exe copied to src-tauri/binaries/"
 
-      - name: Engine standalone protocol test
+      - name: Engine standalone protocol test (null-audio + graceful no-device paths)
         shell: pwsh
         run: |
-          # Test 1: --version
+          # Gate-absence proof: the binary itself reports "audio: built-in".
+          # A compile-gated (mute) build cannot print this.
           $versionOut = & "engine/build/scorch-engine.exe" --version
           Write-Host "Version output: $versionOut"
-          if ($versionOut -notmatch "scorch-engine 0.1.0") { throw "Version check failed" }
+          if ($versionOut -notmatch "scorch-engine 0\.1\.0") { throw "Version check failed: $versionOut" }
+          if ($versionOut -notmatch "audio: built-in") { throw "Audio compile gate still present — engine reports no audio support" }
 
-          # Start the engine on a test port (audio is compiled out for CI)
-          $proc = Start-Process -FilePath "engine/build/scorch-engine.exe" -ArgumentList "--port","9378" -PassThru -NoNewWindow -RedirectStandardOutput "engine-stdout.txt" -RedirectStandardError "engine-stderr.txt"
+          # Test A — --null-audio: JUCE null device, no hardware. The graph runs
+          # in real time: transport play SUCCEEDS, state ticks ADVANCE, stop works.
+          Write-Host "=== Test A: --null-audio (play -> state ticks advance -> stop) ==="
+          $procA = Start-Process -FilePath "engine/build/scorch-engine.exe" -ArgumentList "--port","9378","--null-audio" -PassThru -NoNewWindow -RedirectStandardOutput "engine-a-stdout.txt" -RedirectStandardError "engine-a-stderr.txt"
           Start-Sleep -Seconds 3
-
-          if ($proc.HasExited) {
-            Write-Host "Engine exited early (code=$($proc.ExitCode)). stdout:"
-            if (Test-Path engine-stdout.txt) { Get-Content engine-stdout.txt }
-            Write-Host "stderr:"
-            if (Test-Path engine-stderr.txt) { Get-Content engine-stderr.txt }
-            throw "Engine process exited before test could connect"
+          try {
+            if ($procA.HasExited) {
+              Write-Host "Engine A exited early (code=$($procA.ExitCode)). stdout:"
+              if (Test-Path engine-a-stdout.txt) { Get-Content engine-a-stdout.txt }
+              Write-Host "stderr:"
+              if (Test-Path engine-a-stderr.txt) { Get-Content engine-a-stderr.txt }
+              throw "Engine A process exited before test could connect"
+            }
+            node .github/scripts/test-engine-protocol.mjs 9378 null-audio
+            if ($LASTEXITCODE -ne 0) {
+              Write-Host "Engine A stdout:"
+              if (Test-Path engine-a-stdout.txt) { Get-Content engine-a-stdout.txt }
+              Write-Host "Engine A stderr:"
+              if (Test-Path engine-a-stderr.txt) { Get-Content engine-a-stderr.txt }
+              throw "Engine A null-audio protocol test failed"
+            }
+            # shutdown -> clean exit 0. A 0xC0000005 would surface as a
+            # negative/negative-hex exit code and fail this check.
+            $procA.WaitForExit(10000) | Out-Null
+            if (-not $procA.HasExited -or $procA.ExitCode -ne 0) { throw "Engine A did not exit cleanly (code=$($procA.ExitCode))" }
+            Write-Host "Engine A clean exit 0"
+          } finally {
+            Stop-Process -Id $procA.Id -Force -ErrorAction SilentlyContinue
           }
 
-          # Test 2-4: WebSocket protocol via Node.js test client
-          node .github/scripts/test-engine-protocol.mjs 9378
-          if ($LASTEXITCODE -ne 0) {
-            Write-Host "Engine stdout:"
-            if (Test-Path engine-stdout.txt) { Get-Content engine-stdout.txt }
-            Write-Host "Engine stderr:"
-            if (Test-Path engine-stderr.txt) { Get-Content engine-stderr.txt }
-            throw "Engine protocol test failed"
+          # Test B — NO flag on a headless runner: lazy audio init finds no
+          # device, transport play returns the graceful no_audio_device error
+          # (the historical 0xC0000005 crash is now a clean protocol reply),
+          # and the engine stays protocol-functional afterwards.
+          Write-Host "=== Test B: no flag (play -> graceful no_audio_device error, no crash) ==="
+          $procB = Start-Process -FilePath "engine/build/scorch-engine.exe" -ArgumentList "--port","9379" -PassThru -NoNewWindow -RedirectStandardOutput "engine-b-stdout.txt" -RedirectStandardError "engine-b-stderr.txt"
+          Start-Sleep -Seconds 3
+          try {
+            if ($procB.HasExited) {
+              Write-Host "Engine B exited early (code=$($procB.ExitCode)). stdout:"
+              if (Test-Path engine-b-stdout.txt) { Get-Content engine-b-stdout.txt }
+              Write-Host "stderr:"
+              if (Test-Path engine-b-stderr.txt) { Get-Content engine-b-stderr.txt }
+              throw "Engine B process exited before test could connect"
+            }
+            node .github/scripts/test-engine-protocol.mjs 9379 no-device
+            if ($LASTEXITCODE -ne 0) {
+              Write-Host "Engine B stdout:"
+              if (Test-Path engine-b-stdout.txt) { Get-Content engine-b-stdout.txt }
+              Write-Host "Engine B stderr:"
+              if (Test-Path engine-b-stderr.txt) { Get-Content engine-b-stderr.txt }
+              throw "Engine B no-device graceful-error test failed"
+            }
+            $procB.WaitForExit(10000) | Out-Null
+            if (-not $procB.HasExited -or $procB.ExitCode -ne 0) { throw "Engine B did not exit cleanly (code=$($procB.ExitCode))" }
+            Write-Host "Engine B clean exit 0 (headless crash path is gone)"
+          } finally {
+            Stop-Process -Id $procB.Id -Force -ErrorAction SilentlyContinue
           }
 
-          Write-Host "All engine protocol tests passed"
-          Stop-Process -Id $proc.Id -Force -ErrorAction SilentlyContinue
+          Write-Host "All engine protocol tests passed (audio-capable build, graceful headless behavior)"
 
       - run: npm ci
 

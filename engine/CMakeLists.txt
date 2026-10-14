@@ -4,10 +4,11 @@ project(scorch-engine VERSION 0.1.0 LANGUAGES CXX)
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
-# JUCE 8 — pinned tag. Stage 3b adds juce_audio_basics + juce_audio_devices
-# for the test synth. SCORCH_ENGINE_AUDIO=OFF (default for CI) skips the audio
-# modules to avoid static-init crashes on headless runners.
-option(SCORCH_ENGINE_AUDIO "Link JUCE audio modules (test synth)" ON)
+# JUCE 8 — pinned tag. juce_audio_basics + juce_audio_devices are ALWAYS
+# linked (Stage 3b-fix removed the SCORCH_ENGINE_AUDIO compile gate: it
+# shipped mute installers by construction). Headless safety is handled at
+# RUNTIME instead — lazy device init on first transport play + --null-audio
+# for CI (see engine/src/main.cpp header comment and docs/ASSUMPTIONS.md).
 
 include(FetchContent)
 set(FETCHCONTENT_BASE_DIR ${CMAKE_BINARY_DIR}/_fetch CACHE PATH "FetchContent root")
@@ -36,18 +37,15 @@ FetchContent_MakeAvailable(IXWebSocket)
 add_executable(scorch-engine src/main.cpp)
 target_link_libraries(scorch-engine PRIVATE
     juce_core
+    juce_audio_basics
+    juce_audio_devices
     ixwebsocket
 )
-if(SCORCH_ENGINE_AUDIO)
-    target_link_libraries(scorch-engine PRIVATE
-        juce_audio_basics
-        juce_audio_devices
-    )
-    target_compile_definitions(scorch-engine PRIVATE SCORCH_ENGINE_AUDIO=1)
-else()
-    target_compile_definitions(scorch-engine PRIVATE SCORCH_ENGINE_AUDIO=0)
-endif()
-# Console subsystem — visible console window during dev (spec: "fine").
+# MSVC /EHa: audio init failures on device-less machines can surface as SEH
+# access violations (0xC0000005). /EHa makes catch(...) catch them, so the
+# lazy init in ensureAudioReady() converts every failure into a clean
+# no_audio_device protocol error instead of crashing the process.
 if(MSVC)
+    target_compile_options(scorch-engine PRIVATE /EHa)
     set_target_properties(scorch-engine PROPERTIES LINK_FLAGS "/SUBSYSTEM:CONSOLE")
 endif()
