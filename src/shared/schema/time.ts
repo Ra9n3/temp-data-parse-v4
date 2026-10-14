@@ -1,4 +1,4 @@
-import { PPQ, type Chord, type Project, type TimeSignature } from "./types";
+import { PPQ, type Chord, type Note, type Project, type TimeSignature } from "./types";
 
 export function ticksPerBeat(ts: TimeSignature): number {
   return (PPQ * 4) / ts.denominator;
@@ -172,5 +172,34 @@ export function rescaleChordsForMeter(
     ...c,
     startTick: Math.max(0, Math.round(c.startTick * ratio)),
     durationTicks: Math.max(1, Math.round(c.durationTicks * ratio)),
+  }));
+}
+
+/** Meter changes PROPORTIONALLY RESCALE note ticks so bar-N-beat-B material
+ * stays at bar N beat B — the same semantic rescale `rescaleChordsForMeter`
+ * applies to chords (identical ratio source: ticksPerBar; identical rounding:
+ * integer round of a float ratio, ±1-tick tolerance documented, duration floor
+ * 1 so zero-length notes are impossible). Pitches, velocities, dynamics and
+ * detune are untouched; every pitchBendPoints[].tick scales with the note.
+ * Sections need nothing (bar-indexed reflow inherently); reference-audio
+ * offset is ms-based and untouched. */
+export function rescaleNotesForMeter(
+  notes: Note[],
+  oldTs: TimeSignature,
+  newTs: TimeSignature,
+): Note[] {
+  if (notes.length === 0) return notes;
+  const oldPerBar = ticksPerBar(oldTs);
+  const newPerBar = ticksPerBar(newTs);
+  if (oldPerBar <= 0 || newPerBar === oldPerBar) return notes;
+  const ratio = newPerBar / oldPerBar;
+  const scale = (tick: number) => Math.max(0, Math.round(tick * ratio));
+  return notes.map((note) => ({
+    ...note,
+    startTick: scale(note.startTick),
+    durationTicks: Math.max(1, Math.round(note.durationTicks * ratio)),
+    ...(note.pitchBendPoints?.length
+      ? { pitchBendPoints: note.pitchBendPoints.map((point) => ({ ...point, tick: scale(point.tick) })) }
+      : {}),
   }));
 }

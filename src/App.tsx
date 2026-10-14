@@ -23,6 +23,7 @@ import {
   makeId,
   nextMidiChannel,
   rescaleChordsForMeter,
+  rescaleNotesForMeter,
   validateProject,
   type Family,
   type ModeName,
@@ -274,10 +275,16 @@ export default function App() {
         onKey={(key: PitchClass) => patch({ key })}
         onMode={(mode: ModeName) => patch({ mode })}
         onTimeSignature={(timeSignature: TimeSignature) =>
+          // PROPORTIONAL RESCALE — note ticks scale by
+          // newTicksPerBar/oldTicksPerBar so bar-N-beat-B stays put, mirroring
+          // rescaleChordsForMeter (identical ratio + rounding conventions, so
+          // chords and notes stay aligned). It is a COMMIT: one undo step
+          // restores exact pre-change positions. Generation is untouched.
           commit({
             ...project,
             timeSignature,
             chords: rescaleChordsForMeter(project.chords, project.timeSignature, timeSignature),
+            tracks: project.tracks.map((t) => ({ ...t, notes: rescaleNotesForMeter(t.notes, project.timeSignature, timeSignature) })),
           })
         }
         onOrchestralStyle={(orchestralStyle) => patch({ generationSettings: { ...generationSettings, orchestralStyle } })}
