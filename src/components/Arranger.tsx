@@ -12,16 +12,13 @@ import { Ph } from "../icons";
 import {
   FAMILIES,
   FAMILY_COLORS,
-  PITCH_CLASS_NAMES,
   SECTION_PRESETS,
-  type Chord,
   type Family,
   type Project,
   type Section,
   type Track,
 } from "../shared/schema/types";
-import { parseChord, type ChordQuality } from "../shared/schema/chords";
-import type { PitchClass } from "../shared/schema/types";
+import { parseChord } from "../shared/schema/chords";
 import {
   barToTick,
   projectEndTick,
@@ -549,9 +546,7 @@ function TrackRow(props: {
         {track.role === "chords" && (
           <ChordsLane
             project={project}
-            ppt={ppt}
-            selectedId={props.selChord}
-            editingId={props.editingChord}
+            ppt={ppt}            selectedId={props.selChord}
             drag={props.drag}
             tickFromEvent={props.tickFromEvent}
             onSelect={props.onSelectChord}
@@ -754,7 +749,6 @@ function ChordsLane({
   project,
   ppt,
   selectedId,
-  editingId,
   drag,
   tickFromEvent,
   onSelect,
@@ -765,7 +759,6 @@ function ChordsLane({
   project: Project;
   ppt: number;
   selectedId: string | null;
-  editingId: string | null;
   drag: Drag | null;
   tickFromEvent: (e: { clientX: number }, lane: HTMLElement) => number;
   onSelect: (id: string | null) => void;
@@ -805,6 +798,9 @@ function ChordsLane({
             }}
             onDoubleClick={(e) => {
               e.stopPropagation();
+              // Chord v2 — double-click edits in the TOP-BAR panel: select
+              // + retarget. Cards never render an editor.
+              onSelect(c.id);
               onEdit(c.id);
             }}
           >
@@ -815,15 +811,11 @@ function ChordsLane({
                 onStartDrag({ kind: "chord-resize", id: c.id, edge: "l" });
               }}
             />
-            {editingId === c.id ? (
-              <ChordEditor chord={c} onDone={(symbol) => {
-                const quality = parsed.ok ? parsed.chord.quality === "minor" || parsed.chord.quality.startsWith("m") ? "Min" : parsed.chord.quality === "diminished" || parsed.chord.quality === "dim7" ? "Dim" : parsed.chord.quality === "augmented" || parsed.chord.quality === "aug7" ? "Aug" : parsed.chord.quality === "sus2" ? "Sus2" : parsed.chord.quality === "sus4" || parsed.chord.quality === "7sus4" ? "Sus4" : "Maj" : undefined;
-                onPatch({ chords: project.chords.map((x) => x.id === c.id ? { ...x, symbol, quality, extensions: parsed.ok ? parsed.chord.extensions : [], bassOverride: parsed.ok ? parsed.chord.bass ?? undefined : undefined } : x) });
-                onEdit(null);
-              }} />
-            ) : (
-              <span className="block truncate pt-3">{c.symbol}</span>
-            )}
+            {/* Chord Panel Refinement Commit 1 — cards are display-only:
+             * symbol text + two resize edges + dblclick retarget. The old
+             * in-lane ChordEditor (regression) is deleted; the only chord
+             * editor in the tree is the top-bar panel. */}
+            <span className="block truncate pt-3">{c.symbol}</span>
             <Edge
               side="r"
               onMouseDown={(e) => {
@@ -882,47 +874,12 @@ function ResizeChordLive({
   return null;
 }
 
-function ChordEditor({ chord, onDone }: { chord: Chord; onDone: (symbol: string) => void }) {
-  const [v, setV] = useState(chord.symbol);
-  const parsed = parseChord(v);
-  const parsedRoot = parsed.ok ? parsed.chord.root : 0;
-  const parsedBass = parsed.ok ? parsed.chord.bass : null;
-  const rootName = PITCH_CLASS_NAMES[parsedRoot];
-  const parsedQuality = parsed.ok ? parsed.chord.quality : "major";
-  const quality = parsedQuality === "minor" || parsedQuality === "m7" || parsedQuality === "m7b5" || parsedQuality === "m6" || parsedQuality === "m9" ? "minor"
-    : parsedQuality === "diminished" || parsedQuality === "dim7" ? "diminished"
-    : parsedQuality === "augmented" || parsedQuality === "aug7" ? "augmented"
-    : parsedQuality === "sus2" ? "sus2" : parsedQuality === "sus4" || parsedQuality === "7sus4" ? "sus4" : "major";
-  const extensionNames = ["7", "maj7", "9", "b9", "#9", "11", "#11", "13", "b13"];
-  const selectedExtensions = parsed.ok ? parsed.chord.extensions : [];
-  const update = (nextRoot: string = rootName, nextQuality: ChordQuality | string = quality, nextExtensions: string[] = selectedExtensions, nextBass: PitchClass | null = parsedBass) => {
-    const qualityToken = nextQuality === "major" ? "" : nextQuality === "minor" ? "m" : nextQuality === "diminished" ? "dim" : nextQuality === "augmented" ? "aug" : nextQuality === "sus2" || nextQuality === "sus4" ? nextQuality : "";
-    const extensionOrder = ["maj7", "7", "b9", "#9", "9", "#11", "11", "b13", "13"];
-    const formattedExtensions = [...nextExtensions].sort((left, right) => extensionOrder.indexOf(left) - extensionOrder.indexOf(right));
-    let prefix = `${nextRoot}${qualityToken}`;
-    if (nextQuality === "major" || nextQuality === "minor") {
-      const hasMajorSeventh = formattedExtensions.includes("maj7");
-      const hasSeventh = formattedExtensions.includes("7");
-      const hasNinth = formattedExtensions.includes("9");
-      if (hasMajorSeventh) prefix = `${nextRoot}${nextQuality === "minor" ? "mmaj7" : "maj7"}`;
-      else if (hasSeventh) prefix = `${nextRoot}${nextQuality === "minor" ? "m7" : "7"}`;
-      else if (hasNinth) prefix = `${nextRoot}${nextQuality === "minor" ? "m9" : "9"}`;
-    }
-    const consumedExtension = prefix.endsWith("maj7") ? "maj7" : prefix.endsWith("m7") || prefix.endsWith("7") ? "7" : prefix.endsWith("m9") || prefix.endsWith("9") ? "9" : null;
-    const extensionSuffix = formattedExtensions.filter((extension) => extension !== consumedExtension).join("");
-    const bassSuffix = nextBass === null ? "" : `/${PITCH_CLASS_NAMES[nextBass]}`;
-    setV(`${prefix}${extensionSuffix}${bassSuffix}`);
-  };
+// Chord Panel Refinement Commit 1 — the in-lane ChordEditor component is
+// DELETED. It was the flagged regression (inline settings still rendered on
+// create/dblclick). The exactly-one chord editor in the component tree is
+// ChordPanel in TopBar.tsx; card vocabulary: click-empty=create, dblclick=
+// select+retarget, edge-drag=resize, no on-card inputs/buttons.
 
-  return (
-    <div className="absolute inset-1 z-[50] overflow-auto rounded bg-[#131720] p-1.5 shadow-xl" onMouseDown={(event) => event.stopPropagation()}>
-      <div className="flex gap-1"><select aria-label="Chord root" className="w-12 rounded bg-black/60 text-[10px]" value={parsedRoot} onChange={(e) => update(PITCH_CLASS_NAMES[Number(e.target.value)])}>{PITCH_CLASS_NAMES.map((name, index) => <option key={name} value={index}>{name}</option>)}</select><input aria-label="Chord symbol" autoFocus value={v} onChange={(e) => setV(e.target.value)} onKeyDown={(e) => { if (e.key === "Enter") onDone(v.trim() || chord.symbol); if (e.key === "Escape") onDone(chord.symbol); e.stopPropagation(); }} className={cn("min-w-0 flex-1 rounded bg-black/50 px-1 py-0.5 text-[10px] outline-none", parsed.ok ? "text-sky-100" : "text-red-300")} /><select aria-label="Slash chord bass" className="w-12 rounded bg-black/60 text-[10px]" value={parsedBass === null ? "none" : parsedBass} onChange={(e) => update(rootName, quality, selectedExtensions, e.target.value === "none" ? null : Number(e.target.value) as PitchClass)}><option value="none">/—</option>{PITCH_CLASS_NAMES.map((name, index) => <option key={name} value={index}>/{name}</option>)}</select></div>
-      <div role="group" aria-label="Chord quality" className="mt-1 flex flex-wrap gap-0.5">{[["major", "Maj"], ["minor", "Min"], ["diminished", "Dim"], ["augmented", "Aug"], ["sus2", "Sus2"], ["sus4", "Sus4"]].map(([value, label]) => <button key={value} type="button" aria-pressed={quality === value} className={cn("rounded px-1 py-0.5 text-[9px]", quality === value ? "bg-sky-500/40 text-white" : "bg-white/5 text-stone-400")} onClick={() => update(rootName, value)}>{label}</button>)}</div>
-      <div className="mt-1 flex flex-wrap gap-0.5">{extensionNames.map((extension) => { const active = selectedExtensions.includes(extension); return <button key={extension} type="button" aria-pressed={active} className={cn("rounded px-1 py-0.5 text-[9px]", active ? "bg-orange-500/40 text-orange-100" : "bg-white/5 text-stone-400")} onClick={() => update(rootName, quality, active ? selectedExtensions.filter((item) => item !== extension) : [...selectedExtensions, extension])}>{extension}</button>; })}</div>
-      <button type="button" disabled={!parsed.ok} className="mt-1 rounded bg-sky-500/30 px-2 py-0.5 text-[9px] disabled:cursor-not-allowed disabled:opacity-40" onClick={() => { if (parsed.ok) onDone(v.trim()); }}>Apply</button>
-    </div>
-  );
-}
 
 function SectionNameEditor({ section, onDone }: { section: Section; onDone: (name: string) => void }) {
   const v = section.name;
