@@ -10,17 +10,6 @@
     "beforeBuildCommand": "npm run build"
   },
   "app": {
-    "windows": [
-      {
-        "title": "Scorch",
-        "width": 1600,
-        "height": 900,
-        "minWidth": 1200,
-        "minHeight": 700,
-        "resizable": true,
-        "fullscreen": false
-      }
-    ],
     "security": {
       "csp": null
     }

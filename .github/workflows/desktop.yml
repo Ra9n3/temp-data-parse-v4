@@ -46,6 +46,42 @@ jobs:
       - name: Tauri build (msi + nsis + raw exe)
         run: npx tauri build
 
+      - name: Create web-pack zip (manifest + dist/ at root)
+        shell: pwsh
+        env:
+          RUN_NUMBER: ${{ github.run_number }}
+        run: |
+          $version = [int]$env:RUN_NUMBER
+          $iso = (Get-Date -Format "yyyy-MM-ddTHH:mm:ssZ")
+          @{ version = $version; minShell = 1; generatedAt = $iso } |
+            ConvertTo-Json -Compress |
+            Out-File -FilePath manifest.json -Encoding utf8NoBOM
+          Compress-Archive -Path dist\*, manifest.json -DestinationPath "web-pack-v$version.zip" -Force
+          Write-Host "Created web-pack-v$version.zip"
+
+      - name: Verify web-pack contents
+        shell: pwsh
+        run: |
+          $zip = (Get-ChildItem web-pack-v*.zip)[0].FullName
+          Add-Type -AssemblyName System.IO.Compression.FileSystem
+          $archive = [System.IO.Compression.ZipFile]::OpenRead($zip)
+          $entries = $archive.Entries | ForEach-Object { $_.FullName }
+          $archive.Dispose()
+          if ($entries -notcontains "manifest.json") { throw "manifest.json missing from web-pack" }
+          if ($entries -notcontains "index.html") { throw "index.html missing from web-pack" }
+          Write-Host "web-pack entries: $($entries -join ', ')"
+          # Print manifest for the log
+          $tmp = New-Item -ItemType Directory -Path web-pack-verify -Force
+          Expand-Archive -Path $zip -DestinationPath $tmp -Force
+          Get-Content "$tmp\manifest.json"
+
+      - name: Upload web-pack (hot-swap tier)
+        uses: actions/upload-artifact@v4
+        with:
+          name: web-pack
+          path: web-pack-v*.zip
+          retention-days: 14
+
       - name: Upload MSI installer
         uses: actions/upload-artifact@v4
         with:

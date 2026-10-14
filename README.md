@@ -51,7 +51,27 @@ Outputs land in `src-tauri/target/release/bundle/`:
 
 ### CI
 
-Every push touching `src/`, `src-tauri/`, `package.json`, or `vite.config.ts` triggers `.github/workflows/desktop.yml` on `windows-latest`. Artifacts (MSI, NSIS setup, raw `scorch.exe`) are uploaded with 14-day retention. The installers are **unsigned** — Windows SmartScreen will warn on first launch; this is expected for Stage 1 (signing lands in a later stage).
+Every push touching `src/`, `src-tauri/`, `package.json`, or `vite.config.ts` triggers `.github/workflows/desktop.yml` on `windows-latest`. **Four artifacts** are uploaded with 14-day retention:
+
+| Artifact | What it is | Tier |
+|---|---|---|
+| `web-pack` | `web-pack-v{N}.zip` — `manifest.json` + `dist/` contents at root | **Hot-swap** (no Rust rebuild) |
+| `scorch-windows-msi` | Windows Installer (MSI) | Slow (full rebuild) |
+| `scorch-windows-nsis` | NSIS setup exe | Slow (full rebuild) |
+| `scorch-windows-exe` | Raw `scorch.exe` | Slow (full rebuild) |
+
+The installers are **unsigned** — Windows SmartScreen will warn on first launch; this is expected for Stage 1–2 (signing lands in a later stage).
+
+### Hot-swap web packs (Stage 2)
+
+The desktop shell loads its web tier (UI + generation engine) from an **external versioned folder** next to the exe, not from the exe-embedded `dist/`. This means UI/engine updates ship as asset-pack publishes — no Rust recompile, no installer rebuild:
+
+1. Download `web-pack-v{N}.zip` from the latest Desktop CI run.
+2. Unzip into `<exe-dir>/web/{N}/` (so `web/{N}/index.html` and `web/{N}/manifest.json` exist).
+3. Write the version number to `<exe-dir>/web/CURRENT` (plain text): `echo {N} > web/CURRENT`.
+4. Relaunch Scorch. The shell reads `CURRENT`, serves `scorch://localhost/` from `web/{N}/`, and the new web tier is live.
+
+If `CURRENT` is missing or the pack is invalid, the shell gracefully falls back to the `dist/` bundled in the exe — the app always boots. See `docs/ASSUMPTIONS.md` Stage 2 entry for the full tier table, fallback chain, traversal protection, and minShell handshake details.
 
 ### Keyboard
 
