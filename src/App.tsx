@@ -5,7 +5,7 @@ import dorianFixture from "./fixtures/dorian-16bars.json";
 import { TopBar } from "./components/TopBar";
 import { Arranger } from "./components/Arranger";
 import { GenerationSettingsPanel } from "./components/GenerationSettingsPanel";
-import { EngineClient, type EngineLoadMeta, type EngineStatus, type PluginStateMessage, type ScanResultMessage } from "./engine/engineClient";
+import { EngineClient, type EngineLoadMeta, type EngineStatus, type LoadFailure, type PluginStateMessage, type ScanResultMessage } from "./engine/engineClient";
 import { buildEngineStream, resolveEngineChannels } from "./engine/engineStream";
 import { PPQ, projectEndTick, tickToBar } from "./shared/schema";
 import {
@@ -283,6 +283,12 @@ export default function App() {
         toast("error", `${result.name ?? "Plugin"} failed to load — falling back to test synth: ${result.detail ?? "unknown"}`);
       }
     });
+    // Stage 3c-hotfix: every engine error is user-visible (toast) in addition
+    // to error.log — a rejected/failed load can no longer look like success.
+    client.onError((code, _echo, detail) => {
+      if (disposed) return;
+      toast("error", `engine: ${code}${detail ? ` — ${detail}` : ""}`);
+    });
     engineClientRef.current = client;
 
     invoke<{ port: number; failed: boolean }>("get_engine_info")
@@ -398,6 +404,29 @@ export default function App() {
       void playback.play();
       return;
     }
+    // The play mechanics, run ONLY after the engine confirms the load
+    // (Stage 3c-hotfix: the source switch gates on loadAck).
+    const runEnginePlay = () => {
+      try {
+        // FULL disengagement of the webview synth before the engine renders —
+        // if the fallback was ever running (rare drive flip), its voices and
+        // RAF loop die here. No doubled rendering, ever.
+        playback.stop();
+        // Clear the stale audio error so the footer doesn't lag a retry.
+        setEngineAudioError(null);
+        // Resume contract: ALWAYS send an explicit start tick — the last
+        // position the engine itself reported (stopped position, seek target,
+        // or 0 on a fresh session). The engine never auto-resets to 0.
+        const resumeTick = Math.max(0, Math.round(engineTickRef.current));
+        client.transport("play", resumeTick);
+        setEngineDrive(true);
+        setEnginePlaying(true);
+      } catch (err) {
+        writeErrorLog("enginePlay", err);
+        setEngineDrive(false);
+        void playback.play();
+      }
+    };
     try {
       // Load only when the engine's score is stale (project changed or fresh
       // engine session). Skip-loading on repeat plays removes the load-ack
@@ -413,30 +442,35 @@ export default function App() {
           timeSignature: project.timeSignature,
           endTick: projectEndTick(project),
         };
-        client.load(stream.events, meta, {
+        // Stage 3c-hotfix: the source switch is GATED on the engine's loadAck
+        // receipt. No more optimistic fire-and-forget at real project sizes —
+        // if the load never arrives, is rejected, or parses with skipped
+        // events, the failure is visible (toast + error.log) and the webview
+        // synth covers the play instead of a silent empty engine score.
+        void client.load(stream.events, meta, {
           channels: stream.channels,
           plugin: stream.plugin ?? undefined,
+        }).then((receipt) => {
+          if (receipt.skipped > 0) {
+            writeErrorLog("enginePlay", `load incomplete: ${receipt.loaded}/${receipt.received} loaded, ${receipt.skipped} skipped (first at index ${receipt.firstErrorIndex}${receipt.firstErrorReason ? ": " + receipt.firstErrorReason : ""})`);
+            toast("error", `engine load incomplete: ${receipt.skipped} of ${receipt.received} events rejected (first at index ${receipt.firstErrorIndex}${receipt.firstErrorReason ? ": " + receipt.firstErrorReason : ""}) — see error.log`);
+          }
+          // Mix state rides the confirmed load — the engine rebuilds its snapshot.
+          client.mix(
+            project.tracks.filter((t) => t.muted).map((t) => t.id),
+            project.tracks.filter((t) => t.soloed).map((t) => t.id),
+          );
+          lastLoadedRef.current = project; // cached only on CONFIRMED load
+          runEnginePlay();
+        }).catch((failure: LoadFailure) => {
+          setEngineDrive(false);
+          setEnginePlaying(false);
+          toast("error", `engine load failed — using web synth (${failure.reason})`);
+          void playback.play();
         });
-        // Mix state rides every (re)load — the engine rebuilds its snapshot.
-        client.mix(
-          project.tracks.filter((t) => t.muted).map((t) => t.id),
-          project.tracks.filter((t) => t.soloed).map((t) => t.id),
-        );
-        lastLoadedRef.current = project;
+        return;
       }
-      // FULL disengagement of the webview synth before the engine renders —
-      // if the fallback was ever running (rare drive flip), its voices and
-      // RAF loop die here. No doubled rendering, ever.
-      playback.stop();
-      // Clear the stale audio error so the footer doesn't lag a retry.
-      setEngineAudioError(null);
-      // Resume contract: ALWAYS send an explicit start tick — the last
-      // position the engine itself reported (stopped position, seek target,
-      // or 0 on a fresh session). The engine never auto-resets to 0.
-      const resumeTick = Math.max(0, Math.round(engineTickRef.current));
-      client.transport("play", resumeTick);
-      setEngineDrive(true);
-      setEnginePlaying(true);
+      runEnginePlay();
     } catch (err) {
       // F2 safety net: a throw in the engine branch must never kill the
       // click — log the live stack to %APPDATA%/scorch/error.log and fall
@@ -445,7 +479,7 @@ export default function App() {
       setEngineDrive(false);
       void playback.play();
     }
-  }, [project, playback]);
+  }, [project, playback, toast]);
 
   const engineStop = useCallback(() => {
     if (engineDrive) {
@@ -493,9 +527,12 @@ export default function App() {
     }
   }, [engineStatus, enginePlaying]);
 
-  // Reload engine score when project changes during engine playback.
+  // Reload engine score when project changes during engine playback. Also
+  // ack-gated (Stage 3c-hotfix): a mid-play reload that silently vanished was
+  // the other way to end up rendering a stale/empty score.
   useEffect(() => {
     if (enginePlaying && engineClientRef.current?.getStatus() === "ready") {
+      const client = engineClientRef.current;
       const stream = buildEngineStream(project);
       const meta: EngineLoadMeta = {
         bpm: project.bpm,
@@ -503,17 +540,24 @@ export default function App() {
         timeSignature: project.timeSignature,
         endTick: projectEndTick(project),
       };
-      engineClientRef.current?.load(stream.events, meta, {
+      void client.load(stream.events, meta, {
         channels: stream.channels,
         plugin: stream.plugin ?? undefined,
+      }).then((receipt) => {
+        if (receipt.skipped > 0) {
+          writeErrorLog("engineReload", `mid-play reload incomplete: ${receipt.skipped}/${receipt.received} skipped (first at index ${receipt.firstErrorIndex}${receipt.firstErrorReason ? ": " + receipt.firstErrorReason : ""})`);
+          toast("error", `engine reload incomplete: ${receipt.skipped} events rejected — see error.log`);
+        }
+        client.mix(
+          project.tracks.filter((t) => t.muted).map((t) => t.id),
+          project.tracks.filter((t) => t.soloed).map((t) => t.id),
+        );
+        lastLoadedRef.current = project; // cache stays in sync (confirmed load)
+      }).catch((failure: LoadFailure) => {
+        toast("error", `engine reload failed — playing a stale score (${failure.reason})`);
       });
-      engineClientRef.current?.mix(
-        project.tracks.filter((t) => t.muted).map((t) => t.id),
-        project.tracks.filter((t) => t.soloed).map((t) => t.id),
-      );
-      lastLoadedRef.current = project; // cache stays in sync (see enginePlay)
     }
-  }, [project, enginePlaying]);
+  }, [project, enginePlaying, toast]);
 
   // Stage 3c-2 — live mute/solo: while the engine drives, every toggle ships
   // a mix message so the engine re-gates BEFORE any channel send (and flushes

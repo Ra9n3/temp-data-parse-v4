@@ -428,3 +428,42 @@ On the throw itself: no reproducible crash existed in the code path by inspectio
 - **Plugin binding heuristic**: picking a scanned plugin whose name matches /bbcso|bbc symphony/i auto-binds the `spitfire-bbcso` profile (deterministic name match, documented; both VstBrowser entry points do it). No fabricated profile data — the profile ships since M9 and is the mapping truth source.
 - **Deferred (3d, per brief)**: plugin STATE persistence (BBCSO mixer/patch memory via getStateInformation/setStateInformation — `LibraryGroup.pluginState` field already reserved), multi-instance hosting, plugin UI panels.
 - **3c-3 latency honesty**: the CI number is the NULL-AUDIO latency (device buffer 512/44100 ≈ 11.61 ms + plugin-reported latency). The real-device number (ASIO/WASAPI buffer + BBCSO's reported latency) prints on the user's machine at first play and belongs in the re-test report — CI cannot measure it.
+
+## Stage 3c-hotfix — Load receipts, loadAck gate, size-limit audit
+
+Regression: the user's real 27-bar project rendered a silently EMPTY engine score — footer "playing · bar X", state messages flowing, engine CPU 0%, error.log clean (the frontend saw no failure). CI had only ever tested small synthetic loads. One commit, the named joints only: receipts, ack gate, size audit, scale test.
+
+### What the engine now does (engine.log)
+
+- The shell spawns the engine with stdout/stderr piped to null, so `std::cout` lines are invisible in production — the black box. The engine now appends receipts DIRECTLY to `%APPDATA%\scorch\engine.log` (Windows; `~/.config/scorch/engine.log` on Linux — the same JUCE `userApplicationDataDirectory` call maps to XDG config there, verified empirically). Mutex-guarded, best-effort: a logging failure can never break the protocol or the audio thread.
+- Load receipt: `[load] received <bytes> bytes | loaded <N> events (array had <M>, skipped <S>) | firstError <i> (<reason>) | perChannel ch1=.. … | perTrack <trackId>=.. … | bpm=.. ppqn=.. endTick=.. | seq <n>` — per-channel AND per-track counts (3c's events carry `trackId`), the engine's honest view of what it holds.
+- Play receipt: `[play] rendering from tick <X>, <N> voices scheduled (of <E> events) (explicit tick|resume)` — N counts NOTE_ONs from the start tick: the engine's honest answer to "will this play make sound?". A play against an unloaded score now reads 0 scheduled. Plus terse `[stop]`/`[seek]`/`[ws-error]`/start/exit timeline lines.
+- Parse hardening (the silent-empty paths, closed):
+  - `events` not an array → HARD fail: `bad_load` error reply + `[load-fail]` receipt, previous score RETAINED (was: silently replaced the score with an EMPTY one and replied `state` as if fine — the exact reported bug class).
+  - A malformed event (non-object, or a missing/non-finite number — `JSON.stringify` renders NaN as null, and `static_cast<int>(NaN)` is UB) → SKIPPED but NAMED: `skipped` + `firstErrorIndex` + `firstErrorReason` in both the receipt and the ack. Rendering semantics (kind mapping, channel clamp, 0x7f mask) are untouched for finite values.
+  - `meta.bpm` non-finite/non-positive or `ppqn <= 0` → hard fail (the other silent-empty path: events load but `samplesPerTick()` degenerates and nothing ever dispatches).
+- loadAck (ADDITIVE): `{"type":"loadAck","seq":<echo>,"received":<M>,"loaded":<K>,"skipped":<S>,"firstErrorIndex":<i>,"firstErrorReason":"...","byteSize":<raw bytes received>}`. The 3b-polish post-load `state` reply still follows (already reports actual transport truth — kept).
+
+### What the frontend now does (error.log + ack gate)
+
+- `EngineClient.load()` returns a Promise: resolves with the receipt (loadAck) or rejects — socket not open (the old silent drop: `readyState !== OPEN` → load never sent, nobody told), `bad_load` reply (fast path), loadAck timeout (4 s), connection closed/dispose, superseded by a newer load. Serialized size + event count are logged AT SEND (`writeErrorLog("engine", ...)` → `%APPDATA%/scorch/error.log`, the existing 3b-polish rider; no new Rust surface).
+- `enginePlay` gates the source switch on the receipt: `transport("play")` + the drive flip happen only after the ack; mix state rides the CONFIRMED load; `lastLoadedRef` caches only confirmed loads (a failed load retries on the next play). On rejection: toast + error.log + webview-synth fallback — never a silent empty score. Repeat plays with an unchanged project skip the load (3b-polish optimization preserved) and play directly.
+- The mid-play project-change reload is ack-gated too (stale-score risk): failures toast + log without killing the take.
+- Every engine error message now toasts (`onError`) in addition to error.log — was: only `no_audio_device`; anything else died in console.warn.
+
+### Size/limit audit
+
+- Engine side (VERIFIED against the fetched IXWebSocket v11.4.5 source, not from memory): there is NO incoming message-size cap in the engine's WS stack — no maxMessageSize API, no 1009/message-too-big logic anywhere in IXWebSocketTransport. A large load is delivered WHOLE or fails juce::JSON::parse with a receipt; it cannot vanish at a size threshold. Transport Error events are receipt-logged (`[ws-error] reason (http N, retries N)`).
+- Browser side: WebSocket.send has no configurable size cap (Chromium); backpressure only.
+- Chunked load (chunk + commit protocol): DEFERRED — no engine-side cap exists to overflow; the audited 27-bar full-density class measures ~1.1–2 MB serialized and the scale test proves the exact round-trip at that size. Revisit only if scores approach memory-scale (tens of MB) or parse latency becomes audible.
+
+### CI proof (desktop.yml Test E — the closed scale gap)
+
+Deterministic full-density fixture (NO RNG): 16 channels × 27 bars × 16 sixteenth slots = 13,824 events ≈ 1.1 MB, ONE WS message. Asserts: received == loaded == sent, skipped == 0, byteSize EXACTLY equals bytes sent, seq echoes; non-array events → bad_load; one malformed event (JSON null number) → skipped=1 with firstErrorIndex=3 + reason; clean small load restored → play(tick 0) → ticks advance → stop. THEN the engine.log itself is asserted: the scale load receipt, a play receipt, and a load-fail receipt must all exist in the same log the user can pull from their machine (the step cleans the log first so the receipts provably come from THIS run). Tests A–D keep their 3b/3c contracts, now with loadAck asserted in A and B.
+
+### Untested claims (fire-rate honesty)
+
+- The ACTUAL root cause of the user's empty score is NOT yet proven — that is what the receipts are for. The receipts + ack close every silent path on the load joint (send-drop, parse-empty, ack-timeout, disconnect) so the next by-ear failure names itself; the user pulls `%APPDATA%/scorch/engine.log` + `error.log` and the receipt pair decides.
+- juce::JSON::parse exposes no error position: a top-level parse failure is logged with byte size + a sanitized 80-char prefix, not a char offset. Per-event failures name exact indices; the top-level path cannot be more precise than the library allows.
+- CI proves receipt arithmetic + the scale round-trip on the null device (and the stand-in host test still proves hosting/gating separately); whether the user's specific failure reproduces on Windows with their project is exactly what the engine.log pull will show.
+- By-ear gate unchanged: CI cannot prove the user's project sounds right — only that a load that arrives is counted, and a load that doesn't is now loud about it.

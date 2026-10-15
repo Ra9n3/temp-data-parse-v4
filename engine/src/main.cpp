@@ -79,6 +79,7 @@
 #include <cstring>
 #include <iostream>
 #include <limits>
+#include <map>
 #include <memory>
 #include <mutex>
 #include <string>
@@ -174,6 +175,51 @@ struct EngineState {
 };
 
 EngineState g_engine;
+
+// ─── engine.log — the engine's view of the world (Stage 3c-hotfix) ──────
+// The Rust shell spawns this process with stdout/stderr piped to null, so
+// std::cout lines are invisible in production (the user saw a silently
+// EMPTY score with zero diagnostics). Everything needed to answer "why did
+// the engine play an empty score" is appended here instead:
+//   Windows: %APPDATA%\scorch\engine.log
+//   Linux:   ~/.config/scorch/engine.log   (CI / local validation)
+// Best-effort + mutex-guarded: a logging failure must NEVER break the
+// protocol or the audio thread.
+std::mutex g_engineLogMutex;
+
+std::string withCommas(uint64_t n) {
+    std::string s = std::to_string(n);
+    for (int pos = static_cast<int>(s.size()) - 3; pos > 0; pos -= 3)
+        s.insert(static_cast<size_t>(pos), ",");
+    return s;
+}
+
+void engineLog(const std::string& line) {
+    try {
+        std::lock_guard<std::mutex> lock(g_engineLogMutex);
+        auto now = std::chrono::system_clock::now();
+        std::time_t tt = std::chrono::system_clock::to_time_t(now);
+        std::tm tm{};
+#ifdef _WIN32
+        localtime_s(&tm, &tt);
+#else
+        localtime_r(&tt, &tm);
+#endif
+        long ms = static_cast<long>(
+            std::chrono::duration_cast<std::chrono::milliseconds>(
+                now.time_since_epoch()).count() % 1000);
+        char stamp[40];
+        std::snprintf(stamp, sizeof(stamp), "%04d-%02d-%02d %02d:%02d:%02d.%03ld",
+                      tm.tm_year + 1900, tm.tm_mon + 1, tm.tm_mday,
+                      tm.tm_hour, tm.tm_min, tm.tm_sec, ms);
+        auto f = juce::File::getSpecialLocation(juce::File::userApplicationDataDirectory)
+                     .getChildFile("scorch").getChildFile("engine.log");
+        f.getParentDirectory().createDirectory();
+        f.appendText(juce::String("[" + std::string(stamp) + "] " + line + "\n"));
+    } catch (...) {
+        // Swallow — logging must never crash the engine or the protocol.
+    }
+}
 
 // ─── Stage 3c-2: routing / mix / hosted plugin / dispatch ledger ────────────
 // RoutingTable (immutable snapshot, atomic shared_ptr swap): the track→channel
@@ -1059,7 +1105,7 @@ std::shared_ptr<const MixState> buildMixState(const RoutingTable& table,
     return ms;
 }
 
-void handle_load(const juce::var& json, ix::WebSocket& ws) {
+void handle_load(const juce::var& json, ix::WebSocket& ws, size_t byteSize) {
     juce::DynamicObject* obj = json.getDynamicObject();
     if (!obj) { ws.send("{\"type\":\"error\",\"code\":\"bad_load\",\"echo\":\"load\"}"); return; }
 
@@ -1093,10 +1139,58 @@ void handle_load(const juce::var& json, ix::WebSocket& ws) {
     }
 
     std::vector<EngineEvent> newEvents;
-    if (eventsVar.isArray()) {
+    // Stage 3c-hotfix receipt counters: malformed events are SKIPPED but
+    // NAMED (the old loop `continue`d silently — one unserializable event
+    // vanished without a trace, and a non-array events payload silently
+    // EMPTIED the score while the transport kept "playing" bar after bar).
+    int receivedCount = 0;
+    int skipped = 0;
+    int firstErrorIndex = -1;
+    std::string firstErrorReason;
+    std::string loadFail;   // non-empty = hard failure (score NOT replaced)
+    std::map<int, int> perChannel;
+    std::map<uint32_t, int> perTrack;   // slot → count (0 = no trackId)
+
+    // Echo the frontend's load sequence number (additive; 0 if absent).
+    long long seq = 0;
+    {
+        juce::var seqVar = obj->getProperty("seq");
+        if (!seqVar.isVoid() && std::isfinite(static_cast<double>(seqVar)))
+            seq = static_cast<long long>(static_cast<double>(seqVar));
+    }
+
+    auto skipEvent = [&](int idx, const std::string& why) {
+        ++skipped;
+        if (firstErrorIndex < 0) {
+            firstErrorIndex = idx;
+            firstErrorReason = why;
+        }
+    };
+
+    if (!eventsVar.isArray()) {
+        loadFail = "events is not an array";
+    } else {
+        int idx = -1;
         for (auto& ev : *eventsVar.getArray()) {
+            ++idx;
             juce::DynamicObject* eobj = ev.getDynamicObject();
-            if (!eobj) continue;
+            if (!eobj) { skipEvent(idx, "event is not an object"); continue; }
+            // Numeric fields must be present and FINITE before the int casts
+            // below — static_cast<int>(NaN) is undefined behavior, and a
+            // JSON null (e.g. a NaN serialized by the sender) used to become
+            // a silent 0 instead of being named.
+            auto numProp = [&](const char* name, double& out) -> bool {
+                juce::var v = eobj->getProperty(name);
+                if (v.isVoid()) return false;
+                out = static_cast<double>(v);
+                return std::isfinite(out);
+            };
+            double dCh = 0, d1 = 0, d2 = 0, dTick = 0;
+            if (!numProp("channel", dCh) || !numProp("data1", d1) ||
+                !numProp("data2", d2) || !numProp("timestampTicks", dTick)) {
+                skipEvent(idx, "missing or non-finite numeric field (channel/data1/data2/timestampTicks)");
+                continue;
+            }
             EngineEvent ee;
             const juce::String et = eobj->getProperty("eventType").toString();
             if (et == "NOTE_ON") ee.kind = kEvNoteOn;
@@ -1104,12 +1198,13 @@ void handle_load(const juce::var& json, ix::WebSocket& ws) {
             else if (et == "PITCH_BEND") ee.kind = kEvBend;
             else if (et == "PROGRAM_CHANGE") ee.kind = kEvPC;
             else ee.kind = kEvNoteOff;
-            int ch = static_cast<int>(static_cast<double>(eobj->getProperty("channel")));
+            int ch = static_cast<int>(dCh);
             if (ch < 1 || ch > 16) ch = 1;
             ee.channel = static_cast<uint8_t>(ch);
-            ee.data1 = static_cast<uint8_t>(static_cast<int>(static_cast<double>(eobj->getProperty("data1"))) & 0x7f);
-            ee.data2 = static_cast<uint8_t>(static_cast<int>(static_cast<double>(eobj->getProperty("data2"))) & 0x7f);
-            ee.tick = static_cast<int64_t>(static_cast<double>(eobj->getProperty("timestampTicks")));
+            ee.data1 = static_cast<uint8_t>(static_cast<int>(d1) & 0x7f);
+            ee.data2 = static_cast<uint8_t>(static_cast<int>(d2) & 0x7f);
+            ee.tick = static_cast<int64_t>(dTick);
+            perChannel[ee.channel]++;
             // trackId → slot; a plugin-routed channel overrides the event's own.
             const juce::String trackIdVar = eobj->getProperty("trackId").toString();
             if (trackIdVar.isNotEmpty()) {
@@ -1121,11 +1216,13 @@ void handle_load(const juce::var& json, ix::WebSocket& ws) {
                     it = table.slotOf.find(trackId);
                 }
                 ee.trackRef = it->second;
+                perTrack[ee.trackRef]++;
                 auto cit = channelOfTrack.find(trackId);
                 if (cit != channelOfTrack.end()) ee.channel = static_cast<uint8_t>(cit->second);
             }
             newEvents.push_back(ee);
         }
+        receivedCount = idx + 1;
     }
 
     double bpm = 120.0;
@@ -1135,6 +1232,27 @@ void handle_load(const juce::var& json, ix::WebSocket& ws) {
         bpm = metaVar.getDynamicObject()->getProperty("bpm");
         ppqn = metaVar.getDynamicObject()->getProperty("ppqn");
         endTick = static_cast<int64_t>(static_cast<double>(metaVar.getDynamicObject()->getProperty("endTick")));
+    }
+    // Stage 3c-hotfix: non-finite / non-positive tempo degenerates
+    // samplesPerTick() (inf / zero) — events would load but NEVER dispatch:
+    // the other silent-empty-score path. Same treatment: hard fail, name it.
+    if (!std::isfinite(bpm) || bpm <= 0.0) loadFail = loadFail.empty() ? "meta.bpm is not finite/positive" : loadFail;
+    if (ppqn <= 0) loadFail = loadFail.empty() ? "meta.ppqn is not positive" : loadFail;
+
+    const auto& pluginVar = obj->getProperty("plugin");
+    const bool pluginRequested = pluginVar.getDynamicObject() != nullptr;
+
+    if (!loadFail.empty()) {
+        engineLog("[load-fail] " + loadFail + " | received " + std::to_string(byteSize) +
+                  " bytes | seq " + std::to_string(seq) + " | skipped " +
+                  std::to_string(skipped) +
+                  (firstErrorIndex >= 0 ? " | firstError " + std::to_string(firstErrorIndex) +
+                    " (" + firstErrorReason + ")" : "") +
+                  " — previous score state RETAINED");
+        std::cout << "[engine] load FAILED: " << loadFail << " (seq " << seq << ")" << std::endl;
+        ws.send(std::string("{\"type\":\"error\",\"code\":\"bad_load\",\"echo\":\"load\",\"detail\":\"") +
+                escape_json(loadFail) + "\"}");
+        return;
     }
 
     {
@@ -1151,8 +1269,46 @@ void handle_load(const juce::var& json, ix::WebSocket& ws) {
         g_engine.endTick = endTick;
     }
 
+    // Stage 3c-hotfix — LOAD RECEIPT (the black box opened): what the engine
+    // actually holds after this load, with the exact byte size received.
+    std::string chStr;
+    for (const auto& [channel, count] : perChannel)
+        chStr += " ch" + std::to_string(channel) + "=" + std::to_string(count);
+    std::string trStr;
+    for (const auto& [slot, count] : perTrack) {
+        if (!trStr.empty()) trStr += " ";
+        const std::string& id = (slot >= 1 && slot <= table.trackNames.size())
+                                    ? table.trackNames[slot - 1] : ("slot" + std::to_string(slot));
+        trStr += id + "=" + std::to_string(count);
+    }
+    char bpmBuf[32];
+    std::snprintf(bpmBuf, sizeof(bpmBuf), "%g", bpm);
+    engineLog("[load] received " + std::to_string(byteSize) + " bytes | loaded " +
+              withCommas(static_cast<uint64_t>(g_engine.events.size())) + " events (array had " +
+              withCommas(static_cast<uint64_t>(receivedCount)) + ", skipped " +
+              std::to_string(skipped) + ")" +
+              (firstErrorIndex >= 0 ? " | firstError " + std::to_string(firstErrorIndex) +
+                " (" + firstErrorReason + ")" : "") +
+              " | perChannel" + (chStr.empty() ? " none" : chStr) +
+              " | perTrack" + (trStr.empty() ? " none" : " " + trStr) +
+              " | bpm=" + bpmBuf + " ppqn=" + std::to_string(ppqn) +
+              " endTick=" + std::to_string(endTick) + " | seq " + std::to_string(seq) +
+              (pluginRequested ? " | plugin requested" : ""));
     std::cout << "[engine] loaded " << g_engine.events.size() << " events (bpm=" << bpm
               << " ppqn=" << ppqn << " endTick=" << endTick << ")" << std::endl;
+
+    // Stage 3c-hotfix — loadAck (ADDITIVE): the receipt the frontend's source
+    // switch gates on. Fields: seq echo, entries in the events array,
+    // validated count, skipped count, first offending index + reason, and the
+    // exact byte size received. The legacy `state` reply below still follows.
+    ws.send(std::string("{\"type\":\"loadAck\",\"seq\":") + std::to_string(seq) +
+            ",\"received\":" + std::to_string(receivedCount) +
+            ",\"loaded\":" + std::to_string(g_engine.events.size()) +
+            ",\"skipped\":" + std::to_string(skipped) +
+            ",\"firstErrorIndex\":" + std::to_string(firstErrorIndex) +
+            ",\"firstErrorReason\":\"" + escape_json(firstErrorReason) + "\"" +
+            ",\"byteSize\":" + std::to_string(byteSize) + "}");
+
     // Stage 3b polish — the load ack reports the CURRENT transport truth
     // (playing + current position), not a hardcoded {playing:false,tick:0}:
     // a reload during playback used to poison the UI playhead to 0 while the
@@ -1164,8 +1320,6 @@ void handle_load(const juce::var& json, ix::WebSocket& ws) {
     // Stage 3c-2 — hosting: ONE VST3 for the whole orchestra. On ANY failure
     // the routing table ships with EMPTY plugin channels → every event renders
     // through the built-in test synth (the app never dead-ends).
-    const auto& pluginVar = obj->getProperty("plugin");
-    const bool pluginRequested = pluginVar.getDynamicObject() != nullptr;
     std::string channelsJson;
     std::string hostName, hostVendor;
     double latencyMs = -1.0;
@@ -1327,6 +1481,22 @@ void handle_transport(const juce::var& json, ix::WebSocket& ws) {
         g_engine.playing.store(true);
         std::cout << "[engine] transport play from tick " << startTick
                   << (hasTick ? " (explicit)" : " (resume)") << std::endl;
+        // Stage 3c-hotfix — PLAY RECEIPT: "rendering from tick X, N voices
+        // scheduled". N counts NOTE_ON events from the start tick — the
+        // engine's honest answer to "will this play make sound?". A play
+        // against an empty/unloaded score now reads 0 scheduled in the log.
+        {
+            uint64_t scheduled = 0;
+            {
+                std::lock_guard<std::mutex> lock(g_engine.eventsMutex);
+                for (const auto& ev : g_engine.events)
+                    if (ev.kind == kEvNoteOn && ev.tick >= startTick) ++scheduled;
+            }
+            engineLog("[play] rendering from tick " + std::to_string(startTick) + ", " +
+                      withCommas(scheduled) + " voices scheduled (of " +
+                      withCommas(static_cast<uint64_t>(g_engine.events.size())) + " events)" +
+                      (hasTick ? " (explicit tick)" : " (resume)"));
+        }
     } else if (cmd == "stop") {
         // Stage 3b polish — STOP IS PANIC: every voice dies NOW (no ring-out,
         // no overlap into the next play), and lastTick keeps the stopped
@@ -1342,6 +1512,8 @@ void handle_transport(const juce::var& json, ix::WebSocket& ws) {
         }
         std::cout << "[engine] transport stop: voices killed (n=" << killed
                   << ", tick=" << g_engine.lastTick.load() << ")" << std::endl;
+        engineLog("[stop] transport stop — voices killed n=" + std::to_string(killed) +
+                  ", lastTick " + std::to_string(g_engine.lastTick.load()));
         g_pendingPanic.store(true);  // hosted plugin: CC120 flush on the next buffer
     } else if (cmd == "seek") {
         int64_t tick = static_cast<int64_t>(static_cast<double>(obj->getProperty("tick")));
@@ -1357,6 +1529,7 @@ void handle_transport(const juce::var& json, ix::WebSocket& ws) {
             for (auto& v : g_engine.voices) { v.releasing = false; v.active = false; v.env = 0; v.pitch = -1; }
         }
         std::cout << "[engine] transport seek to tick " << tick << std::endl;
+        engineLog("[seek] to tick " + std::to_string(tick));
         g_pendingPanic.store(true);  // hosted plugin: no bleed across the jump
     }
 }
@@ -1425,6 +1598,9 @@ int main(int argc, char** argv) {
     if (g_nullAudio) std::cout << " (--null-audio)";
     else if (g_forcedNoAudio) std::cout << " (--no-audio: forced device-less)";
     std::cout << std::endl;
+    engineLog(std::string("[engine] start v") + kEngineVersion + " port " +
+              std::to_string(port) + (g_nullAudio ? " --null-audio" : "") +
+              (g_forcedNoAudio ? " --no-audio" : ""));
 
     ix::WebSocketServer server(port, "127.0.0.1");
 
@@ -1433,16 +1609,36 @@ int main(int argc, char** argv) {
            ix::WebSocket& ws,
            const ix::WebSocketMessagePtr& msg) {
             if (msg->type == ix::WebSocketMessageType::Open) {
+                // Size-limit audit (Stage 3c-hotfix): verified against the
+                // fetched IXWebSocket v11.4.5 source — there is NO incoming
+                // message size cap in the engine's WS stack (no
+                // maxMessageSize API, no 1009 logic). A large load is
+                // delivered whole or fails juce::JSON::parse with a receipt —
+                // it cannot vanish at a size threshold.
+                engineLog("[ws] client connected (no message-size cap in IXWebSocket v11.4.5 — verified in source)");
                 std::cout << "[engine] client connected" << std::endl;
                 std::string hello = "{\"type\":\"hello\",\"engineVersion\":\"" +
                                     std::string(kEngineVersion) +
                                     "\",\"protocol\":" + std::to_string(kProtocolVersion) + "}";
                 ws.send(hello);
+            } else if (msg->type == ix::WebSocketMessageType::Error) {
+                // Socket-level failures (handshake, TCP, send errors) land
+                // here — receipt-logged so the transport can never fail
+                // silently.
+                engineLog("[ws-error] " + msg->errorInfo.reason +
+                          " (http " + std::to_string(msg->errorInfo.http_status) +
+                          ", retries " + std::to_string(msg->errorInfo.retries) + ")");
             } else if (msg->type == ix::WebSocketMessageType::Message) {
                 std::string message = msg->str;
                 auto parsed = juce::JSON::parse(juce::String(message));
                 juce::DynamicObject* obj = parsed.getDynamicObject();
                 if (!obj) {
+                    // Stage 3c-hotfix: a top-level parse failure is a load
+                    // receipt too (juce::JSON exposes no error position, so
+                    // the receipt carries byte size + a sanitized prefix).
+                    engineLog("[ws] JSON parse FAILED | received " +
+                              std::to_string(message.size()) + " bytes | prefix \"" +
+                              escape_json(message.substr(0, 80)) + "\"");
                     ws.send("{\"type\":\"error\",\"code\":\"bad_json\",\"echo\":\"" + escape_json(message) + "\"}");
                     return;
                 }
@@ -1457,7 +1653,7 @@ int main(int argc, char** argv) {
                     g_should_exit.store(true);
                     ws.close();
                 } else if (type == "load") {
-                    handle_load(parsed, ws);
+                    handle_load(parsed, ws, message.size());
                 } else if (type == "transport") {
                     handle_transport(parsed, ws);
                 } else if (type == "panic") {
@@ -1479,6 +1675,7 @@ int main(int argc, char** argv) {
                     for (auto& v : g_engine.voices) { v.releasing = false; v.active = false; v.env = 0; v.pitch = -1; }
                 }
                 std::cout << "[engine] client disconnected (panic)" << std::endl;
+                engineLog("[ws] client disconnected (panic)");
             }
         });
 
@@ -1549,6 +1746,7 @@ int main(int argc, char** argv) {
     state_thread.join();
     shutdownAudio();
     ix::uninitNetSystem();
+    engineLog("[engine] clean exit 0");
     std::cout << "[engine] clean exit 0" << std::endl;
     return 0;
 }

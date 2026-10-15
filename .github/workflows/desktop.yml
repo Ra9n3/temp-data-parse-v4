@@ -100,7 +100,7 @@ jobs:
           Write-Host "Corrupt fixture written"
           "SCAN_FIXTURES=$fx" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
 
-      - name: Engine standalone protocol test (null-audio + graceful no-device paths)
+      - name: Engine standalone protocol test (null-audio + graceful no-device + scan + host + real-scale paths)
         shell: pwsh
         run: |
           # Gate-absence proof: the binary itself reports "audio: built-in".
@@ -109,6 +109,11 @@ jobs:
           Write-Host "Version output: $versionOut"
           if ($versionOut -notmatch "scorch-engine 0\.2\.0") { throw "Version check failed: $versionOut" }
           if ($versionOut -notmatch "audio: built-in") { throw "Audio compile gate still present — engine reports no audio support" }
+
+          # Stage 3c-hotfix: start the protocol-test step with a CLEAN
+          # engine.log so the receipt assertions in Test E prove THIS run
+          # wrote its receipts.
+          Remove-Item (Join-Path $env:APPDATA "scorch\engine.log") -ErrorAction SilentlyContinue
 
           # Test A — --null-audio: JUCE null device, no hardware. The graph runs
           # in real time: transport play SUCCEEDS, state ticks ADVANCE, stop works.
@@ -254,6 +259,54 @@ jobs:
             Stop-Process -Id $procD.Id -Force -ErrorAction SilentlyContinue
             Remove-Item Env:\SCORCH_TESTVST_LOG -ErrorAction SilentlyContinue
           }
+
+          # Test E — Stage 3c-hotfix: REAL-PROJECT-SIZED load. The CI gap was
+          # scale; this closes it: a deterministic 13,824-event (~1.1 MB)
+          # fixture is sent as ONE load message and the loadAck receipt must
+          # round-trip exactly (received == loaded == sent, byteSize == bytes
+          # sent), non-array events must be REJECTED (bad_load — the silent
+          # empty-score path that shipped the regression), and a malformed
+          # event must be NAMED. Then the engine.log receipts themselves are
+          # asserted — the same log the user can pull from their machine.
+          Write-Host "=== Test E: scale (13,824-event load -> loadAck receipt round-trip -> negative paths) ==="
+          $procE = Start-Process -FilePath "engine/build/scorch-engine.exe" -ArgumentList "--port","9382","--null-audio" -PassThru -NoNewWindow -RedirectStandardOutput "engine-e-stdout.txt" -RedirectStandardError "engine-e-stderr.txt"
+          Start-Sleep -Seconds 3
+          try {
+            if ($procE.HasExited) {
+              Write-Host "Engine E exited early (code=$($procE.ExitCode)). stdout:"
+              if (Test-Path engine-e-stdout.txt) { Get-Content engine-e-stdout.txt }
+              Write-Host "stderr:"
+              if (Test-Path engine-e-stderr.txt) { Get-Content engine-e-stderr.txt }
+              throw "Engine E process exited before test could connect"
+            }
+            node .github/scripts/test-engine-protocol.mjs 9382 scale
+            if ($LASTEXITCODE -ne 0) {
+              Write-Host "Engine E stdout:"
+              if (Test-Path engine-e-stdout.txt) { Get-Content engine-e-stdout.txt }
+              Write-Host "Engine E stderr:"
+              if (Test-Path engine-e-stderr.txt) { Get-Content engine-e-stderr.txt }
+              throw "Engine E scale protocol test failed"
+            }
+            $procE.WaitForExit(10000) | Out-Null
+            if (-not $procE.HasExited -or $procE.ExitCode -ne 0) { throw "Engine E did not exit cleanly (code=$($procE.ExitCode))" }
+            Write-Host "Engine E clean exit 0 (scale round-trip verified)"
+          } finally {
+            Stop-Process -Id $procE.Id -Force -ErrorAction SilentlyContinue
+          }
+
+          # Stage 3c-hotfix: assert the engine.log RECEIPTS exist — the black
+          # box now writes down what it received and what it renders.
+          Write-Host "=== engine.log receipts (the engine's view of the world) ==="
+          $engineLog = Join-Path $env:APPDATA "scorch\engine.log"
+          if (-not (Test-Path $engineLog)) { throw "engine.log missing at $engineLog — engine wrote no receipts" }
+          Get-Content $engineLog | ForEach-Object { Write-Host $_ }
+          $scaleReceipts = (Select-String -Path $engineLog -Pattern "\[load\] received \d+ bytes \| loaded 13,824 events").Count
+          if ($scaleReceipts -lt 1) { throw "engine.log missing the scale load receipt (loaded 13,824 events)" }
+          $playReceipts = (Select-String -Path $engineLog -Pattern "\[play\] rendering from tick \d+, [\d,]+ voices scheduled").Count
+          if ($playReceipts -lt 1) { throw "engine.log missing the play receipt (rendering from tick X, N voices scheduled)" }
+          $failReceipts = (Select-String -Path $engineLog -Pattern "\[load-fail\]").Count
+          if ($failReceipts -lt 1) { throw "engine.log missing the negative-path receipt (load-fail)" }
+          Write-Host "engine.log receipt assertions passed (scale load, play, load-fail all present)"
 
       - run: npm ci
 

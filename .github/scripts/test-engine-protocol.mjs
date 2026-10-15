@@ -44,6 +44,17 @@
 //         the muted window is NOT dispatched (gating before any send),
 //         sound returns after unmute (late note);
 //       stop → silence + playing=false; dispatch_log/dispatch protocol shape.
+//   scale — Stage 3c-hotfix: REAL-PROJECT-SIZED load. The CI gap was scale;
+//     this closes it. A deterministic full-density fixture (16 channels × 27
+//     bars, 13,824 events ≈ 1.1 MB serialized) is sent as ONE load message
+//     and the loadAck receipt must round-trip EXACTLY: received == sent,
+//     loaded == sent, skipped == 0, byteSize == bytes sent, seq echoed.
+//     Negative paths: a load with non-array events must be REJECTED
+//     (bad_load — the historical silently-empty-score path is closed) and a
+//     load with one malformed event (JSON null number — the NaN class) must
+//     be NAMED (skipped=1, firstErrorIndex=index). Then a clean load is
+//     restored and the transport contract re-verified at scale (play → ticks
+//     advance → stop).
 
 const port = parseInt(process.argv[2] ?? "9378", 10);
 const mode = process.argv[3] ?? "null-audio";
@@ -63,14 +74,47 @@ const events = [
 ];
 const meta = { bpm: 120, ppqn: 960, timeSignature: { numerator: 4, denominator: 4 }, endTick: 3840 };
 
+// Stage 3c-hotfix: deterministic full-density fixture — NO RNG (standing
+// rule). 16 channels × 27 bars × 16 sixteenth-note slots = 6,912 note-ons +
+// 6,912 note-offs = 13,824 events. Every field is a pure function of
+// (channel, bar, slot) so the fixture is reproducible byte-for-byte.
+function buildScaleFixture() {
+  const out = [];
+  for (let ch = 1; ch <= 16; ch++) {
+    for (let bar = 0; bar < 27; bar++) {
+      for (let n = 0; n < 16; n++) {
+        const tick = (bar * 16 + n) * 240;
+        const pitch = 36 + ((bar * 16 + ch + n) % 48);
+        const vel = 40 + ((bar + ch + n) % 80);
+        const dur = 120 + (n % 4) * 60;
+        out.push({ eventType: "NOTE_ON", channel: ch, data1: pitch, data2: vel, timestampTicks: tick });
+        out.push({ eventType: "NOTE_OFF", channel: ch, data1: pitch, data2: 0, timestampTicks: tick + dur });
+      }
+    }
+  }
+  out.sort((a, b) => a.timestampTicks - b.timestampTicks ||
+    (a.eventType === "NOTE_OFF" ? -1 : 1) - (b.eventType === "NOTE_OFF" ? -1 : 1));
+  return out;
+}
+const scaleEvents = buildScaleFixture();
+const SCALE_SENT = scaleEvents.length;                       // 13,824
+const scaleMeta = { bpm: 120, ppqn: 960, timeSignature: { numerator: 4, denominator: 4 }, endTick: 27 * 16 * 240 };
+const scalePayload = JSON.stringify({ type: "load", seq: 1001, events: scaleEvents, meta: scaleMeta });
+const SCALE_SENT_BYTES = scalePayload.length;
+
 let step = 0;
-// null-audio mode flags
+// null-audio / no-device mode flags
 let helloOk = false, pongOk = false, errorOk = false;
-let loadOk = false, play1Ok = false, adv1Ok = false, stopOk = false;
+let loadAckOk = false, loadOk = false, play1Ok = false, adv1Ok = false, stopOk = false;
 let play2Ok = false, adv2Ok = false, panicOk = false;
 let first1 = 0, last1 = 0, frames1 = 0, stopTick = 0, first2 = 0, last2 = 0, frames2 = 0;
 // no-device mode flags
 let noDeviceErrOk = false, pongAfterErrOk = false, stillFunctionalOk = false;
+// scale mode flags (Stage 3c-hotfix)
+let scalePhase = "handshake";
+let scaleAckOk = false, negArrayOk = false, negEventOk = false, restoreOk = false;
+let scalePlayOk = false, scaleTicksOk = false, scaleStopOk = false, scalePanicOk = false;
+let scaleFirstTick = 0, scaleLastTick = 0, scaleStateFrames = 0;
 
 const ws = new WebSocket(url);
 
@@ -81,7 +125,9 @@ const fail = (msg) => {
 
 const timeout = setTimeout(() => {
   if (mode === "null-audio") {
-    console.error(`TIMEOUT at step ${step} (hello=${helloOk} pong=${pongOk} error=${errorOk} load=${loadOk} play1=${play1Ok} adv1=${adv1Ok} stop=${stopOk} play2=${play2Ok} adv2=${adv2Ok} panic=${panicOk})`);
+    console.error(`TIMEOUT at step ${step} (hello=${helloOk} pong=${pongOk} error=${errorOk} loadAck=${loadAckOk} load=${loadOk} play1=${play1Ok} adv1=${adv1Ok} stop=${stopOk} play2=${play2Ok} adv2=${adv2Ok} panic=${panicOk})`);
+  } else if (mode === "scale") {
+    console.error(`TIMEOUT at step ${step} (phase=${scalePhase} scaleAck=${scaleAckOk} negArray=${negArrayOk} negEvent=${negEventOk} restore=${restoreOk} play=${scalePlayOk} ticks=${scaleTicksOk} stop=${scaleStopOk} panic=${scalePanicOk} sent=${SCALE_SENT} events/${SCALE_SENT_BYTES} bytes)`);
   } else if (mode === "scan") {
     console.error(`TIMEOUT at step ${step} (hello=${helloOk} scanSent=${scanSent} scanResult=${scanResultOk} aliveAfterCrash=${aliveAfterCrashOk} defaultScan=${defaultScanOk})`);
   } else if (mode === "host") {
@@ -90,7 +136,7 @@ const timeout = setTimeout(() => {
     console.error(`TIMEOUT at step ${step} (hello=${helloOk} pong=${pongOk} load=${loadOk} noDeviceErr=${noDeviceErrOk} pongAfterErr=${pongAfterErrOk} stillFunctional=${stillFunctionalOk})`);
   }
   process.exit(1);
-}, mode === "host" ? 40000 : 20000);
+}, mode === "host" ? 40000 : 30000);
 
 // scan-mode flags
 let scanSent = false, scanResultOk = false, aliveAfterCrashOk = false, defaultScanOk = false;
@@ -304,10 +350,23 @@ ws.addEventListener("message", (event) => {
     } else if (msg.type === "error" && !errorOk) {
       errorOk = true;
       if (msg.code !== "unknown") fail(`expected unknown, got ${msg.code}`);
-      ws.send(JSON.stringify({ type: "load", events, meta }));
+      ws.send(JSON.stringify({ type: "load", seq: 1, events, meta }));
+    } else if (msg.type === "loadAck" && !loadAckOk) {
+      // Stage 3c-hotfix: the load receipt must name what the engine actually
+      // parsed BEFORE any transport can be trusted.
+      if (msg.received !== events.length || msg.loaded !== events.length || msg.skipped !== 0 || msg.firstErrorIndex !== -1) {
+        fail(`loadAck receipt mismatch: ${JSON.stringify(msg)}`);
+      }
+      if (!(msg.byteSize > 0)) fail("loadAck.byteSize must be > 0");
+      if (msg.seq !== 1) fail(`loadAck.seq must echo the sent seq 1, got ${msg.seq}`);
+      loadAckOk = true;
+      console.log(`[test] loadAck receipt OK (${events.length}/${events.length} loaded, 0 skipped, byteSize ${msg.byteSize})`);
     } else if (msg.type === "state" && !loadOk) {
       // After load, engine acks with the current transport truth (idle here).
-      if (msg.playing === false) {
+      // Only counts once the loadAck receipt arrived — background states
+      // stream at ~30Hz even when idle, so ignoring pre-ack states also
+      // removes the old startup race.
+      if (msg.playing === false && loadAckOk) {
         loadOk = true;
         console.log("[test] load OK — sending play with EXPLICIT tick 480 (must start there, NOT 0)");
         ws.send(JSON.stringify({ type: "transport", command: "play", tick: 480 }));
@@ -374,12 +433,19 @@ ws.addEventListener("message", (event) => {
       ws.send(JSON.stringify({ type: "ping" }));
     } else if (msg.type === "pong" && !pongOk) {
       pongOk = true;
-      ws.send(JSON.stringify({ type: "load", events, meta }));
+      ws.send(JSON.stringify({ type: "load", seq: 1, events, meta }));
+    } else if (msg.type === "loadAck" && !loadAckOk) {
+      // Stage 3c-hotfix: load receipts work with or without audio — same contract.
+      if (msg.received !== events.length || msg.loaded !== events.length || msg.skipped !== 0 || msg.firstErrorIndex !== -1) {
+        fail(`loadAck receipt mismatch: ${JSON.stringify(msg)}`);
+      }
+      loadAckOk = true;
+      console.log(`[test] loadAck receipt OK (${events.length}/${events.length} loaded, 0 skipped, byteSize ${msg.byteSize})`);
     } else if (msg.type === "state" && loadOk && !noDeviceErrOk && msg.playing === true) {
       // Runner unexpectedly HAS a device — the graceful-error proof is void.
       fail("engine started playing — runner has an audio device; device-less assumption broken");
     } else if (msg.type === "state" && !loadOk) {
-      if (msg.playing === false) {
+      if (msg.playing === false && loadAckOk) {
         loadOk = true;
         console.log("[test] load OK — sending transport play (no flag: must be REJECTED gracefully)");
         ws.send(JSON.stringify({ type: "transport", command: "play" }));
@@ -399,6 +465,97 @@ ws.addEventListener("message", (event) => {
       stillFunctionalOk = true;
       setTimeout(finishAndShutdown, 300);
     }
+  } else if (mode === "scale") {
+    // ── Stage 3c-hotfix: real-project-sized load + receipt round-trip ──
+    if (msg.type === "hello" && scalePhase === "handshake") {
+      helloOk = true;
+      if (msg.protocol !== 1) fail(`expected protocol 1, got ${msg.protocol}`);
+      ws.send(JSON.stringify({ type: "ping" }));
+    } else if (msg.type === "pong" && scalePhase === "handshake") {
+      pongOk = true;
+      scalePhase = "scale-ack";
+      console.log(`[test] sending SCALE load: ${SCALE_SENT} events, ${SCALE_SENT_BYTES} bytes (one message, seq 1001)`);
+      ws.send(scalePayload);
+    } else if (msg.type === "loadAck" && scalePhase === "scale-ack") {
+      // THE receipt round-trip: what the engine parsed must equal what was
+      // sent — byte-for-byte on the size, event-for-event on the counts.
+      if (msg.seq !== 1001) fail(`scale loadAck.seq must echo 1001, got ${msg.seq}`);
+      if (msg.received !== SCALE_SENT) fail(`scale receipt: received ${msg.received} != sent ${SCALE_SENT} — EVENTS LOST IN TRANSIT/PARSE`);
+      if (msg.loaded !== SCALE_SENT) fail(`scale receipt: loaded ${msg.loaded} != sent ${SCALE_SENT} — EVENTS REJECTED SILENTLY`);
+      if (msg.skipped !== 0 || msg.firstErrorIndex !== -1) fail(`scale receipt: unexpected skips: ${JSON.stringify(msg)}`);
+      if (msg.byteSize !== SCALE_SENT_BYTES) fail(`scale receipt: byteSize ${msg.byteSize} != sent ${SCALE_SENT_BYTES} — PAYLOAD TRUNCATED/CORRUPTED`);
+      scaleAckOk = true;
+      console.log(`[test] scale loadAck OK: ${SCALE_SENT} events round-tripped exactly (${SCALE_SENT_BYTES} bytes == bytes)`);
+      scalePhase = "neg-array";
+      console.log("[test] negative A: load with events NOT an array — must be REJECTED (bad_load), not silently emptied");
+      ws.send(JSON.stringify({ type: "load", seq: 1002, events: "not-an-array", meta }));
+    } else if (msg.type === "error" && scalePhase === "neg-array") {
+      if (msg.code !== "bad_load") fail(`negative A: expected bad_load, got ${msg.code}`);
+      if (msg.echo !== "load") fail(`negative A: expected echo "load", got "${msg.echo}"`);
+      negArrayOk = true;
+      console.log(`[test] negative A OK: non-array events → bad_load (detail: "${msg.detail ?? ""}") — silent-empty-score path CLOSED`);
+      scalePhase = "neg-event";
+      const malformed = [
+        { eventType: "NOTE_ON", channel: 1, data1: 60, data2: 100, timestampTicks: 0 },
+        { eventType: "NOTE_OFF", channel: 1, data1: 60, data2: 0, timestampTicks: 960 },
+        { eventType: "NOTE_ON", channel: 1, data1: 64, data2: 100, timestampTicks: 960 },
+        // Index 3 — the "one unserializable event" class: a null where a
+        // number belongs (JSON.stringify renders NaN as null too).
+        { eventType: "NOTE_ON", channel: 1, data1: 67, data2: 100, timestampTicks: null },
+      ];
+      console.log("[test] negative B: load with one malformed event (timestampTicks:null at index 3) — must be NAMED, not swallowed");
+      ws.send(JSON.stringify({ type: "load", seq: 1003, events: malformed, meta }));
+    } else if (msg.type === "loadAck" && scalePhase === "neg-event") {
+      if (msg.seq !== 1003) fail(`negative B loadAck.seq must echo 1003, got ${msg.seq}`);
+      if (msg.received !== 4) fail(`negative B: received ${msg.received} != 4`);
+      if (msg.loaded !== 3) fail(`negative B: loaded ${msg.loaded} != 3`);
+      if (msg.skipped !== 1) fail(`negative B: skipped ${msg.skipped} != 1`);
+      if (msg.firstErrorIndex !== 3) fail(`negative B: firstErrorIndex ${msg.firstErrorIndex} != 3`);
+      if (!msg.firstErrorReason || msg.firstErrorReason.length === 0) fail("negative B: firstErrorReason must name the problem");
+      negEventOk = true;
+      console.log(`[test] negative B OK: skipped=1, firstErrorIndex=3 ("${msg.firstErrorReason}") — offending event NAMED`);
+      scalePhase = "restore";
+      console.log("[test] restoring clean small load (seq 1004)");
+      ws.send(JSON.stringify({ type: "load", seq: 1004, events, meta }));
+    } else if (msg.type === "loadAck" && scalePhase === "restore") {
+      if (msg.seq !== 1004 || msg.received !== events.length || msg.loaded !== events.length || msg.skipped !== 0) {
+        fail(`restore receipt mismatch: ${JSON.stringify(msg)}`);
+      }
+      restoreOk = true;
+      scalePhase = "play";
+      console.log("[test] restore OK — sending transport play (transport contract re-verified post-scale)");
+      ws.send(JSON.stringify({ type: "transport", command: "play", tick: 0 }));
+    } else if (msg.type === "state" && scalePhase === "play") {
+      if (msg.playing === true) {
+        scalePlayOk = true;
+        scalePhase = "playing";
+        scaleStateFrames = 1;
+        scaleFirstTick = msg.tick;
+        scaleLastTick = msg.tick;
+        console.log("[test] transport play OK at scale — expecting ticks to ADVANCE");
+      }
+    } else if (msg.type === "state" && scalePhase === "playing") {
+      scaleStateFrames++;
+      scaleLastTick = msg.tick;
+      if (scaleStateFrames >= 3 && scaleLastTick > scaleFirstTick) {
+        scaleTicksOk = true;
+        scaleStopOk = true;
+        console.log(`[test] ticks ADVANCE at scale (${scaleFirstTick} → ${scaleLastTick} over ${scaleStateFrames} frames) — sending transport stop`);
+        ws.send(JSON.stringify({ type: "transport", command: "stop" }));
+        scalePhase = "stopping";
+      }
+    } else if (msg.type === "state" && scalePhase === "stopping") {
+      if (msg.playing === false) {
+        scalePanicOk = true;
+        console.log("[test] transport stop OK — sending panic");
+        ws.send(JSON.stringify({ type: "panic" }));
+        scalePhase = "done";
+        setTimeout(finishAndShutdown, 200);
+      }
+    } else if (msg.type === "error" && scalePhase !== "neg-array") {
+      fail(`scale mode: unexpected error ${msg.code} in phase ${scalePhase}`);
+    }
+    return;
   }
 });
 
@@ -441,14 +598,31 @@ ws.addEventListener("close", () => {
       console.error(`FAILED: hello=${helloOk} scanSent=${scanSent} scanResult=${scanResultOk} aliveAfterCrash=${aliveAfterCrashOk} defaultScan=${defaultScanOk}`);
       process.exit(1);
     }
+  } else if (mode === "scale") {
+    allOk = helloOk && pongOk && scaleAckOk && negArrayOk && negEventOk && restoreOk && scalePlayOk && scaleTicksOk && scaleStopOk && scalePanicOk;
+    if (allOk) {
+      console.log("");
+      console.log("========================================");
+      console.log("ALL PROTOCOL TESTS PASSED (scale):");
+      console.log(`  3c-hotfix scale: ${SCALE_SENT} events / ${SCALE_SENT_BYTES} bytes sent == received == loaded, 0 skipped, byteSize exact`);
+      console.log("  negative A: non-array events → bad_load (silent-empty-score path CLOSED)");
+      console.log("  negative B: malformed event → skipped, firstErrorIndex=3 NAMED");
+      console.log(`  transport contract re-verified post-scale: ticks ADVANCED (${scaleFirstTick} → ${scaleLastTick})`);
+      console.log("========================================");
+      process.exit(0);
+    } else {
+      console.error(`FAILED: hello=${helloOk} pong=${pongOk} scaleAck=${scaleAckOk} negArray=${negArrayOk} negEvent=${negEventOk} restore=${restoreOk} play=${scalePlayOk} ticks=${scaleTicksOk} stop=${scaleStopOk} panic=${scalePanicOk}`);
+      process.exit(1);
+    }
   } else if (mode === "null-audio") {
-    allOk = helloOk && pongOk && errorOk && loadOk && play1Ok && adv1Ok && stopOk && play2Ok && adv2Ok && panicOk;
+    allOk = helloOk && pongOk && errorOk && loadAckOk && loadOk && play1Ok && adv1Ok && stopOk && play2Ok && adv2Ok && panicOk;
     if (allOk) {
       console.log("");
       console.log("========================================");
       console.log("ALL PROTOCOL TESTS PASSED (null-audio):");
       console.log("  v1: hello, ping->pong, unknown->error, shutdown");
-      console.log("  v1 ext: load, transport play, state@30Hz, transport stop, panic");
+      console.log("  v1 ext: load + loadAck receipt, transport play, state@30Hz, transport stop, panic");
+      console.log("  3c-hotfix: load receipt names received/loaded/skipped/byteSize");
       console.log(`  3b-fix: play on null device OK, state ticks ADVANCED (${first1} → ${last1})`);
       console.log(`  3b-polish RESUME: play(tick 480) started at ${first1} (NOT 0)`);
       console.log(`           stop KEPT position (tick ${stopTick})`);
@@ -457,21 +631,22 @@ ws.addEventListener("close", () => {
       console.log("========================================");
       process.exit(0);
     } else {
-      console.error(`FAILED: hello=${helloOk} pong=${pongOk} error=${errorOk} load=${loadOk} play1=${play1Ok} adv1=${adv1Ok} stop=${stopOk} play2=${play2Ok} adv2=${adv2Ok} panic=${panicOk}`);
+      console.error(`FAILED: hello=${helloOk} pong=${pongOk} error=${errorOk} loadAck=${loadAckOk} load=${loadOk} play1=${play1Ok} adv1=${adv1Ok} stop=${stopOk} play2=${play2Ok} adv2=${adv2Ok} panic=${panicOk}`);
       process.exit(1);
     }
   } else {
-    allOk = helloOk && pongOk && loadOk && noDeviceErrOk && pongAfterErrOk && stillFunctionalOk;
+    allOk = helloOk && pongOk && loadAckOk && loadOk && noDeviceErrOk && pongAfterErrOk && stillFunctionalOk;
     if (allOk) {
       console.log("");
       console.log("========================================");
       console.log("ALL PROTOCOL TESTS PASSED (no-device):");
       console.log("  play WITHOUT a device → graceful no_audio_device error (no crash)");
+      console.log("  load receipt (loadAck) still delivered without audio");
       console.log("  engine stayed protocol-functional: ping->pong, stop, seek, panic, shutdown");
       console.log("========================================");
       process.exit(0);
     } else {
-      console.error(`FAILED: hello=${helloOk} pong=${pongOk} load=${loadOk} noDeviceErr=${noDeviceErrOk} pongAfterErr=${pongAfterErrOk} stillFunctional=${stillFunctionalOk}`);
+      console.error(`FAILED: hello=${helloOk} pong=${pongOk} loadAck=${loadAckOk} load=${loadOk} noDeviceErr=${noDeviceErrOk} pongAfterErr=${pongAfterErrOk} stillFunctional=${stillFunctionalOk}`);
       process.exit(1);
     }
   }

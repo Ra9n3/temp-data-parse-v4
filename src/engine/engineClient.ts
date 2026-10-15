@@ -5,6 +5,7 @@
 
 import type { PhysicalMidiStreamEvent } from "../plugins/expressionMaps";
 import type { Project } from "../shared/schema";
+import { writeErrorLog } from "../diagnostics/errorLog";
 
 export type EngineStatus =
   | "off"            // engine exe not found / not spawned
@@ -37,6 +38,42 @@ export interface StateMessage {
   type: "state";
   playing: boolean;
   tick: number;
+}
+
+/** Stage 3c-hotfix (additive): the engine's load receipt — proof the score arrived.
+ * The frontend's source switch gates on it; a load that never arrives, is
+ * rejected, or parses with skipped events can no longer look like success. */
+export interface LoadAckMessage {
+  type: "loadAck";
+  seq: number;
+  /** Entries in the events array as the engine saw it. */
+  received: number;
+  /** Events that passed validation and are now held by the engine. */
+  loaded: number;
+  skipped: number;
+  firstErrorIndex: number;
+  firstErrorReason: string;
+  /** Raw message byte size as received by the engine. */
+  byteSize: number;
+}
+
+export interface LoadReceipt {
+  ok: true;
+  seq: number;
+  received: number;
+  loaded: number;
+  skipped: number;
+  firstErrorIndex: number;
+  firstErrorReason: string;
+  byteSize: number;
+}
+
+export interface LoadFailure {
+  ok: false;
+  reason: string;
+  /** What the frontend TRIED to send (0 bytes if it never got to send). */
+  sentEvents: number;
+  sentBytes: number;
 }
 
 /** Stage 3c-1 — one plugin description from the engine's VST3 scan. */
@@ -78,7 +115,7 @@ export interface PluginStateMessage {
   detail?: string;
 }
 
-type EngineMessage = HelloMessage | PongMessage | ErrorMessage | StateMessage | ScanResultMessage | PluginStateMessage;
+type EngineMessage = HelloMessage | PongMessage | ErrorMessage | StateMessage | ScanResultMessage | PluginStateMessage | LoadAckMessage;
 
 // Deterministic backoff sequence (seconds): 1, 2, 4, 8, 16 — no jitter.
 const BACKOFF_SEQUENCE = [1, 2, 4, 8, 16] as const;
@@ -143,6 +180,19 @@ export class EngineClient {
   private onAudioErrorChange: ((code: string | null, detail: string) => void) | null = null;
   private onScanResultChange: ((result: ScanResultMessage) => void) | null = null;
   private onPluginStateChange: ((result: PluginStateMessage) => void) | null = null;
+  private onErrorChange: ((code: string, echo: string, detail: string) => void) | null = null;
+  // Stage 3c-hotfix: the in-flight load awaiting its loadAck (single slot —
+  // a newer load supersedes an older one; see load()).
+  private loadSeq = 0;
+  private pendingLoad: {
+    seq: number;
+    sentEvents: number;
+    sentBytes: number;
+    resolve: (r: LoadReceipt) => void;
+    reject: (f: LoadFailure) => void;
+    timer: number;
+  } | null = null;
+  private static readonly LOAD_ACK_TIMEOUT_MS = 4000;
 
   constructor(onStatusChange: (status: EngineStatus, rtt: number | null) => void) {
     this.onStatusChange = onStatusChange;
@@ -174,6 +224,16 @@ export class EngineClient {
   /** Stage 3c-2: register a callback for plugin hosting outcomes. */
   onPluginState(cb: (result: PluginStateMessage) => void): void {
     this.onPluginStateChange = cb;
+  }
+
+  /**
+   * Stage 3c-hotfix: register a callback for ANY engine error message. Every
+   * error is also mirrored to error.log — silent engine failures at real
+   * project sizes are the bug class this closes. (no_audio_device ALSO fires
+   * the audio-error callback above, unchanged.)
+   */
+  onError(cb: (code: string, echo: string, detail: string) => void): void {
+    this.onErrorChange = cb;
   }
 
   connect(port: number): void {
@@ -221,8 +281,36 @@ export class EngineClient {
           this.onScanResultChange?.(msg);
         } else if (msg.type === "plugin_state") {
           this.onPluginStateChange?.(msg);
+        } else if (msg.type === "loadAck") {
+          // Stage 3c-hotfix: the engine's load receipt. Resolve the pending load.
+          if (this.pendingLoad && (msg.seq === this.pendingLoad.seq || msg.seq === 0)) {
+            const pending = this.pendingLoad;
+            this.pendingLoad = null;
+            window.clearTimeout(pending.timer);
+            console.info(`[engine] loadAck: received ${msg.received}, loaded ${msg.loaded}, skipped ${msg.skipped}, byteSize ${msg.byteSize} (seq ${msg.seq})`);
+            writeErrorLog("engine", `loadAck: received ${msg.received}, loaded ${msg.loaded}, skipped ${msg.skipped}, firstError ${msg.firstErrorIndex}${msg.firstErrorReason ? ` (${msg.firstErrorReason})` : ""}, byteSize ${msg.byteSize} (seq ${msg.seq}) — sent ${pending.sentEvents} events, ${pending.sentBytes} bytes`);
+            pending.resolve({
+              ok: true,
+              seq: msg.seq,
+              received: msg.received,
+              loaded: msg.loaded,
+              skipped: msg.skipped,
+              firstErrorIndex: msg.firstErrorIndex,
+              firstErrorReason: msg.firstErrorReason,
+              byteSize: msg.byteSize,
+            });
+          }
         } else if (msg.type === "error") {
           console.warn("[engine] error:", msg.code, msg.echo, msg.detail ?? "");
+          // Stage 3c-hotfix: EVERY engine error is receipt-logged and
+          // surfaced to the app (toast via onError) — not just no_audio_device.
+          writeErrorLog("engine", `error ${msg.code}${msg.detail ? ` — ${msg.detail}` : ""}${msg.echo ? ` (echo ${msg.echo})` : ""}`);
+          this.onErrorChange?.(msg.code, msg.echo, msg.detail ?? "");
+          // A load rejected by the engine fails FAST — no point waiting for
+          // an ack that will never come.
+          if (msg.echo === "load" || msg.code === "bad_load") {
+            this.rejectPendingLoad(`engine rejected load: ${msg.code}${msg.detail ? ` (${msg.detail})` : ""}`);
+          }
           // Stage 3b-fix: surface audio-init failure to the UI (footer shows
           // "engine: no audio device" in red while the connection stays up).
           if (msg.code === "no_audio_device") {
@@ -238,6 +326,8 @@ export class EngineClient {
       // Panic on disconnect — no stuck notes. Report the LAST KNOWN tick, not
       // 0: the playhead must freeze at the drop position, not snap to zero.
       if (this.onStateChange) this.onStateChange(false, this.lastKnownTick);
+      // Stage 3c-hotfix: a load in flight can never be acked now.
+      this.rejectPendingLoad("connection closed while awaiting loadAck");
       if (this.status !== "failed" && this.status !== "off") {
         this.scheduleReconnect();
       }
@@ -277,13 +367,50 @@ export class EngineClient {
     events: PhysicalMidiStreamEvent[],
     meta: EngineLoadMeta,
     opts?: { channels?: Record<string, number>; plugin?: { uid: string; path: string; name?: string } },
-  ): void {
-    if (this.ws && this.ws.readyState === WebSocket.OPEN) {
-      const msg: Record<string, unknown> = { type: "load", events, meta };
+  ): Promise<LoadReceipt> {
+    return new Promise((resolve, reject) => {
+      if (!this.ws || this.ws.readyState !== WebSocket.OPEN) {
+        const reason = `engine socket not open (status ${this.status}) — load never sent`;
+        writeErrorLog("engine", `load FAILED: ${reason} (${events.length} events)`);
+        reject({ ok: false, reason, sentEvents: events.length, sentBytes: 0 });
+        return;
+      }
+      // A newer load supersedes an older in-flight one.
+      if (this.pendingLoad) {
+        this.rejectPendingLoad("superseded by a newer load");
+      }
+      const seq = ++this.loadSeq;
+      // Serialize ONCE and measure: this is the frontend side of the receipt
+      // pair (engine.log logs what the engine received).
+      const msg: Record<string, unknown> = { type: "load", seq, events, meta };
       if (opts?.channels && Object.keys(opts.channels).length > 0) msg.channels = opts.channels;
       if (opts?.plugin) msg.plugin = opts.plugin;
-      this.ws.send(JSON.stringify(msg));
-    }
+      const payload = JSON.stringify(msg);
+      const bytes = payload.length; // payload is pure ASCII → UTF-16 units == bytes
+      console.info(`[engine] load: ${events.length} events, ${bytes} bytes (seq ${seq})`);
+      writeErrorLog("engine", `load sent: ${events.length} events, ${bytes} bytes (seq ${seq})`);
+      const timer = window.setTimeout(() => {
+        if (this.pendingLoad && this.pendingLoad.seq === seq) {
+          this.pendingLoad = null;
+          const reason = `loadAck timeout after ${EngineClient.LOAD_ACK_TIMEOUT_MS}ms — engine never acknowledged the load`;
+          writeErrorLog("engine", `load FAILED: ${reason} (sent ${events.length} events, ${bytes} bytes, seq ${seq})`);
+          reject({ ok: false, reason, sentEvents: events.length, sentBytes: bytes });
+        }
+      }, EngineClient.LOAD_ACK_TIMEOUT_MS);
+      this.pendingLoad = { seq, sentEvents: events.length, sentBytes: bytes, resolve, reject, timer };
+      this.ws.send(payload);
+    });
+  }
+
+  /** Stage 3c-hotfix: fail the in-flight load with a reason (ack timeout,
+   * engine rejection, disconnect, supersede, dispose). Never throws. */
+  private rejectPendingLoad(reason: string): void {
+    if (!this.pendingLoad) return;
+    const pending = this.pendingLoad;
+    this.pendingLoad = null;
+    window.clearTimeout(pending.timer);
+    writeErrorLog("engine", `load FAILED: ${reason} (sent ${pending.sentEvents} events, ${pending.sentBytes} bytes, seq ${pending.seq})`);
+    pending.reject({ ok: false, reason, sentEvents: pending.sentEvents, sentBytes: pending.sentBytes });
   }
 
   /**
@@ -350,6 +477,9 @@ export class EngineClient {
     if (this.reconnectTimer !== null) {
       window.clearTimeout(this.reconnectTimer);
       this.reconnectTimer = null;
+    }
+    if (this.pendingLoad) {
+      this.rejectPendingLoad("client disposed");
     }
     if (this.ws) {
       this.ws.onclose = null;
