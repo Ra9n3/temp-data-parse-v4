@@ -354,7 +354,15 @@ jobs:
           if ($editorFocusReceipts -lt 1) { throw "engine.log missing the repeat-open focus receipt" }
           $editorCloseReceipts = (Select-String -Path $engineLog -Pattern "\[editor\] closed instance=").Count
           if ($editorCloseReceipts -lt 1) { throw "engine.log missing the editor close receipt" }
-          Write-Host "engine.log receipt assertions passed (scale load, play, load-fail, async init, reuse, rolling-transport reject, audio config, prepare config, session peak, musical release, resume re-attacks, editor unavailable/open=x1/focus/close all present)"
+          # Stage 3d-3: state persistence receipts — capture triggers (replace
+          # from the re-hosts + editor-close + explicit requests) and TWO
+          # restores (default round-trip + the diverged embed). The blob size
+          # is wrapper-defined (opaque container) — count, don't pin bytes.
+          $stateCaptured = (Select-String -Path $engineLog -Pattern "\[plugin\] state captured \d+ bytes").Count
+          if ($stateCaptured -lt 4) { throw "engine.log missing state-capture receipts (got $stateCaptured, need 4+)" }
+          $stateRestored = (Select-String -Path $engineLog -Pattern "\[plugin\] state restored \d+ bytes").Count
+          if ($stateRestored -ne 1) { throw "engine.log must show EXACTLY ONE state restore (the seq-6 diverged embed), got $stateRestored" }
+          Write-Host "engine.log receipt assertions passed (scale load, play, load-fail, async init, reuse, rolling-transport reject, audio config, prepare config, session peak, musical release, resume re-attacks, editor unavailable/open=x1/focus/close, state captured/restored all present)"
 
       - run: npm ci
 

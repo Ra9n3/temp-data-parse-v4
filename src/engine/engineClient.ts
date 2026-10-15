@@ -136,7 +136,22 @@ export interface EditorClosedMessage {
 
 export type EditorEventMessage = EditorOpenedMessage | EditorClosedMessage;
 
-type EngineMessage = HelloMessage | PongMessage | ErrorMessage | StateMessage | ScanResultMessage | PluginStateMessage | LoadAckMessage | EditorEventMessage;
+/** Stage 3d-3 — a captured plugin state blob for the project JSON
+ * (LibraryGroup.pluginState). Triggers: editor close, instance replacement,
+ * explicit captureState. Blobs beyond the ~2 MiB cap arrive with
+ * state="too_large" and NO data (the frontend warns; the last embedded
+ * state stays authoritative). */
+export interface PluginSavedStateMessage {
+  type: "pluginSavedState";
+  uid: string;
+  path: string;
+  name: string;
+  size: number;
+  data?: string;
+  state?: "too_large";
+}
+
+type EngineMessage = HelloMessage | PongMessage | ErrorMessage | StateMessage | ScanResultMessage | PluginStateMessage | LoadAckMessage | EditorEventMessage | PluginSavedStateMessage;
 
 // Deterministic backoff sequence (seconds): 1, 2, 4, 8, 16 — no jitter.
 const BACKOFF_SEQUENCE = [1, 2, 4, 8, 16] as const;
@@ -203,6 +218,8 @@ export class EngineClient {
   private onPluginStateChange: ((result: PluginStateMessage) => void) | null = null;
   // Stage 3d-1: editor window open/close events (engine-owned popups).
   private onEditorChange: ((msg: EditorEventMessage) => void) | null = null;
+  // Stage 3d-3: captured plugin state blobs (project-JSON embed).
+  private onPluginSavedStateChange: ((msg: PluginSavedStateMessage) => void) | null = null;
   private onErrorChange: ((code: string, echo: string, detail: string) => void) | null = null;
   // Stage 3c-hotfix: the in-flight load awaiting its loadAck (single slot —
   // a newer load supersedes an older one; see load()).
@@ -252,6 +269,11 @@ export class EngineClient {
   /** Stage 3d-1: register a callback for editor window open/close events. */
   onEditor(cb: (msg: EditorEventMessage) => void): void {
     this.onEditorChange = cb;
+  }
+
+  /** Stage 3d-3: register a callback for captured plugin state blobs. */
+  onPluginSavedState(cb: (msg: PluginSavedStateMessage) => void): void {
+    this.onPluginSavedStateChange = cb;
   }
 
   /**
@@ -312,6 +334,10 @@ export class EngineClient {
         } else if (msg.type === "editorOpened" || msg.type === "editorClosed") {
           // Stage 3d-1: engine-owned editor window lifecycle.
           this.onEditorChange?.(msg);
+        } else if (msg.type === "pluginSavedState") {
+          // Stage 3d-3: the engine captured the plugin's state — the app
+          // embeds it in the project JSON (LibraryGroup.pluginState).
+          this.onPluginSavedStateChange?.(msg);
         } else if (msg.type === "loadAck") {
           // Stage 3c-hotfix: the engine's load receipt. Resolve the pending load.
           if (this.pendingLoad && (msg.seq === this.pendingLoad.seq || msg.seq === 0)) {
@@ -397,7 +423,7 @@ export class EngineClient {
   load(
     events: PhysicalMidiStreamEvent[],
     meta: EngineLoadMeta,
-    opts?: { channels?: Record<string, number>; plugin?: { uid: string; path: string; name?: string } },
+    opts?: { channels?: Record<string, number>; plugin?: { uid: string; path: string; name?: string; state?: string } },
   ): Promise<LoadReceipt> {
     return new Promise((resolve, reject) => {
       if (!this.ws || this.ws.readyState !== WebSocket.OPEN) {
@@ -498,6 +524,18 @@ export class EngineClient {
   closeEditor(instanceId = "hosted"): void {
     if (this.ws && this.ws.readyState === WebSocket.OPEN) {
       this.ws.send(JSON.stringify({ type: "closeEditor", instanceId }));
+    }
+  }
+
+  /**
+   * Stage 3d-3: ask the engine to capture the live plugin's state NOW and
+   * push a pluginSavedState blob (the app embeds it in the project JSON).
+   * Best-effort: the app fires this on window close — the reliable primary
+   * triggers are editor-close and instance-replacement captures.
+   */
+  captureState(): void {
+    if (this.ws && this.ws.readyState === WebSocket.OPEN) {
+      this.ws.send(JSON.stringify({ type: "captureState" }));
     }
   }
 

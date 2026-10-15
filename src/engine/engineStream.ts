@@ -42,6 +42,11 @@ export interface EnginePluginRef {
   path: string;
   /** Display name (from the scan; informational). */
   name?: string;
+  /** Stage 3d-3 — the project JSON's embedded plugin state (base64,
+   * LibraryGroup.pluginState). Restored by the engine after instantiate
+   * (before the real-device prepare) so patches + mixer settings survive
+   * app restarts. Omitted = plugin default state. */
+  state?: string;
 }
 
 export interface EngineStream {
@@ -139,7 +144,12 @@ export function buildEngineStream(project: Project): EngineStream {
         trackId: t.id,
       });
       if (!plugin) {
-        plugin = { uid: group.pluginId!, path: group.pluginPath!, name: group.name };
+        plugin = {
+          uid: group.pluginId!,
+          path: group.pluginPath!,
+          name: group.name,
+          ...(group.pluginState ? { state: group.pluginState } : {}),
+        };
       }
     } else {
       // Test-synth path: notes only, tagged for per-track gating.

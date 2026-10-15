@@ -902,3 +902,76 @@ unchanged).
   NAMED diagnosis (bus negotiation? state init? editor crash? MIDI
   dialect?) — each diagnosis is a hosting-layer fix in the same commit,
   then the gauntlet re-runs. CI cannot pre-prove vendor diversity.
+
+## Stage 3d-3 — Plugin state persistence ("install library, use library")
+
+### Storage decision: EMBED in the project JSON (chosen over sidecar files)
+
+The captured blob (base64 `getStateInformation`) lives in
+`LibraryGroup.pluginState` — the schema field pre-seeded for exactly this.
+Why embed beats sidecars: projects are PORTABLE artifacts (copy/share/move
+carries the sound setup — no orphan files, no sidecar path resolution);
+the autosave/localStorage model persists one JSON; cloud-copy flows stay
+single-file. Cost: project JSON grows with the blob — capped at ~2 MiB per
+instance (kMaxPluginStateBytes); a larger capture ships `state:"too_large"`
+with NO data, the frontend toasts a warning, and the last embedded state
+stays authoritative (the cap protects parseability, not hosting).
+
+### Capture triggers (the moments edits actually happen)
+
+1. **Editor close (user-initiated)** — protocol `closeEditor` and the
+   window's X button. Edits happen in the editor; the close is the natural
+   commit point. Retirement closes (plugin replacement) do NOT capture here
+   (no user edit — and a live-pointer race would capture the wrong
+   instance).
+2. **Instance replacement** — the init worker captures the OUTGOING
+   instance BEFORE it is retired (its patches are the user's work).
+3. **Explicit `captureState`** — the frontend fires it on window close
+   (best-effort: the engine may answer before the process dies; if not,
+   the last embed stands). The reliable primary triggers are 1 and 2.
+
+Capture is try/catch-wrapped (a plugin throwing in getStateInformation
+must not kill anything) and receipt-logged (`[plugin] state captured N
+bytes (trigger)` / EMPTY / TOO LARGE / FAILED).
+
+### Restore
+
+The load's `plugin` object gains optional `state` (base64). Applied by the
+init worker AFTER instantiate, BEFORE the real-device prepare (documented
+order: instantiate → state → prepare). Restore failure NEVER kills
+hosting — the receipt names it (`state restore FAILED … running on default
+state`) and oversized/undecodable blobs are SKIPPED with a receipt.
+
+### Instance identity across sessions (rebind, no volatile ids)
+
+Identity = `LibraryGroup.pluginId` (scan uid) + `pluginPath`, and tracks
+bind to the group via `libraryGroupId` — the "track" half of the rebind.
+NOT the volatile per-session instance ids. On load the frontend sends the
+embedded state for the group's plugin; the engine hosts by uid+path.
+Missing plugin on load → the engine's existing hosting-failure fallback
+(ALL tracks ride the test synth, never a broken project) + the frontend
+toasts **"plugin not found — install to restore"**; the project keeps its
+embedded state for the next install.
+
+### CI proof (fixture: free, in-repo, deterministic)
+
+The fixture's state is ONE raw little-endian float32 (`masterScale`, which
+scales every rendered voice — CI-observable by construction):
+- captureState of the DEFAULT state must be byte-EXACT (4 bytes = 1.0f);
+- a re-host WITH an embedded state (0.5) must APPLY it — the play peak
+  HALVES (≈0.787 vs 1.574) — proving setStateInformation took effect;
+- capture→restore→capture must be byte-IDENTICAL — the proof that a
+  project-embedded state survives a restart.
+engine.log receipt greps: ≥2 captures (replace + editor-close triggers),
+exactly one 4-byte restore.
+
+### Fire-rate honesty
+
+- CI proves the mechanism end-to-end on the fixture. It CANNOT prove the
+  user's acceptance: configure the hosted library → close app → reopen →
+  identical sound setup (BBCSO's real state blobs are MBs and its restore
+  semantics are its own) — that is the user's by-ear gate.
+- App-close capture is best-effort by design (a hard kill can race it);
+  the editor-close and replacement captures carry the guarantee.
+- The undo stack is deliberately NOT polluted by state embeds (machine
+  state, not score content — setProject, not commit).

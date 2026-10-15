@@ -62,6 +62,12 @@
 //         RAISES the existing window (focused=true — ONE editor per
 //         instance), closeEditor closes cleanly. The fixture ships a
 //         deterministic 360x120 editor so a free plugin proves universality.
+//       Stage 3d-3: state persistence — captureState of the DEFAULT state is
+//         byte-EXACT (the fixture's state is one raw float32 masterScale,
+//         4 bytes = 1.0f); a re-host WITH an embedded state (masterScale
+//         0.5) must APPLY it (the play peak HALVES to ≈0.787) and the
+//         capture→restore→capture round-trip must be byte-IDENTICAL — the
+//         proof that a project-embedded state survives a restart.
 //   scale — Stage 3c-hotfix: REAL-PROJECT-SIZED load. The CI gap was scale;
 //     this closes it. A deterministic full-density fixture (16 channels × 27
 //     bars, 13,824 events ≈ 1.1 MB serialized) is sent as ONE load message
@@ -154,7 +160,7 @@ const timeout = setTimeout(() => {
   } else if (mode === "scan") {
     console.error(`TIMEOUT at step ${step} (hello=${helloOk} scanSent=${scanSent} scanResult=${scanResultOk} aliveAfterCrash=${aliveAfterCrashOk} defaultScan=${defaultScanOk})`);
   } else if (mode === "host") {
-    console.error(`TIMEOUT at step ${step} phase=${hostPhase} (scan=${hostScanSent} pluginState=${hostPluginStateOk} editorNeg=${hostEditorNegOk} editorOpen=${hostEditorOpenOk} editorFocus=${hostEditorFocusOk} editorClose=${hostEditorCloseOk} reloadAck=${hostReloadAckOk} reject=${hostRejectOk} stillPlaying=${hostPlayingAfterReject} stops=${hostStopTick1}/${hostStopTick2} peaks A/B/C=${hostPeakA.toFixed(3)}/${hostPeakB.toFixed(3)}/${hostPeakC.toFixed(3)} entries=${hostEntries.length})`);
+    console.error(`TIMEOUT at step ${step} phase=${hostPhase} (scan=${hostScanSent} pluginState=${hostPluginStateOk} editorNeg=${hostEditorNegOk} editorOpen=${hostEditorOpenOk} editorFocus=${hostEditorFocusOk} editorClose=${hostEditorCloseOk} stateCap=${hostStateCaptureOk} stateRestore=${hostStateRestoreOk} stateRT=${hostStateRoundtripOk} reloadAck=${hostReloadAckOk} reject=${hostRejectOk} stillPlaying=${hostPlayingAfterReject} stops=${hostStopTick1}/${hostStopTick2} peaks A/B/C=${hostPeakA.toFixed(3)}/${hostPeakB.toFixed(3)}/${hostPeakC.toFixed(3)} entries=${hostEntries.length})`);
   } else {
     console.error(`TIMEOUT at step ${step} (hello=${helloOk} pong=${pongOk} load=${loadOk} noDeviceErr=${noDeviceErrOk} pongAfterErr=${pongAfterErrOk} stillFunctional=${stillFunctionalOk})`);
   }
@@ -167,6 +173,12 @@ let scanSent = false, scanResultOk = false, aliveAfterCrashOk = false, defaultSc
 let hostScanSent = false, hostPluginStateOk = false, hostPhase = 0;
 // Stage 3d-1: editor-window contract flags.
 let hostEditorNegOk = false, hostEditorOpenOk = false, hostEditorFocusOk = false, hostEditorCloseOk = false;
+// Stage 3d-3: state-persistence flags + the playing-peak windows for the
+// "state actually APPLIED" proofs. S0 = default capture, S1 = diverged.
+let hostStateCaptureOk = false, hostStateRestoreOk = false, hostStateRoundtripOk = false;
+let hostStateS0 = "", hostStateS1 = "";
+const hostStatePlayStates = [];
+const hostStatePlayStates2 = [];
 let hostValidUid = "", hostValidPath = "", hostValidName = "";
 let hostReloadAckOk = false, hostRejectOk = false, hostPlayingAfterReject = false;
 const hostEntries = [];   // accumulated dispatch ledger entries
@@ -482,24 +494,103 @@ ws.addEventListener("message", (event) => {
       ws.send(JSON.stringify({ type: "transport", command: "stop" }));
     } else if (msg.type === "state" && hostPhase === 12) {
       if (msg.playing === false) {
-        console.log("[test] phase I ✓ clean stop after the guard sequence — editor phases (3d-1: the instance survives stops)");
+        console.log("[test] phase I ✓ clean stop after the guard sequence — state persistence phases (3d-3, window-free so they run anywhere)");
         hostPhase = 13;
-        ws.send(JSON.stringify({ type: "openEditor", instanceId: "hosted" }));
+        // Stage 3d-3 M: capture the DEFAULT state. A hosted VST3's state
+        // comes back through the JUCE WRAPPER container (opaque to the test
+        // — a 4-byte processor state arrives as a 197-byte container), so
+        // the asserts are FORMAT-AGNOSTIC: capture determinism + divergence
+        // via CC#21 + application-by-peak + round-trip identity.
+        ws.send(JSON.stringify({ type: "captureState" }));
       }
-    } else if (msg.type === "editorOpened" && hostPhase === 13) {
+    } else if (msg.type === "pluginSavedState" && hostPhase === 13) {
+      if (msg.state === "too_large") fail(`fixture state cannot be too_large (got ${msg.size} bytes)`);
+      if (!msg.data || msg.size <= 0) fail(`default capture must carry data (size=${msg.size})`);
+      hostStateS0 = msg.data;
+      hostPhase = 14;
+      console.log(`[test] phase M ✓ default state captured (${msg.size} bytes via the JUCE wrapper) — capture determinism check`);
+      ws.send(JSON.stringify({ type: "captureState" }));
+    } else if (msg.type === "pluginSavedState" && hostPhase === 14) {
+      if (msg.data !== hostStateS0) fail("capture must be DETERMINISTIC (two captures of the same state differ — serialization is unstable)");
+      hostStateCaptureOk = true;
+      console.log("[test] phase M2 ✓ capture is deterministic (byte-identical) — loading a score that DIVERGES the state via CC#21 (fixture: value/127 → masterScale)");
+      hostPhase = 15;
+      ws.send(JSON.stringify({
+        type: "load", seq: 5,
+        events: [...HOST_EVENTS, { eventType: "CONTROL_CHANGE", channel: 1, data1: 21, data2: 64, timestampTicks: 0, trackId: "t1" }],
+        meta: HOST_META, channels: { t1: 1, t2: 2 },
+        plugin: { uid: hostValidUid, path: hostValidPath, name: hostValidName },
+      }));
+    } else if (msg.type === "plugin_state" && hostPhase === 15) {
+      if (msg.state !== "loaded") fail(`phase N: diverge-load must host, got ${msg.state} (${msg.detail ?? ""})`);
+      hostPhase = 16;
+      ws.send(JSON.stringify({ type: "transport", command: "play", tick: 0 }));
+    } else if (msg.type === "state" && hostPhase === 16) {
+      if (msg.playing) {
+        hostStatePlayStates.push(msg.peak ?? 0);
+        if (msg.tick >= 1700) {
+          const peakMax = Math.max(...hostStatePlayStates);
+          // CC#21=64 → masterScale 64/127 ≈ 0.504 ⇒ peak ≈ 1.574×0.504 ≈ 0.793.
+          if (!(peakMax > 0.65 && peakMax < 0.90)) fail(`CC-diverged state did not apply in-render — peak must be ≈0.79, got ${peakMax.toFixed(3)} (frames: ${hostStatePlayStates.length})`);
+          console.log(`[test] phase N ✓ state DIVERGED through the score (peak ${peakMax.toFixed(3)} ≈ half of 1.574) — stopping to capture the diverged state`);
+          hostPhase = 17;
+          ws.send(JSON.stringify({ type: "transport", command: "stop" }));
+        }
+      }
+      // playing=false strays before the play lands are ignored.
+    } else if (msg.type === "state" && hostPhase === 17 && msg.playing === false) {
+      hostPhase = 18;
+      ws.send(JSON.stringify({ type: "captureState" }));
+    } else if (msg.type === "pluginSavedState" && hostPhase === 18) {
+      if (msg.data === hostStateS0) fail("the diverged state must CAPTURE DIFFERENTLY from the default (masterScale 0.504 not reflected in getStateInformation)");
+      hostStateS1 = msg.data;
+      console.log(`[test] phase O ✓ diverged state captured (${msg.size} bytes, differs from default) — re-hosting WITH it embedded (the project-JSON round-trip)`);
+      hostPhase = 19;
+      ws.send(JSON.stringify({
+        type: "load", seq: 6, events: HOST_EVENTS, meta: HOST_META,
+        channels: { t1: 1, t2: 2 },
+        plugin: { uid: hostValidUid, path: hostValidPath, name: hostValidName, state: hostStateS1 },
+      }));
+    } else if (msg.type === "plugin_state" && hostPhase === 19) {
+      if (msg.state !== "loaded") fail(`phase P: re-host with embedded state must load, got ${msg.state} (${msg.detail ?? ""})`);
+      hostPhase = 20;
+      ws.send(JSON.stringify({ type: "transport", command: "play", tick: 0 }));
+    } else if (msg.type === "state" && hostPhase === 20) {
+      if (msg.playing) {
+        hostStatePlayStates2.push(msg.peak ?? 0);
+        if (msg.tick >= 1700) {
+          const peakMax = Math.max(...hostStatePlayStates2);
+          // The RESTORED state (masterScale ≈ 0.504 from the embed) must apply.
+          if (!(peakMax > 0.65 && peakMax < 0.90)) fail(`restored state did not APPLY — peak must be ≈0.79 (the embedded value), got ${peakMax.toFixed(3)} (frames: ${hostStatePlayStates2.length})`);
+          hostStateRestoreOk = true;
+          console.log(`[test] phase P ✓ restored state APPLIED (peak ${peakMax.toFixed(3)} ≈ half of 1.574 — setStateInformation took effect) — stopping, round-trip capture`);
+          hostPhase = 21;
+          ws.send(JSON.stringify({ type: "transport", command: "stop" }));
+        }
+      }
+    } else if (msg.type === "state" && hostPhase === 21 && msg.playing === false) {
+      hostPhase = 22;
+      ws.send(JSON.stringify({ type: "captureState" }));
+    } else if (msg.type === "pluginSavedState" && hostPhase === 22) {
+      if (msg.data !== hostStateS1) fail("capture→restore→capture must be byte-IDENTICAL (the project embed survives a restart)");
+      hostStateRoundtripOk = true;
+      console.log("[test] phase Q ✓ capture→restore→capture byte-IDENTICAL — editor phases (3d-1: window work, proven on CI's desktop)");
+      hostPhase = 23;
+      ws.send(JSON.stringify({ type: "openEditor", instanceId: "hosted" }));
+    } else if (msg.type === "editorOpened" && hostPhase === 23) {
       if (msg.focused === true) fail(`first openEditor must OPEN (not focus): ${JSON.stringify(msg)}`);
       if (!msg.width || msg.width <= 0 || !msg.height || msg.height <= 0) fail(`editorOpened lacks real geometry: ${JSON.stringify(msg)}`);
       hostEditorOpenOk = true;
       console.log(`[test] phase J ✓ editor OPENED "${msg.name}" ${msg.width}x${msg.height} — repeat request must RAISE, not double-open`);
-      hostPhase = 14;
+      hostPhase = 24;
       ws.send(JSON.stringify({ type: "openEditor", instanceId: "hosted" }));
-    } else if (msg.type === "editorOpened" && hostPhase === 14) {
+    } else if (msg.type === "editorOpened" && hostPhase === 24) {
       if (msg.focused !== true) fail(`repeat openEditor must re-echo editorOpened with focused=true (one editor per instance), got ${JSON.stringify(msg)}`);
       hostEditorFocusOk = true;
       console.log("[test] phase K ✓ repeat openEditor focused the existing window (ONE editor per instance) — closing");
-      hostPhase = 15;
+      hostPhase = 25;
       ws.send(JSON.stringify({ type: "closeEditor", instanceId: "hosted" }));
-    } else if (msg.type === "editorClosed" && hostPhase === 15) {
+    } else if (msg.type === "editorClosed" && hostPhase === 25) {
       hostEditorCloseOk = true;
       console.log("[test] phase L ✓ editor CLOSED cleanly (protocol close; the X button and plugin unload converge on the same path) — shutdown");
       finishAndShutdown();
@@ -559,7 +650,7 @@ ws.addEventListener("message", (event) => {
     if (msg.type === "hello" && !helloOk) {
       helloOk = true;
       if (msg.protocol !== 1) fail(`expected protocol 1, got ${msg.protocol}`);
-      if (msg.engineVersion !== "0.5.0") fail(`expected 0.5.0, got ${msg.engineVersion}`);
+      if (msg.engineVersion !== "0.6.0") fail(`expected 0.6.0, got ${msg.engineVersion}`);
       // Stage 3c close-out: the dispatch ledger streams what the engine
       // ACTUALLY dispatched — the replay-burst and re-attack asserts read it.
       ws.send(JSON.stringify({ type: "dispatch_log", enable: true }));

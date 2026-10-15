@@ -72,7 +72,8 @@ public:
                     v.env -= 1.0f / 128.0f;
                     if (v.env <= 0.0f) { v.env = 0.0f; v.releasing = false; break; }
                 }
-                const float out = std::sin(v.phase) * v.amp * v.env * cc7Scale * cc11Scale;
+                const float out = std::sin(v.phase) * v.amp * v.env * cc7Scale * cc11Scale
+                                  * masterScale.load();
                 buffer.setSample(0, s, buffer.getSample(0, s) + out);
                 if (buffer.getNumChannels() > 1)
                     buffer.setSample(1, s, buffer.getSample(1, s) + out);
@@ -94,8 +95,22 @@ public:
     void setCurrentProgram(int) override {}
     const juce::String getProgramName(int) override { return "Default"; }
     void changeProgramName(int, const juce::String&) override {}
-    void getStateInformation(juce::MemoryBlock& dest) override { dest.setSize(0, true); }
-    void setStateInformation(const void*, int) override {}
+    void getStateInformation(juce::MemoryBlock& dest) override {
+        // Stage 3d-3: REAL state. The CI-observable master scale (multiplies
+        // every voice), serialized as ONE raw little-endian float32 — a
+        // format the CI can construct and assert byte-exactly (no XML
+        // dependency). 4 bytes: b64("AADAPw==") == 1.0f.
+        dest.setSize(sizeof(masterScale), true);
+        const float v = masterScale.load();
+        std::memcpy(dest.getData(), &v, sizeof(v));
+    }
+    void setStateInformation(const void* data, int sizeInBytes) override {
+        if (data == nullptr || sizeInBytes != static_cast<int>(sizeof(float))) return;
+        float v = 1.0f;
+        std::memcpy(&v, data, sizeof(v));
+        if (v < 0.0f || v > 4.0f) v = 1.0f;   // sane range; never a garbage scale
+        masterScale.store(v);
+    }
 
     // Stage 3d-1: the fixture SHIPS an editor. The 3d-1 acceptance proves
     // editors are UNIVERSAL — the CI contract (openEditor → editorOpened with
@@ -120,6 +135,14 @@ public:
 
 private:
     static constexpr int kMaxVoices = 32;
+    // Stage 3d-3 — state-persistence observability: scales every rendered
+    // voice. Default 1.0; ALSO settable via CC#21 (value/127) so the CI can
+    // DIVERGE the state through the score (a hosted VST3's state comes back
+    // through the JUCE wrapper container — opaque to the test, so the test
+    // cannot hand-construct a blob). Proof chain: capture → diverge via CC →
+    // capture (must differ) → re-host WITH the captured blob → peak proves
+    // the restored state APPLIED → capture again (must be byte-identical).
+    std::atomic<float> masterScale{1.0f};
 
     struct Voice {
         bool active = false;
@@ -160,6 +183,7 @@ private:
             const int val = m.getControllerValue();
             if (num == 7) cc7[ch] = val;
             else if (num == 11) cc11[ch] = val;
+            else if (num == 21) masterScale.store(juce::jlimit(0.0f, 4.0f, static_cast<float>(val) / 127.0f));
             else if (num == 120 || num == 123) {
                 for (auto& v : voices) {
                     if (v.channel == ch) { v.releasing = true; v.active = false; }

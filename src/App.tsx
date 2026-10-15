@@ -5,7 +5,7 @@ import dorianFixture from "./fixtures/dorian-16bars.json";
 import { TopBar } from "./components/TopBar";
 import { Arranger } from "./components/Arranger";
 import { GenerationSettingsPanel } from "./components/GenerationSettingsPanel";
-import { EngineClient, type EngineLoadMeta, type EngineStatus, type EditorEventMessage, type LoadFailure, type PluginStateMessage, type ScanResultMessage } from "./engine/engineClient";
+import { EngineClient, type EngineLoadMeta, type EngineStatus, type EditorEventMessage, type LoadFailure, type PluginSavedStateMessage, type PluginStateMessage, type ScanResultMessage } from "./engine/engineClient";
 import { buildEngineStream, resolveEngineChannels } from "./engine/engineStream";
 import { PPQ, projectEndTick, tickToBar } from "./shared/schema";
 import {
@@ -283,7 +283,42 @@ export default function App() {
       if (result.state === "loaded") {
         toast("ok", `${result.name ?? "Plugin"} hosted (latency ${result.latencyMs?.toFixed(1) ?? "?"}ms, channels ${(result.channels ?? []).join(",")})`);
       } else {
-        toast("error", `${result.name ?? "Plugin"} failed to load — falling back to test synth: ${result.detail ?? "unknown"}`);
+        // Stage 3d-3: a plugin the project references but the machine lacks
+        // is a NAMED, non-breaking case — the track rides the test synth
+        // and the project keeps its embedded state for the next install.
+        if (/no plugin types found at|createPluginInstance failed/i.test(result.detail ?? "")) {
+          toast("error", "plugin not found — install to restore");
+        } else {
+          toast("error", `${result.name ?? "Plugin"} failed to load — falling back to test synth: ${result.detail ?? "unknown"}`);
+        }
+      }
+    });
+    // Stage 3d-3: the engine captured the plugin's state — embed it in the
+    // project JSON (LibraryGroup.pluginState) so patches + mixer settings
+    // survive restarts. Uses the UPDATER form of the immer setter: the
+    // latest project is always the base (this callback outlives renders).
+    // setProject (not commit) — a state embed is machine state, not score
+    // content; it must NOT spam the undo stack on every editor close.
+    let firstStateToastDone = false;
+    client.onPluginSavedState((msg: PluginSavedStateMessage) => {
+      if (disposed) return;
+      if (msg.state === "too_large") {
+        toast("error", `plugin state too large to save with the project (${(msg.size / 1024 / 1024).toFixed(1)} MB > 2 MB cap) — patches not embedded`);
+        writeErrorLog("engine", `pluginSavedState too_large: ${msg.size} bytes (${msg.name})`);
+        return;
+      }
+      if (!msg.data) return;
+      setProject((draft) => {
+        for (const g of draft.libraryGroups) {
+          if (g.pluginId === msg.uid || (g.pluginPath && g.pluginPath === msg.path)) {
+            g.pluginState = msg.data!;
+          }
+        }
+      });
+      writeErrorLog("engine", `pluginSavedState embedded: ${msg.size} bytes (${msg.name}, uid ${msg.uid || "n/a"})`);
+      if (!firstStateToastDone) {
+        firstStateToastDone = true;
+        toast("ok", "sound setup saved with the project");
       }
     });
     // Stage 3d-1: editor window lifecycle (engine-owned popups). The open
@@ -313,6 +348,12 @@ export default function App() {
     });
     engineClientRef.current = client;
 
+    // Stage 3d-3: app-close capture (best-effort — the reliable triggers are
+    // editor-close and instance replacement). Fire-and-forget: the engine
+    // may answer before the process dies; if not, the last embed stands.
+    const onBeforeUnload = () => client.captureState();
+    window.addEventListener("beforeunload", onBeforeUnload);
+
     invoke<{ port: number; failed: boolean }>("get_engine_info")
       .then((info) => {
         if (disposed) return;
@@ -332,6 +373,7 @@ export default function App() {
     return () => {
       disposed = true;
       if (pingTimer) window.clearInterval(pingTimer);
+      window.removeEventListener("beforeunload", onBeforeUnload);
       client.dispose();
     };
   }, []);

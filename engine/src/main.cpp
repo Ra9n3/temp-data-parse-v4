@@ -59,6 +59,22 @@
 //         ships no editor (createEditor() == nullptr). Plugins MAY be
 //         headless; that is a normal reply, not a crash.
 //
+// Stage 3d-3 protocol additions (additive):
+//   load: the "plugin" object gains OPTIONAL "state" (base64) — the project
+//         JSON's embedded plugin state (getStateInformation blob). Applied
+//         after instantiate, BEFORE the real-device prepare (documented
+//         order); restore failure NEVER kills hosting — the receipt names
+//         it and the plugin runs on its default state.
+//   {"type":"captureState"} — client asks the engine to capture the live
+//         instance's state NOW (frontend sends on app close; best-effort).
+//   server -> client: {"type":"pluginSavedState","uid","path","name",
+//         "size":N,"data":base64[,"state":"too_large"]} — a captured state
+//         blob for the project JSON. Triggers: editor close (user edits
+//         happen in the editor), instance replacement (the OUTGOING
+//         instance's state), and captureState. Blobs > 2 MiB arrive with
+//         "state":"too_large" and NO data (the cap protects project JSON
+//         parseability; the frontend warns).
+//
 // Test synth: sine oscillator per note, voice allocation (steal oldest),
 // gain envelope (attack/release ~10ms). Every NoteOn must sound, every NoteOff
 // must stop. No VST3, no samples, no CC rendering. Loopback ONLY (127.0.0.1).
@@ -126,7 +142,7 @@
 
 namespace {
 
-constexpr const char* kEngineVersion = "0.5.0";
+constexpr const char* kEngineVersion = "0.6.0";
 constexpr int kProtocolVersion = 1;
 constexpr int kDefaultPort = 9377;
 constexpr int kMaxVoices = 64;
@@ -422,7 +438,9 @@ std::unordered_map<std::string, PluginEditorWindow*> g_editors;  // instanceId �
 // Defined further down (JSON helpers + close converge point); forward-declared
 // so the window class and open path can reference them.
 std::string escape_json(const std::string& s);
-void destroyEditorWindow(const std::string& iid);
+void destroyEditorWindow(const std::string& iid, bool captureOnClose = true);
+struct HostedPlugin;
+void captureAndBroadcastState(const HostedPlugin& h, const char* trigger);
 // Broadcast surface for message-thread-initiated events (editorClosed from
 // the X button, editor_unavailable from createEditor failure): set once in
 // main() before any thread can open an editor; the server outlives them all.
@@ -443,7 +461,8 @@ public:
     void closeButtonPressed() override {
         // Runs on the message thread. Destroying self synchronously inside
         // the window's own callback is unsafe — schedule the deletion.
-        juce::MessageManager::callAsync([iid = this->iid] { destroyEditorWindow(iid); });
+        // USER-initiated close → the state capture fires (3d-3).
+        juce::MessageManager::callAsync([iid = this->iid] { destroyEditorWindow(iid, true); });
     }
 
     std::string iid;
@@ -512,7 +531,12 @@ void openEditorWindow(const std::string& iid, HostedPlugin* owner) {
 
 // Message-thread side of close. Every path (protocol close, X button,
 // retirement) converges here; the map is the single source of truth.
-void destroyEditorWindow(const std::string& iid) {
+// captureOnClose: USER-initiated closes (protocol closeEditor, the X button)
+// trigger a 3d-3 state capture — edits happen in the editor, so the close is
+// the natural commit point. Retirement closes (closeAllEditors*) pass false:
+// the init worker captures the OUTGOING instance itself (trigger "replace")
+// and a live-pointer race here would capture whichever instance is current.
+void destroyEditorWindow(const std::string& iid, bool captureOnClose) {
     PluginEditorWindow* win = nullptr;
     {
         std::lock_guard<std::mutex> lock(g_editorMutex);
@@ -527,11 +551,15 @@ void destroyEditorWindow(const std::string& iid) {
     }
     broadcastJson(std::string("{\"type\":\"editorClosed\",\"instanceId\":\"") + escape_json(iid) + "\"}");
     engineLog("[editor] closed instance=" + iid);
+    if (captureOnClose) {
+        if (auto* live = g_hostedLive.load(std::memory_order_acquire))
+            captureAndBroadcastState(*live, "editor-close");
+    }
 }
 
 // Schedule-close helpers (callable from ANY thread; execution on the pump).
 void closeEditorAsync(const std::string& iid) {
-    juce::MessageManager::callAsync([iid] { destroyEditorWindow(iid); });
+    juce::MessageManager::callAsync([iid] { destroyEditorWindow(iid, true); });
 }
 void closeAllEditorsAsync() {
     juce::MessageManager::callAsync([] {
@@ -540,7 +568,7 @@ void closeAllEditorsAsync() {
             std::lock_guard<std::mutex> lock(g_editorMutex);
             for (auto& kv : g_editors) ids.push_back(kv.first);
         }
-        for (const auto& id : ids) destroyEditorWindow(id);
+        for (const auto& id : ids) destroyEditorWindow(id, false);
     });
 }
 // Shutdown path: schedule close-all and WAIT (bounded) so the pump actually
@@ -554,11 +582,60 @@ void closeAllEditorsAtShutdown() {
             std::lock_guard<std::mutex> lock(g_editorMutex);
             for (auto& kv : g_editors) ids.push_back(kv.first);
         }
-        for (const auto& id : ids) destroyEditorWindow(id);
+        for (const auto& id : ids) destroyEditorWindow(id, false);
         done.store(true);
     });
     for (int i = 0; i < 50 && !done.load(); ++i)
         std::this_thread::sleep_for(std::chrono::milliseconds(10));
+}
+
+// ─── Stage 3d-3: plugin state persistence ──────────────────────────────
+// "Install library, use library": patches + mixer settings survive app
+// restarts. The engine CAPTURES state (getStateInformation) at the moments
+// edits actually happen and SHIPS the blob to the frontend, which EMBEDS it
+// in the project JSON (LibraryGroup.pluginState — portability: projects
+// carry their sound setup; no sidecar files). On instance recreation the
+// frontend sends the blob back and the engine RESTORES it
+// (setStateInformation) before the real-device prepare.
+// Storage decision + rebind identity (pluginId+path, NOT volatile instance
+// ids) documented in ASSUMPTIONS.md 3d-3.
+constexpr size_t kMaxPluginStateBytes = 2 * 1024 * 1024;   // ~2 MiB/instance
+// Capture the CURRENT live instance and broadcast the blob. Callable from
+// the message thread AND the init worker (getStateInformation is host-callable
+// from any thread; plugins guard internally). try/catch: a plugin that
+// throws in getStateInformation must not kill anything.
+void captureAndBroadcastState(const HostedPlugin& h, const char* trigger) {
+    try {
+        juce::MemoryBlock mb;
+        h.instance->getStateInformation(mb);
+        const size_t n = mb.getSize();
+        if (n == 0) {
+            engineLog(std::string("[plugin] state capture EMPTY (") + trigger + ") — nothing to persist");
+            return;
+        }
+        std::string msg = std::string("{\"type\":\"pluginSavedState\",\"uid\":\"") +
+            escape_json(h.uid) + "\",\"path\":\"" + escape_json(h.path) +
+            "\",\"name\":\"" + escape_json(h.name) + "\",\"size\":" + std::to_string(n);
+        if (n > kMaxPluginStateBytes) {
+            // The cap protects project-JSON parseability, NOT a hosting limit:
+            // warn (frontend toasts) and ship NO data — the last embedded
+            // state (if any) stays authoritative.
+            msg += ",\"state\":\"too_large\"}";
+            engineLog(std::string("[plugin] state TOO LARGE for project embed: ") +
+                      std::to_string(n) + " bytes > " +
+                      std::to_string(kMaxPluginStateBytes) + " (" + trigger + ")");
+        } else {
+            msg += ",\"data\":\"" + juce::Base64::toBase64(mb.getData(), mb.getSize()).toStdString() + "\"}";
+            engineLog(std::string("[plugin] state captured ") + std::to_string(n) +
+                      " bytes (" + trigger + ")");
+        }
+        broadcastJson(msg);
+    } catch (const std::exception& e) {
+        engineLog(std::string("[plugin] state capture FAILED (") + trigger + "): " +
+                  (e.what() ? e.what() : "unknown"));
+    } catch (...) {
+        engineLog(std::string("[plugin] state capture FAILED (") + trigger + "): SEH/unknown");
+    }
 }
 
 // ─── Stage 3c-regression: ASYNC plugin init ─────────────────────────────
@@ -573,6 +650,9 @@ struct PluginInitRequest {
     juce::var pluginVar;        // the load's plugin field (uid+path)
     long long seq = 0;
     std::string channelsJson;   // hosted channels captured at queue time
+    // Stage 3d-3: the project JSON's embedded state (base64), restored after
+    // instantiate and BEFORE the real-device prepare. Empty = default state.
+    std::string stateB64;
 };
 std::mutex g_pluginInitMutex;
 std::condition_variable g_pluginInitCv;
@@ -2011,15 +2091,19 @@ void handle_load(const juce::var& json, ix::WebSocket& ws, size_t byteSize) {
             // delayed queued transport commands and timed out the NEXT
             // load's loadAck. loadAck/state above already went out in
             // milliseconds; plugin_state arrives when the instance is real.
+            std::string stateB64;
+            if (juce::DynamicObject* po = pluginVar.getDynamicObject())
+                stateB64 = po->getProperty("state").toString().toStdString();
             {
                 std::lock_guard<std::mutex> lock(g_pluginInitMutex);
-                g_pluginInitRequest = PluginInitRequest{pluginVar, seq, channelsJson};
+                g_pluginInitRequest = PluginInitRequest{pluginVar, seq, channelsJson, stateB64};
                 g_pluginInitPending = true;
                 ++g_pluginInitGen;
             }
             g_pluginInitCv.notify_one();
             const std::string reqUid = pluginVar.getDynamicObject()->getProperty("uid").toString().toStdString();
             engineLog("[plugin] init started (async) uid=" + reqUid +
+                      (stateB64.empty() ? "" : " + embedded state (" + std::to_string(stateB64.size()) + " b64 chars)") +
                       " | seq " + std::to_string(seq) +
                       " — loadAck not delayed, plugin_state follows on completion");
             std::cout << "[engine] plugin init queued (async, seq " << seq << ")" << std::endl;
@@ -2384,6 +2468,17 @@ void handle_close_editor(const juce::var& json) {
     closeEditorAsync(iid);
 }
 
+// {"type":"captureState"} — Stage 3d-3: capture the live instance's state
+// NOW (the frontend sends this on app close; best-effort). The capture runs
+// on the message thread via callAsync and reads g_hostedLive AT EXECUTION
+// time (the pointer captured now may be swapped by then).
+void handle_capture_state() {
+    juce::MessageManager::callAsync([] {
+        if (auto* live = g_hostedLive.load(std::memory_order_acquire))
+            captureAndBroadcastState(*live, "request");
+    });
+}
+
 // ─── Main ───────────────────────────────────────────────────────────────────
 } // namespace
 
@@ -2535,6 +2630,8 @@ int main(int argc, char** argv) {
                     handle_open_editor(parsed, ws);
                 } else if (type == "closeEditor") {
                     handle_close_editor(parsed);
+                } else if (type == "captureState") {
+                    handle_capture_state();
                 } else {
                     ws.send("{\"type\":\"error\",\"code\":\"unknown\",\"echo\":\"" + escape_json(message) + "\"}");
                 }
@@ -2676,6 +2773,41 @@ int main(int argc, char** argv) {
             // running callback was the other half of the empty-score
             // regression. D1: log the ACTUAL prepared config (or the nominal
             // fallback when audio has not started yet).
+            //
+            // Stage 3d-3 — restore the project's embedded state BEFORE the
+            // real-device prepare (documented order: instantiate → state →
+            // prepare). A restore failure NEVER kills hosting: the receipt
+            // names it and the plugin runs on its default state.
+            if (!req.stateB64.empty() && loaded->instance) {
+                // Decode via MemoryOutputStream backed by mb — and read the
+                // TRUE decoded size from the STREAM (mos.getDataSize()), not
+                // mb.getSize(): the stream commits its final size on flush,
+                // and reading the block early yields the PREALLOCATED
+                // capacity (empirically 224 vs the real 197 — the container
+                // format happened to be self-delimiting, but passing a
+                // capacity-garbage size to a plugin is a bug, not a
+                // contract).
+                juce::MemoryBlock mb;
+                juce::MemoryOutputStream mos(mb, false);
+                const bool decoded = juce::Base64::convertFromBase64(mos, juce::String(req.stateB64));
+                mos.flush();
+                const size_t restoredBytes = mos.getDataSize();
+                if (decoded && restoredBytes > 0 && restoredBytes <= kMaxPluginStateBytes * 2) {
+                    try {
+                        loaded->instance->setStateInformation(mos.getData(), static_cast<int>(restoredBytes));
+                        engineLog("[plugin] state restored " + std::to_string(restoredBytes) + " bytes (project embed)");
+                    } catch (const std::exception& e) {
+                        engineLog(std::string("[plugin] state restore FAILED: ") +
+                                  (e.what() ? e.what() : "unknown") + " — running on default state");
+                    } catch (...) {
+                        engineLog("[plugin] state restore FAILED: SEH/unknown — running on default state");
+                    }
+                } else {
+                    engineLog("[plugin] state restore SKIPPED — empty/oversized blob (" +
+                              std::to_string(req.stateB64.size()) + " b64 chars, decoded " +
+                              std::to_string(decoded ? restoredBytes : 0) + " bytes)");
+                }
+            }
             const double devRate = g_engine.sampleRate.load();
             const int devBuf = g_deviceBufferSize.load();
             if (devRate > 0.0 && loaded->instance) {
@@ -2704,6 +2836,11 @@ int main(int argc, char** argv) {
             // never touches editors).
             closeAllEditorsAsync();
             HostedPlugin* oldRaw = g_hostedLive.exchange(raw, std::memory_order_acq_rel);
+            // Stage 3d-3: capture the OUTGOING instance's state (its patches
+            // are the user's work — a reload must not lose them). oldRaw is
+            // retired but alive (250ms grace); capture immediately.
+            if (oldRaw && oldRaw->instance)
+                captureAndBroadcastState(*oldRaw, "replace");
             if (oldRaw) {
                 std::lock_guard<std::mutex> rlock(g_retireMutex);
                 g_retiredPlugins.push_back({oldRaw, std::chrono::steady_clock::now()});
