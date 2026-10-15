@@ -366,3 +366,52 @@ Both engines must exit cleanly with code 0; the workflow throws otherwise. The s
 - **By-ear gate**: whether a note *sounds* on real hardware remains the user's manual test on the new installer — CI proves the graph runs (ticks advance on the null device) but cannot prove audibility. The stage gate is unchanged.
 - **Real-device path on Windows** (WASAPI/DirectSound open, actual device names in stdout): exercised only on machines with audio hardware; CI covers the null-device and no-device paths.
 - **/EHa catch coverage**: the /EHa + `catch(...)` conversion of a hard SEH into a protocol error is belt-and-braces for the observed headless crash; the exact faulting instruction of the historical 0xC0000005 was never captured in a dump, so the claim is "init failures cannot crash the process", verified on the runner by the clean-error test.
+
+## Stage 3b polish — Resume-state sync + residual click exception
+
+Three by-ear findings on 3951ede: (F1) Space/stop then Play resumed from tick 0 with ~1 s of doubled audio; (F2) play worked but the click handler still threw (footer/button shake persisted). Both are fixed at the ROOT, not patched over.
+
+### F1 — position truth and the resume contract (engine)
+
+The old engine reset `playStartTick` to 0 on every play and reported the stale play-start position in state messages whenever the transport was stopped — so "position at stop" simply did not exist anywhere, and the frontend had nothing true to resume from. The position contract is now:
+
+- **`lastTick` is the single source of truth** for the playhead while stopped. The audio callback re-commits it every buffer; `stop` and `seek` set it directly; `currentTick()` returns it whenever `playing == false`. State messages therefore report the REAL stopped position (the old "stale playStartTick" bug is structurally gone).
+- **Stop is PANIC**: the stop handler kills every voice immediately (`active`/`releasing`/`env` zeroed, counted and reported on stdout as `transport stop: voices killed (n=…)`). No ring-out can bleed over the next play. Seek gets the same hard-jump semantics (ringing notes from the old position do not survive a position jump).
+- **Play accepts an OPTIONAL `tick`** (v1-extension, additive, backward-compatible — the only protocol change). Explicit tick → start there. No tick → **resume from `lastTick`**. The engine NEVER auto-resets to 0 on play without an explicit tick. Play also panics any ringing voices before starting (a fresh play can never overlap the previous transport).
+- **Load acks report the truth**: the state reply after `load` now carries the CURRENT `playing` + `currentTick()`, not a hardcoded `{playing:false,tick:0}`. The old hardcoded reply poisoned the UI playhead to 0 — even mid-playback after an edit-triggered reload.
+- **Transport generation counter** (`transportGen`, bumped on play/seek/panic): an audio-callback buffer that was in flight when the transport changed must not commit its `samplesProcessed`/`lastTick` afterwards — without the guard a pre-seek/pre-play buffer could clobber the new position (a classic ~1-buffer race that renders as exactly the "settles after a moment" symptom).
+
+### F1 — frontend resume flow and the source-switch audit (the doubled audio)
+
+Audit result: the webview synth fallback was reachable through THREE holes, all caused by routing transport with `enginePlaying` — a flag that mirrors every 30 Hz state message and therefore flickers (the load ack's `playing:false`, the optimistic play, reconnects):
+
+1. `engineStop`/`engineSeek`/`engineRewind` branched on `enginePlaying`: a stop landing during a flicker hit the webview (`playback.stop()`) while the ENGINE KEPT RENDERING — the engine kept playing, and the next play re-started it → overlap/double.
+2. `effectivePlayheadTick` switched to `playback.playheadTick` (the webview's, = 0) the moment `enginePlaying` went false → the playhead visibly jumped to 0 on every stop, training the user's eye that "resume from 0" is what happened.
+3. `enginePlay`'s engine branch never stopped a running webview synth (rare drive flip → both rendering).
+
+Fixes: a dedicated **`engineDrive` flag** ("the last play request went to the engine") now routes stop/seek/rewind AND the playhead source; stop/seek/rewind route by drive, not by flicker; `enginePlay` calls `playback.stop()` before the engine renders (webview synth FULLY disengaged, verified by construction: its only entry points are the engine-unavailable branch and the exception fallback, both of which flip the drive flag off); the engine client remembers `lastKnownTick` and reports it on disconnect (playhead freezes at the drop position instead of snapping to 0); repeat plays skip a redundant `load` (score-cached by project reference, invalidated on engine-session transitions) which removes the load-ack flicker entirely. Position math: NONE added — the engine's state messages remain the only source; the frontend just echoes `engineTickRef` (mirrored from state messages) back as the explicit resume tick, per "no parallel frontend position math".
+
+### F2 — error.log rider + the click exception
+
+**The error.log rider did NOT exist** (it was in the earlier brief and was never implemented nor reported — confirmed by a full-codebase search: no `error.log`, no `append_error_log`, no global error handlers). It now exists:
+
+- Rust shell: `append_error_log` command appends one timestamped line to **`%APPDATA%\scorch\error.log`** (create-dir, append-only, rotates to `error.log.1` at 1 MB, never panics). Non-Windows dev fallback: XDG data home.
+- Frontend (`src/diagnostics/errorLog.ts`): global `window` `"error"` + `"unhandledrejection"` riders installed in `main.tsx` before React mounts; `writeErrorLog(source, err)` for targeted use; outside Tauri it degrades to `console.error` with identical formatting.
+- Handler safety net (kept and hardened): `enginePlay`'s engine branch is wrapped in try/catch → `writeErrorLog("enginePlay", …)` → falls back to the webview synth, so a throw can neither kill the click nor go unrecorded. `engineStop`/`engineSeek` log their send failures the same way.
+
+On the throw itself: no reproducible crash existed in the code path by inspection, and without the rider no stack was ever captured — the observable "shake" is fully explained by the F1 source-switch flicker (the Play/Pause button label + footer indicator flapping between renders when state messages toggled `enginePlaying` under the routing logic, plus the load-ack's `playing:false` flash). With the drive-flag routing, the truthful load ack, and the load-skip on repeat plays, every identified flicker source is gone. The rider is now in place so IF anything still throws on the user's machine, the next by-ear run produces the exact stack in `%APPDATA%\scorch\error.log` — the report-requested evidence path. No RNG was introduced anywhere.
+
+### Owed items from the previous brief (now confirmed implemented)
+
+- **Release devtools + F12**: were NOT implemented (no `devtools` feature, no F12 binding). Now: `tauri` cargo feature `devtools` enabled (works in release builds), `open_devtools` Tauri command, and the frontend keydown handler binds F12 → `open_devtools` (preventDefault; no-op outside the desktop shell).
+- **error.log mechanism**: confirmed missing (see F2 above); now implemented.
+
+### CI proof (extended null-audio contract)
+
+`test-engine-protocol.mjs` (null-audio mode) now runs, in order: hello → ping/pong → unknown→error → load → **`play` with `tick: 480`** (first playing state must be ≈480 — asserted `≥400`, the old engine's 0-start fails here) → ticks strictly advance → **`stop`** (the stopped state must KEEP the position: asserted `≥` playback start; the old stale-position behavior fails here) → **`play` with NO tick** (first playing state must resume: asserted `≥200` absolute floor and `≥ stopTick − 600` continuity; a 0-restart fails both) → ticks advance again → panic → shutdown → exit 0. The workflow additionally greps the engine's stdout for the `voices killed` stop-panic proof and both `transport play from tick` resume lines. Protocol shape rules held: only the OPTIONAL `tick` on play was added; suite 40/40 untouched.
+
+### Untested claims (fire-rate honesty)
+
+- **By-ear gate**: "Space/stop/play resumes AT the stopped position, no doubled audio, no shake" remains the user's manual test on the new installer. CI proves the resume contract numerically on the null device; it cannot prove what the ear hears.
+- **Kill-test regression**: stop-panic is now structurally the same code path as before (immediate voice kill under `voicesMutex`), and CI asserts the kill happens; the user's kill-test re-run is still the gate.
+- **The exact F2 stack**: unless something still throws on the user's machine, `%APPDATA%\scorch\error.log` will contain no `enginePlay` entries — the absence of entries is itself the evidence that the flicker (not a thrown exception) was the residual symptom.

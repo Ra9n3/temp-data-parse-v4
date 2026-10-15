@@ -4,6 +4,9 @@
 // fallback to the bundled dist/ embedded in the binary.
 // Stage 3a: spawns scorch-engine as a sidecar, manages its lifecycle (restart
 // on crash, kill on app close), and exposes get_engine_info to the frontend.
+// Stage 3b polish: error.log rider (frontend diagnostics →
+// %APPDATA%/scorch/error.log, 1 MB rotate) and a release-devtools command
+// (F12 binding lives in the frontend keydown handler).
 
 mod engine;
 
@@ -18,6 +21,49 @@ use tauri_plugin_dialog::DialogExt;
 use engine::{EngineState, check_and_restart, kill_engine, start_engine};
 
 const SHELL_VERSION: u32 = 1;
+
+// ─── error.log rider (Stage 3b polish) ────────────────────────────────────
+// Windows: %APPDATA%\scorch\error.log (the by-ear report's contract path).
+// Other platforms: XDG data home (or ~/.local/share) — dev convenience only.
+#[cfg(target_os = "windows")]
+fn error_log_dir() -> Option<PathBuf> {
+    std::env::var_os("APPDATA").map(PathBuf::from).map(|p| p.join("scorch"))
+}
+#[cfg(not(target_os = "windows"))]
+fn error_log_dir() -> Option<PathBuf> {
+    std::env::var_os("XDG_DATA_HOME")
+        .map(PathBuf::from)
+        .map(|p| p.join("scorch"))
+        .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".local/share").join("scorch")))
+}
+
+/// Append one line to error.log; rotate to error.log.1 past 1 MB so the file
+/// can never grow unbounded. Never panics — diagnostics must not kill the app.
+#[tauri::command]
+fn append_error_log(line: String) -> Result<String, String> {
+    let dir = error_log_dir().ok_or_else(|| "no app data dir".to_string())?;
+    fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+    let path = dir.join("error.log");
+    if let Ok(meta) = fs::metadata(&path) {
+        if meta.len() > 1_000_000 {
+            let _ = fs::rename(&path, dir.join("error.log.1"));
+        }
+    }
+    use std::io::Write;
+    let mut f = fs::OpenOptions::new().create(true).append(true).open(&path)
+        .map_err(|e| e.to_string())?;
+    writeln!(f, "{line}").map_err(|e| e.to_string())?;
+    Ok(path.display().to_string())
+}
+
+/// Open the webview devtools — wired to the frontend's F12 handler. Works in
+/// release builds (the tauri "devtools" cargo feature is enabled in
+/// Cargo.toml; if it is ever removed this fails to COMPILE — loud, not a
+/// silent no-op).
+#[tauri::command]
+fn open_devtools(window: tauri::WebviewWindow) {
+    window.open_devtools();
+}
 
 fn web_root() -> Option<PathBuf> {
     Some(std::env::current_exe().ok()?.parent()?.join("web"))
@@ -80,7 +126,7 @@ pub fn run() {
 
             resp(StatusCode::NOT_FOUND, b"not found".to_vec(), None)
         })
-        .invoke_handler(tauri::generate_handler![engine::get_engine_info])
+        .invoke_handler(tauri::generate_handler![engine::get_engine_info, append_error_log, open_devtools])
         .setup(|app| {
             if let Some(version) = current_version() {
                 if let Some(root) = web_root() {

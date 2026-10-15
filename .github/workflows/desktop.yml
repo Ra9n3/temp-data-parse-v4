@@ -79,7 +79,9 @@ jobs:
 
           # Test A — --null-audio: JUCE null device, no hardware. The graph runs
           # in real time: transport play SUCCEEDS, state ticks ADVANCE, stop works.
-          Write-Host "=== Test A: --null-audio (play -> state ticks advance -> stop) ==="
+          # Stage 3b polish RESUME contract: play(tick 480) starts at ~480 (NOT 0),
+          # stop KEEPS the position, play WITHOUT tick RESUMES from it (NOT 0).
+          Write-Host "=== Test A: --null-audio (play(480) -> ticks advance -> stop -> resume -> ticks advance) ==="
           $procA = Start-Process -FilePath "engine/build/scorch-engine.exe" -ArgumentList "--port","9378","--null-audio" -PassThru -NoNewWindow -RedirectStandardOutput "engine-a-stdout.txt" -RedirectStandardError "engine-a-stderr.txt"
           Start-Sleep -Seconds 3
           try {
@@ -98,6 +100,15 @@ jobs:
               if (Test-Path engine-a-stderr.txt) { Get-Content engine-a-stderr.txt }
               throw "Engine A null-audio protocol test failed"
             }
+            # Stage 3b polish — stop-is-panic proof from the engine's own stdout:
+            # the stop handler reports the voices it killed. Missing line = the
+            # panic semantics regressed.
+            $killProof = Select-String -Path "engine-a-stdout.txt" -Pattern "voices killed"
+            if (-not $killProof) { throw "stop panic-semantics proof missing: 'voices killed' not in engine stdout" }
+            Write-Host "Voice-kill proof: $($killProof.Line)"
+            $resumeProof = Select-String -Path "engine-a-stdout.txt" -Pattern "transport play from tick"
+            if (-not $resumeProof) { throw "resume proof missing: no 'transport play from tick' lines in engine stdout" }
+            foreach ($l in $resumeProof.Line) { Write-Host "Resume proof: $l" }
             # shutdown -> clean exit 0. A 0xC0000005 would surface as a
             # negative/negative-hex exit code and fail this check.
             $procA.WaitForExit(10000) | Out-Null

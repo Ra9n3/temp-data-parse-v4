@@ -20,6 +20,7 @@ import {
 import { Ph } from "./icons";
 import { DEFAULT_PPT, HEADER_WIDTH } from "./constants";
 import { usePlayback } from "./audio/usePlayback";
+import { writeErrorLog } from "./diagnostics/errorLog";
 import {
   createAddedTrack,
   createDefaultProject,
@@ -151,6 +152,26 @@ export default function App() {
   // usePlayback's RAF loop. When false, usePlayback (webview synth) drives.
   const [enginePlaying, setEnginePlaying] = useState(false);
   const [enginePlayheadTick, setEnginePlayheadTick] = useState(0);
+  // Stage 3b polish — SOURCE-SWITCH FLAG (audit fix): "engineDrive" means the
+  // LAST play request went to the engine. Stop/seek/rewind route by THIS flag,
+  // not by enginePlaying — enginePlaying flickers (it mirrors every 30Hz state
+  // message), and the old enginePlaying-based routing let a stop during a
+  // flicker hit the webview synth while the engine kept rendering (doubled
+  // audio + resume desync). The playhead also stays on the engine side while
+  // the drive is engine-owned, even when stopped — no jump to the webview's 0.
+  const [engineDrive, setEngineDrive] = useState(false);
+  // Stage 3b polish — resume flow: the engine's state messages are the ONE
+  // source of truth for position. engineTickRef mirrors them (ref, not state —
+  // no stale closure); play sends it back as the explicit start tick.
+  const engineTickRef = useRef(0);
+  // Play/pause handlers via keyboard use effectivePlaying; F12 opens devtools.
+  // Tracks the previous status so a TRANSITION into "ready" (fresh engine
+  // process, empty event buffer) invalidates the loaded-score cache exactly
+  // once — every pong also reports "ready" and must not.
+  const prevStatusRef = useRef<EngineStatus>("off");
+  // Score the engine currently holds; a differing project reference forces a
+  // reload before play. (Engine restarts invalidate via prevStatusRef.)
+  const lastLoadedRef = useRef<Project | null>(null);
   // Stage 3b-fix: engine audio-init failure code ("no_audio_device") surfaced
   // by a rejected transport play. Footer shows the failure state; cleared on
   // reconnect or on a subsequent successful play.
@@ -202,10 +223,18 @@ export default function App() {
       if (status !== "ready" && status !== "off") {
         setEnginePlaying(false);
       }
+      // Fresh engine session (reconnect/restart) — the new process has no
+      // events loaded; force a reload before the next play. Transition-only:
+      // the 5s ping also reports "ready" and must NOT invalidate the cache.
+      if (status === "ready" && prevStatusRef.current !== "ready") {
+        lastLoadedRef.current = null;
+      }
+      prevStatusRef.current = status;
     });
     // Stage 3b: register state callback for engine-driven playhead.
     client.onState((playing, tick) => {
       if (disposed) return;
+      engineTickRef.current = tick; // resume source of truth (see enginePlay)
       setEnginePlaying(playing);
       setEnginePlayheadTick(tick);
     });
@@ -299,60 +328,96 @@ export default function App() {
     toast("ok", `Composed ${notes} notes in ${ms.toFixed(0)}ms · seed ${seed}`);
   }, [project, generationSettings, commit, toast]);
 
-  // Stage 3b: playback source switch. If engine is ready (desktop + engine
-  // connected), Play sends load+play to the engine and the playhead comes from
-  // engine state messages. Otherwise, usePlayback (webview synth) drives.
+  // Stage 3b (polished): playback source switch. engineDrive decides where
+  // play/stop/seek/rewind go and where the playhead comes from — NOT
+  // enginePlaying, which mirrors every state message and flickers.
   // NO half-states: either the engine drives or the webview synth drives.
   const effectivePlaying = enginePlaying || playback.playing;
-  const effectivePlayheadTick = enginePlaying ? enginePlayheadTick : playback.playheadTick;
+  const effectivePlayheadTick = engineDrive ? enginePlayheadTick : playback.playheadTick;
 
   const enginePlay = useCallback(() => {
     const client = engineClientRef.current;
     if (!client || client.getStatus() !== "ready") {
+      // Safety-net fallback (kept): no engine → webview synth.
+      setEngineDrive(false);
       void playback.play();
       return;
     }
-    const events = notesToEngineEvents(project);
-    const meta: EngineLoadMeta = {
-      bpm: project.bpm,
-      ppqn: PPQ,
-      timeSignature: project.timeSignature,
-      endTick: projectEndTick(project),
-    };
-    client.load(events, meta);
-    // Optimistic play — a no_audio_device rejection clears this again via
-    // onAudioError. Clear the stale error so the footer doesn't lag a retry.
-    setEngineAudioError(null);
-    client.transport("play");
-    setEnginePlaying(true);
+    try {
+      // Load only when the engine's score is stale (project changed or fresh
+      // engine session). Skip-loading on repeat plays removes the load-ack
+      // state{playing:false} round-trip that used to flicker the UI.
+      if (lastLoadedRef.current !== project) {
+        const events = notesToEngineEvents(project);
+        const meta: EngineLoadMeta = {
+          bpm: project.bpm,
+          ppqn: PPQ,
+          timeSignature: project.timeSignature,
+          endTick: projectEndTick(project),
+        };
+        client.load(events, meta);
+        lastLoadedRef.current = project;
+      }
+      // FULL disengagement of the webview synth before the engine renders —
+      // if the fallback was ever running (rare drive flip), its voices and
+      // RAF loop die here. No doubled rendering, ever.
+      playback.stop();
+      // Clear the stale audio error so the footer doesn't lag a retry.
+      setEngineAudioError(null);
+      // Resume contract: ALWAYS send an explicit start tick — the last
+      // position the engine itself reported (stopped position, seek target,
+      // or 0 on a fresh session). The engine never auto-resets to 0.
+      const resumeTick = Math.max(0, Math.round(engineTickRef.current));
+      client.transport("play", resumeTick);
+      setEngineDrive(true);
+      setEnginePlaying(true);
+    } catch (err) {
+      // F2 safety net: a throw in the engine branch must never kill the
+      // click — log the live stack to %APPDATA%/scorch/error.log and fall
+      // back to the webview synth (play still works; footer keeps state).
+      writeErrorLog("enginePlay", err);
+      setEngineDrive(false);
+      void playback.play();
+    }
   }, [project, playback]);
 
   const engineStop = useCallback(() => {
-    if (enginePlaying) {
-      engineClientRef.current?.transport("stop");
+    if (engineDrive) {
+      try {
+        engineClientRef.current?.transport("stop"); // engine-side PANIC semantics
+      } catch (err) {
+        writeErrorLog("engineStop", err);
+      }
       setEnginePlaying(false);
     } else {
       playback.stop();
     }
-  }, [enginePlaying, playback]);
+  }, [engineDrive, playback]);
 
   const engineSeek = useCallback((tick: number) => {
-    if (enginePlaying) {
-      engineClientRef.current?.transport("seek", tick);
-      setEnginePlayheadTick(tick);
+    const t = Math.max(0, Math.round(tick));
+    if (engineDrive) {
+      // Seek works while playing AND while stopped (the engine's lastTick
+      // updates either way, so the next resume starts at the seek target).
+      try {
+        engineClientRef.current?.transport("seek", t);
+      } catch (err) {
+        writeErrorLog("engineSeek", err);
+      }
+      engineTickRef.current = t;
+      setEnginePlayheadTick(t);
     } else {
-      playback.seek(tick);
+      playback.seek(t);
     }
-  }, [enginePlaying, playback]);
+  }, [engineDrive, playback]);
 
   const engineRewind = useCallback(() => {
-    if (enginePlaying) {
-      engineClientRef.current?.transport("seek", 0);
-      setEnginePlayheadTick(0);
+    if (engineDrive) {
+      engineSeek(0);
     } else {
       playback.rewind();
     }
-  }, [enginePlaying, playback]);
+  }, [engineDrive, engineSeek, playback]);
 
   // Panic on abnormal stop (e.g., engine drop during playback).
   useEffect(() => {
@@ -373,6 +438,7 @@ export default function App() {
         endTick: projectEndTick(project),
       };
       engineClientRef.current?.load(events, meta);
+      lastLoadedRef.current = project; // cache stays in sync (see enginePlay)
     }
   }, [project, enginePlaying]);
 
@@ -408,6 +474,14 @@ export default function App() {
         else void enginePlay();
       }
       if (e.key === "Home") engineRewind();
+      // Stage 3b polish — F12 opens devtools in RELEASE builds too (the
+      // "devtools" cargo feature is enabled; see src-tauri/Cargo.toml).
+      // Fire-and-forget: outside Tauri (web preview) the browser's own F12
+      // semantics stay untouched.
+      if (e.key === "F12") {
+        e.preventDefault();
+        invoke("open_devtools").catch(() => {});
+      }
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);

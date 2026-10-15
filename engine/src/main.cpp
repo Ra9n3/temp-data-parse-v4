@@ -2,8 +2,12 @@
 // Protocol v1 EXTENSION (additive — v1 handshake messages unchanged):
 //   client -> server: {"type":"load","events":[...],"meta":{bpm,ppqn,timeSignature,endTick}}
 //   client -> server: {"type":"transport","command":"play"|"stop"|"seek","tick":<n?>}
+//                     play: "tick" OPTIONAL (3b polish) — explicit start tick,
+//                     or RESUME from the stopped position when omitted.
+//                     stop: PANIC — kills all voices immediately.
 //   client -> server: {"type":"panic"}
-//   server -> client: {"type":"state","playing":bool,"tick":<n>}  (~30Hz when playing)
+//   server -> client: {"type":"state","playing":bool,"tick":<n>}  (~30Hz always;
+//                     while stopped, tick = the remembered stop position)
 // Existing v1 messages unchanged: hello, ping->pong, shutdown, unknown->error.
 //
 // Test synth: sine oscillator per note, voice allocation (steal oldest),
@@ -94,6 +98,11 @@ struct Voice {
 };
 
 // ─── Engine state (shared between WS thread, audio thread, state thread) ────
+// Stage 3b polish — position contract: lastTick is the SINGLE source of truth
+// for "where the playhead is" whenever the transport is stopped (and the seed
+// for play without an explicit tick). The audio callback re-commits it every
+// buffer; stop/seek set it directly. currentTick() never reports a stale
+// playStartTick again (the resume-from-0 desync bug).
 struct EngineState {
     std::mutex eventsMutex;
     std::vector<EngineEvent> events;
@@ -105,6 +114,12 @@ struct EngineState {
     std::atomic<int64_t> playStartTick{0};   // tick at which playback started
     std::atomic<double> sampleRate{44100.0};
     std::atomic<int64_t> samplesProcessed{0}; // since play start
+    std::atomic<int64_t> lastTick{0};         // position truth while stopped
+    // Transport generation: bumped on every play/seek (and panic). An audio
+    // callback buffer that started before the bump must NOT commit its
+    // samplesProcessed/lastTick afterwards — a pre-seek/pre-play in-flight
+    // buffer would otherwise clobber the new transport position.
+    std::atomic<uint64_t> transportGen{0};
 
     Voice voices[kMaxVoices];
     std::mutex voicesMutex;
@@ -115,7 +130,7 @@ struct EngineState {
     }
 
     int64_t currentTick() const {
-        if (!playing.load()) return playStartTick.load();
+        if (!playing.load()) return lastTick.load();
         return playStartTick.load() +
                static_cast<int64_t>(samplesProcessed.load() / samplesPerTick());
     }
@@ -138,6 +153,10 @@ public:
 
         if (!g_engine.playing.load()) return;
 
+        // Capture the transport generation BEFORE the position reads: any
+        // play/seek that lands after this point invalidates this buffer's
+        // commit (gen mismatch at the end), never half-updated state.
+        const uint64_t gen0 = g_engine.transportGen.load(std::memory_order_relaxed);
         double spt = g_engine.samplesPerTick();
         int64_t startSample = g_engine.samplesProcessed.load();
         int64_t playStartTick = g_engine.playStartTick.load();
@@ -197,12 +216,20 @@ public:
                 outputChannelData[ch][s] = out;
         }
 
-        g_engine.samplesProcessed.store(startSample + numSamples);
+        // Commit — but only if no play/seek invalidated this buffer meanwhile.
+        if (g_engine.transportGen.load(std::memory_order_relaxed) == gen0) {
+            const int64_t committed = startSample + numSamples;
+            g_engine.samplesProcessed.store(committed);
+            g_engine.lastTick.store(playStartTick +
+                static_cast<int64_t>(static_cast<double>(committed) / spt));
 
-        // Stop at endTick
-        if (g_engine.endTick > 0 && g_engine.currentTick() >= g_engine.endTick) {
-            g_engine.playing.store(false);
-            allNotesOff();
+            // Stop at endTick
+            const int64_t nowTick = playStartTick +
+                static_cast<int64_t>(static_cast<double>(committed) / spt);
+            if (g_engine.endTick > 0 && nowTick >= g_engine.endTick) {
+                g_engine.playing.store(false);
+                allNotesOff();
+            }
         }
     }
 
@@ -495,6 +522,10 @@ std::string escape_json(const std::string& s) {
 }
 
 // ─── Message handlers ───────────────────────────────────────────────────────
+// Protocol v1 EXTENSION (additive, Stage 3b polish):
+//   transport play MAY carry "tick": <n>. Without it, play RESUMES from the
+//   engine's lastTick (position at stop) — it never auto-resets to 0.
+//   transport stop is PANIC: all voices die immediately.
 void handle_load(const juce::var& json, ix::WebSocket& ws) {
     juce::DynamicObject* obj = json.getDynamicObject();
     if (!obj) { ws.send("{\"type\":\"error\",\"code\":\"bad_load\",\"echo\":\"load\"}"); return; }
@@ -537,7 +568,13 @@ void handle_load(const juce::var& json, ix::WebSocket& ws) {
 
     std::cout << "[engine] loaded " << g_engine.events.size() << " events (bpm=" << bpm
               << " ppqn=" << ppqn << " endTick=" << endTick << ")" << std::endl;
-    ws.send("{\"type\":\"state\",\"playing\":false,\"tick\":0}");
+    // Stage 3b polish — the load ack reports the CURRENT transport truth
+    // (playing + current position), not a hardcoded {playing:false,tick:0}:
+    // a reload during playback used to poison the UI playhead to 0 while the
+    // engine kept playing (source-switch audit finding).
+    ws.send(std::string("{\"type\":\"state\",\"playing\":") +
+            (g_engine.playing.load() ? "true" : "false") +
+            ",\"tick\":" + std::to_string(g_engine.currentTick()) + "}");
 }
 
 void handle_transport(const juce::var& json, ix::WebSocket& ws) {
@@ -556,33 +593,73 @@ void handle_transport(const juce::var& json, ix::WebSocket& ws) {
             std::cout << "[engine] play rejected — no audio device: " << audioErr << std::endl;
             return;
         }
-        g_engine.samplesProcessed.store(0);
-        g_engine.playStartTick.store(0);
-        g_engine.playing.store(true);
-        std::cout << "[engine] transport play" << std::endl;
-    } else if (cmd == "stop") {
-        g_engine.playing.store(false);
-        // All notes off
+        // Stage 3b polish — OPTIONAL start tick (v1-extension, backward
+        // compatible): explicit tick → start there; absent → RESUME from
+        // lastTick (the remembered stopped position). The engine NEVER
+        // auto-resets to 0 on play without an explicit tick.
+        const auto& tickVar = obj->getProperty("tick");
+        const bool hasTick = !tickVar.isVoid();
+        int64_t startTick = hasTick
+            ? static_cast<int64_t>(static_cast<double>(tickVar))
+            : g_engine.lastTick.load();
+        if (startTick < 0) startTick = 0;
+        // Panic-before-play: a fresh play must never overlap a previous
+        // transport's ringing voices (the doubled-audio finding). Taking
+        // voicesMutex also waits out any in-flight callback buffer.
         {
             std::lock_guard<std::mutex> lock(g_engine.voicesMutex);
             for (auto& v : g_engine.voices) { v.releasing = false; v.active = false; v.env = 0; v.pitch = -1; }
         }
-        std::cout << "[engine] transport stop" << std::endl;
+        g_engine.samplesProcessed.store(0);
+        g_engine.playStartTick.store(startTick);
+        g_engine.transportGen.fetch_add(1);  // invalidate pre-play buffer commits
+        g_engine.playing.store(true);
+        std::cout << "[engine] transport play from tick " << startTick
+                  << (hasTick ? " (explicit)" : " (resume)") << std::endl;
+    } else if (cmd == "stop") {
+        // Stage 3b polish — STOP IS PANIC: every voice dies NOW (no ring-out,
+        // no overlap into the next play), and lastTick keeps the stopped
+        // position so a later play-without-tick resumes exactly there.
+        g_engine.playing.store(false);
+        int killed = 0;
+        {
+            std::lock_guard<std::mutex> lock(g_engine.voicesMutex);
+            for (auto& v : g_engine.voices) {
+                if (v.active || v.releasing) ++killed;
+                v.releasing = false; v.active = false; v.env = 0; v.pitch = -1;
+            }
+        }
+        std::cout << "[engine] transport stop: voices killed (n=" << killed
+                  << ", tick=" << g_engine.lastTick.load() << ")" << std::endl;
     } else if (cmd == "seek") {
         int64_t tick = static_cast<int64_t>(static_cast<double>(obj->getProperty("tick")));
-        g_engine.playStartTick.store(tick);
+        if (tick < 0) tick = 0;
         g_engine.samplesProcessed.store(0);
+        g_engine.playStartTick.store(tick);
+        g_engine.lastTick.store(tick);
+        g_engine.transportGen.fetch_add(1);  // pre-seek buffers must not commit
+        // Hard position jump — ringing notes from the old position must not
+        // bleed over the new one (same panic semantics as stop).
+        {
+            std::lock_guard<std::mutex> lock(g_engine.voicesMutex);
+            for (auto& v : g_engine.voices) { v.releasing = false; v.active = false; v.env = 0; v.pitch = -1; }
+        }
         std::cout << "[engine] transport seek to tick " << tick << std::endl;
     }
 }
 
 void handle_panic() {
     g_engine.playing.store(false);
+    int killed = 0;
     {
         std::lock_guard<std::mutex> lock(g_engine.voicesMutex);
-        for (auto& v : g_engine.voices) { v.releasing = false; v.active = false; v.env = 0; v.pitch = -1; }
+        for (auto& v : g_engine.voices) {
+            if (v.active || v.releasing) ++killed;
+            v.releasing = false; v.active = false; v.env = 0; v.pitch = -1;
+        }
     }
-    std::cout << "[engine] panic — all notes off" << std::endl;
+    g_engine.transportGen.fetch_add(1);
+    std::cout << "[engine] panic — all notes off (n=" << killed << ")" << std::endl;
 }
 
 // ─── Main ───────────────────────────────────────────────────────────────────

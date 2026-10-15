@@ -98,6 +98,7 @@ export class EngineClient {
   private reconnectAttempts = 0;
   private reconnectTimer: number | null = null;
   private lastRtt: number | null = null;
+  private lastKnownTick = 0;
   private onStatusChange: (status: EngineStatus, rtt: number | null) => void;
   private onStateChange: ((playing: boolean, tick: number) => void) | null = null;
   private onAudioErrorChange: ((code: string | null, detail: string) => void) | null = null;
@@ -159,6 +160,9 @@ export class EngineClient {
         } else if (msg.type === "state") {
           // A successful play (playing=true) clears any prior audio failure.
           if (msg.playing) this.onAudioErrorChange?.(null, "");
+          // Stage 3b polish: remember the last reported position — the UI
+          // playhead keeps it on disconnect instead of snapping to 0.
+          this.lastKnownTick = msg.tick;
           if (this.onStateChange) {
             this.onStateChange(msg.playing, msg.tick);
           }
@@ -176,8 +180,9 @@ export class EngineClient {
     };
     this.ws.onclose = () => {
       this.ws = null;
-      // Panic on disconnect — no stuck notes
-      if (this.onStateChange) this.onStateChange(false, 0);
+      // Panic on disconnect — no stuck notes. Report the LAST KNOWN tick, not
+      // 0: the playhead must freeze at the drop position, not snap to zero.
+      if (this.onStateChange) this.onStateChange(false, this.lastKnownTick);
       if (this.status !== "failed" && this.status !== "off") {
         this.scheduleReconnect();
       }
@@ -203,7 +208,13 @@ export class EngineClient {
     }
   }
 
-  /** Transport control: play, stop, or seek. */
+  /**
+   * Transport control: play, stop, or seek.
+   * Stage 3b polish: play MAY carry a start tick. The frontend ALWAYS sends
+   * one (the last engine-reported position or a seek target); the engine
+   * resumes from its remembered position when the tick is absent and NEVER
+   * auto-resets to 0. Stop is panic semantics on the engine side.
+   */
   transport(command: "play" | "stop" | "seek", tick?: number): void {
     if (this.ws && this.ws.readyState === WebSocket.OPEN) {
       const msg: Record<string, unknown> = { type: "transport", command };
