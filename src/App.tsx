@@ -6,7 +6,7 @@ import { TopBar } from "./components/TopBar";
 import { Arranger } from "./components/Arranger";
 import { GenerationSettingsPanel } from "./components/GenerationSettingsPanel";
 import { EngineClient, type EngineLoadMeta, type EngineStatus, type EditorEventMessage, type LoadFailure, type PluginSavedStateMessage, type PluginStateMessage, type ScanResultMessage } from "./engine/engineClient";
-import { buildEngineStream, resolveEngineChannels } from "./engine/engineStream";
+import { buildEngineStream, resolveEngineChannelView } from "./engine/engineStream";
 import { PPQ, projectEndTick, tickToBar } from "./shared/schema";
 import {
   AboutDialog,
@@ -196,10 +196,13 @@ export default function App() {
   const [desktopScan, setDesktopScan] = useState<ScanResultMessage | null>(null);
   // Stage 3c-2: hosting outcome. Loaded → footer shows the hosted plugin;
   // error → toast + every track stays on the built-in test synth (no dead-end).
+  // Stage 3d-4: the LAST plugin_state receipt (informational footer chip;
+  // per-instance truth lives in the receipts log).
   const [pluginState, setPluginState] = useState<PluginStateMessage | null>(null);
-  // Stage 3d-1: the hosted plugin's editor window is open (engine-owned popup;
-  // one hosted instance ⇒ one shared flag for all plugin-routed tracks).
-  const [hostedEditorOpen, setHostedEditorOpen] = useState(false);
+  // Stage 3d-1 → 3d-4: which instances have their editor window open
+  // (engine-owned popups; one editor per INSTANCE — the set keys are the
+  // instance ids, and a track's pill lights up when ITS instance is open).
+  const [editorOpenIds, setEditorOpenIds] = useState<Set<string>>(() => new Set());
   // Chord v2 — the editing chord id is LIFTED here (was local to the Arranger
   // lane) so the top-bar panel and the in-lane editor share one source of
   // truth: creation/retarget/Esc/delete all stay in sync. No schema change.
@@ -293,12 +296,14 @@ export default function App() {
         }
       }
     });
-    // Stage 3d-3: the engine captured the plugin's state — embed it in the
-    // project JSON (LibraryGroup.pluginState) so patches + mixer settings
-    // survive restarts. Uses the UPDATER form of the immer setter: the
-    // latest project is always the base (this callback outlives renders).
-    // setProject (not commit) — a state embed is machine state, not score
-    // content; it must NOT spam the undo stack on every editor close.
+    // Stage 3d-3 → 3d-4: the engine captured a plugin instance's state —
+    // embed it in the project JSON (LibraryGroup.pluginState) so patches +
+    // mixer settings survive restarts. instanceId names the OWNING instance
+    // (= the LibraryGroup id); the uid/path fallback covers legacy receipts.
+    // Uses the UPDATER form of the immer setter: the latest project is always
+    // the base (this callback outlives renders). setProject (not commit) — a
+    // state embed is machine state, not score content; it must NOT spam the
+    // undo stack on every editor close.
     let firstStateToastDone = false;
     client.onPluginSavedState((msg: PluginSavedStateMessage) => {
       if (disposed) return;
@@ -309,28 +314,48 @@ export default function App() {
       }
       if (!msg.data) return;
       setProject((draft) => {
-        for (const g of draft.libraryGroups) {
-          if (g.pluginId === msg.uid || (g.pluginPath && g.pluginPath === msg.path)) {
-            g.pluginState = msg.data!;
+        let bound = false;
+        if (msg.instanceId) {
+          for (const g of draft.libraryGroups) {
+            if (g.id === msg.instanceId) {
+              g.pluginState = msg.data!;
+              bound = true;
+            }
+          }
+        }
+        if (!bound) {
+          // Legacy receipt (no instanceId): bind by scan identity.
+          for (const g of draft.libraryGroups) {
+            if (g.pluginId === msg.uid || (g.pluginPath && g.pluginPath === msg.path)) {
+              g.pluginState = msg.data!;
+            }
           }
         }
       });
-      writeErrorLog("engine", `pluginSavedState embedded: ${msg.size} bytes (${msg.name}, uid ${msg.uid || "n/a"})`);
+      writeErrorLog("engine", `pluginSavedState embedded: ${msg.size} bytes (${msg.name}, instance ${msg.instanceId || msg.uid || "n/a"})`);
       if (!firstStateToastDone) {
         firstStateToastDone = true;
         toast("ok", "sound setup saved with the project");
       }
     });
-    // Stage 3d-1: editor window lifecycle (engine-owned popups). The open
-    // flag flips the track-header button into its focus affordance; close
-    // arrives from the protocol OR the window's own X button.
+    // Stage 3d-1 → 3d-4: editor window lifecycle (engine-owned popups). The
+    // per-INSTANCE open set flips each track-header pill into its focus
+    // affordance; close arrives from the protocol OR the window's X button.
     client.onEditor((msg: EditorEventMessage) => {
       if (disposed) return;
       if (msg.type === "editorOpened") {
-        setHostedEditorOpen(true);
+        setEditorOpenIds((prev) => {
+          const next = new Set(prev);
+          next.add(msg.instanceId);
+          return next;
+        });
         writeErrorLog("engine", `editor opened: ${msg.name ?? msg.instanceId} (${msg.width ?? "?"}x${msg.height ?? "?"})${msg.focused ? " focused" : ""}`);
       } else {
-        setHostedEditorOpen(false);
+        setEditorOpenIds((prev) => {
+          const next = new Set(prev);
+          next.delete(msg.instanceId);
+          return next;
+        });
         writeErrorLog("engine", `editor closed: ${msg.instanceId}`);
       }
     });
@@ -460,13 +485,43 @@ export default function App() {
     };
   }, [engineStatus, desktopScan]);
 
-  // Stage 3d-1: request the hosted plugin's editor window. The Arranger gets
-  // this ONLY while a plugin is actually hosted (plugin_state loaded) —
-  // otherwise the track button keeps opening the VST browser. The engine
-  // answers editor_unavailable for headless plugins → toast (handled above).
-  const openHostedEditor = useCallback(() => {
-    engineClientRef.current?.openEditor("hosted");
-  }, []);
+  // Stage 3d-1 → 3d-4: per-TRACK editor request. A track whose library group
+  // carries a plugin binding asks the engine for THAT INSTANCE's editor
+  // (instanceId = the group id — one editor per instance, simultaneous
+  // editors across instances); an unbound track opens the VST browser to
+  // assign one. The engine answers editor_unavailable for a not-yet-hosted
+  // or editor-less plugin → toast (handled above).
+  const openTrackEditor = useCallback((trackId: string) => {
+    const t = project.tracks.find((tr) => tr.id === trackId);
+    const g = t ? project.libraryGroups.find((lg) => lg.id === t.libraryGroupId) : undefined;
+    if (g?.pluginId && g?.pluginPath) {
+      engineClientRef.current?.openEditor(g.id);
+    } else {
+      setVstTrackId(trackId);
+      setVstOpen(true);
+    }
+  }, [project]);
+
+  // Stage 3d-4 derived sets for the Arranger pills: which tracks have a
+  // plugin-bound group (editor affordance) and which of their instances
+  // currently have the editor window open (focus affordance).
+  const editorTrackIds = useMemo(() => {
+    const ids = new Set<string>();
+    for (const t of project.tracks) {
+      const g = project.libraryGroups.find((lg) => lg.id === t.libraryGroupId);
+      if (g?.pluginId && g?.pluginPath) ids.add(t.id);
+    }
+    return ids;
+  }, [project]);
+  const editorOpenTrackIds = useMemo(() => {
+    const ids = new Set<string>();
+    if (editorOpenIds.size === 0) return ids;
+    for (const t of project.tracks) {
+      const g = project.libraryGroups.find((lg) => lg.id === t.libraryGroupId);
+      if (g && editorOpenIds.has(g.id)) ids.add(t.id);
+    }
+    return ids;
+  }, [project, editorOpenIds]);
 
   const enginePlay = useCallback(() => {
     const client = engineClientRef.current;
@@ -520,8 +575,8 @@ export default function App() {
         // events, the failure is visible (toast + error.log) and the webview
         // synth covers the play instead of a silent empty engine score.
         void client.load(stream.events, meta, {
-          channels: stream.channels,
-          plugin: stream.plugin ?? undefined,
+          routing: stream.routing,
+          plugins: stream.plugins,
         }).then((receipt) => {
           if (receipt.skipped > 0) {
             writeErrorLog("enginePlay", `load incomplete: ${receipt.loaded}/${receipt.received} loaded, ${receipt.skipped} skipped (first at index ${receipt.firstErrorIndex}${receipt.firstErrorReason ? ": " + receipt.firstErrorReason : ""})`);
@@ -621,8 +676,8 @@ export default function App() {
         endTick: projectEndTick(project),
       };
       void client.load(stream.events, meta, {
-        channels: stream.channels,
-        plugin: stream.plugin ?? undefined,
+        routing: stream.routing,
+        plugins: stream.plugins,
       }).then((receipt) => {
         if (receipt.skipped > 0) {
           writeErrorLog("engineReload", `mid-play reload incomplete: ${receipt.skipped}/${receipt.received} skipped (first at index ${receipt.firstErrorIndex}${receipt.firstErrorReason ? ": " + receipt.firstErrorReason : ""})`);
@@ -656,7 +711,7 @@ export default function App() {
   // Stage 3c-3 — channel assignment UI: the resolved map (explicit + first-come
   // auto) drives the per-track selectors; explicit assignment validates
   // collisions AT ASSIGNMENT TIME (the engine double-checks at load).
-  const resolvedEngineChannels = useMemo(() => resolveEngineChannels(project), [project]);
+  const resolvedEngineChannels = useMemo(() => resolveEngineChannelView(project), [project]);
   const handleEngineChannel = useCallback(
     (trackId: string, ch: number | null) => {
       if (ch === null) {
@@ -860,8 +915,13 @@ export default function App() {
           setVstTrackId(id);
           setVstOpen(true);
         }}
-        onOpenEditor={pluginState?.state === "loaded" ? openHostedEditor : undefined}
-        editorOpen={hostedEditorOpen}
+        // Stage 3d-4: per-TRACK editor request — a plugin-bound track opens
+        // ITS instance's editor; an unbound track falls through to the VST
+        // browser (the handler does both; the pill affordances below gate
+        // per track, replacing the old single-instance global gate).
+        onOpenEditor={openTrackEditor}
+        editorTrackIds={editorTrackIds}
+        editorOpenTrackIds={editorOpenTrackIds}
         onLoadAudio={() => audioInputRef.current?.click()}
         onAddTrack={(family: Family) => {
           const t = createAddedTrack(family);

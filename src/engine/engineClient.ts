@@ -102,15 +102,18 @@ export interface ScanResultMessage {
 
 /** Stage 3c-2 — hosting outcome. "loaded" carries the real name/vendor/latency
  * and the hosted channels; "error" carries the detail and means ALL tracks
- * fell back to the engine's built-in test synth (the app never dead-ends). */
+ * fell back to the engine's built-in test synth (the app never dead-ends).
+ * Stage 3d-4: one receipt PER INSTANCE — instanceId addresses it. */
 export interface PluginStateMessage {
   type: "plugin_state";
   state: "loaded" | "error";
+  /** Stage 3d-4: the hosted instance this receipt describes. */
+  instanceId?: string;
   name?: string;
   vendor?: string;
   /** Total reported latency (plugin + device), milliseconds. */
   latencyMs?: number;
-  /** The hosted channels (sorted). */
+  /** The hosted channels (sorted) — THIS instance's 1–16 namespace. */
   channels?: number[];
   detail?: string;
 }
@@ -140,11 +143,13 @@ export type EditorEventMessage = EditorOpenedMessage | EditorClosedMessage;
  * (LibraryGroup.pluginState). Triggers: editor close, instance replacement,
  * explicit captureState. Blobs beyond the ~2 MiB cap arrive with
  * state="too_large" and NO data (the frontend warns; the last embedded
- * state stays authoritative). */
+ * state stays authoritative). Stage 3d-4: instanceId names the OWNING
+ * instance (= the LibraryGroup id) — the blob embeds into THAT group. */
 export interface PluginSavedStateMessage {
   type: "pluginSavedState";
   uid: string;
   path: string;
+  instanceId?: string;
   name: string;
   size: number;
   data?: string;
@@ -419,11 +424,20 @@ export class EngineClient {
    * Stage 3c-2 additive options: `channels` (trackId → 1–16 hosted channel
    * map) and `plugin` (uid+path from the scan — host ONE VST3 for the whole
    * orchestra). Omitted = legacy test-synth load (byte-identical to 3b).
+   * Stage 3d-4 (multi-instance): `plugins` (the FULL desired instance set,
+   * one per plugin-bearing library group) + `routing` (trackId → {inst, ch}
+   * in the instance's 1–16 namespace) REPLACE the legacy pair — the engine
+   * still accepts both shapes (additive protocol).
    */
   load(
     events: PhysicalMidiStreamEvent[],
     meta: EngineLoadMeta,
-    opts?: { channels?: Record<string, number>; plugin?: { uid: string; path: string; name?: string; state?: string } },
+    opts?: {
+      channels?: Record<string, number>;
+      plugin?: { uid: string; path: string; name?: string; state?: string };
+      routing?: Record<string, { inst: string; ch: number }>;
+      plugins?: Array<{ instanceId: string; uid: string; path: string; name?: string; state?: string }>;
+    },
   ): Promise<LoadReceipt> {
     return new Promise((resolve, reject) => {
       if (!this.ws || this.ws.readyState !== WebSocket.OPEN) {
@@ -440,6 +454,10 @@ export class EngineClient {
       // Serialize ONCE and measure: this is the frontend side of the receipt
       // pair (engine.log logs what the engine received).
       const msg: Record<string, unknown> = { type: "load", seq, events, meta };
+      if (opts?.routing && Object.keys(opts.routing).length > 0) msg.routing = opts.routing;
+      if (opts?.plugins && opts.plugins.length > 0) msg.plugins = opts.plugins;
+      // Legacy single-plugin shape (still accepted by the engine; kept for
+      // any caller/test that predates 3d-4).
       if (opts?.channels && Object.keys(opts.channels).length > 0) msg.channels = opts.channels;
       if (opts?.plugin) msg.plugin = opts.plugin;
       const payload = JSON.stringify(msg);

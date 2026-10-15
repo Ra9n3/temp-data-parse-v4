@@ -62,12 +62,14 @@ interface Props {
   onAddTrack: (family: Family) => void;
   onSelectTrack: (id: string | null) => void;
   onOpenPianoRoll: (id: string) => void;
-  // Stage 3d-1 — request the hosted plugin's editor window. Present ONLY when
-  // a plugin is actually hosted (plugin_state loaded); the track button then
-  // opens the editor instead of the VST browser. editorOpen: the hosted
-  // editor is currently open (one hosted instance ⇒ one shared flag).
+  // Stage 3d-1 → 3d-4 — per-TRACK editor request. A track whose library
+  // group carries a plugin binding gets the editor affordance (the handler
+  // opens THAT instance's editor window); unbound tracks keep the VST
+  // browser. editorOpenTrackIds: tracks whose instance's editor is currently
+  // open (the focus affordance — one editor per INSTANCE, multiple open).
   onOpenEditor?: (id: string) => void;
-  editorOpen?: boolean;
+  editorTrackIds?: Set<string>;
+  editorOpenTrackIds?: Set<string>;
   // Stage 3c-3 — engine-channel assignment (per-track compact selector).
   engineChannels: Record<string, number>;
   onEngineChannel: (id: string, ch: number | null) => void;
@@ -219,7 +221,8 @@ export function Arranger(props: Props) {
     onSelectTrack,
     onOpenPianoRoll,
     onOpenEditor,
-    editorOpen,
+    editorTrackIds,
+    editorOpenTrackIds,
     editingChord,
     onEditChord,
   } = props;
@@ -412,8 +415,12 @@ export function Arranger(props: Props) {
             onToggleSolo={() => onToggleSolo(track.id)}
             onToggleLock={() => onToggleLock(track.id)}
             onOpenVst={() => onOpenVst(track.id)}
-            onOpenEditor={onOpenEditor ? () => onOpenEditor(track.id) : undefined}
-            editorOpen={editorOpen}
+            onOpenEditor={
+              onOpenEditor && editorTrackIds?.has(track.id)
+                ? () => onOpenEditor(track.id)
+                : undefined
+            }
+            editorOpen={editorOpenTrackIds?.has(track.id) ?? false}
             onLoadAudio={onLoadAudio}
             engineChannelResolved={engineChannels[track.id]}
             engineChannelExplicit={track.engineChannel !== undefined}

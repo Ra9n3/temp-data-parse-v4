@@ -975,3 +975,91 @@ exactly one 4-byte restore.
   the editor-close and replacement captures carry the guarantee.
 - The undo stack is deliberately NOT polluted by state embeds (machine
   state, not score content — setProject, not commit).
+
+## Stage 3d-4 — multi-instance hosting (the universal-hosting completion)
+
+**Trigger (user-machine forensics, v0.6.0):** a real multi-plugin project
+exposed the single-instance model. Named diagnosis, two defects, one root:
+1. `buildEngineStream` collapsed every plugin-bearing library group into the
+   FIRST one (`plugin:` singular) — a second library was NEVER hosted; its
+   tracks silently stayed on the test synth ("no sound from the VSTs other
+   than BBCSO").
+2. The pill handler sent `openEditor("hosted")` (hardcoded) and the engine
+   resolved the plugin from the single global instance — every pill reopened
+   the BBCSO editor regardless of track.
+
+### Model (no plugin-name logic anywhere)
+
+- **One instance per plugin-bearing LibraryGroup.** instanceId = the group id
+  (stable across reloads; the address for editors, state capture/restore).
+  Two groups bound to the SAME binary = two independent instances (memory is
+  the user's choice; isolation is simpler than dedupe).
+- **Per-instance 16-channel namespaces.** Internal "wide" channel =
+  slot*16 + ch (slot 0..7, so ≤8 instances). The held-note ledger,
+  articulation (UACC) state, mute-flush flags and the CI ledger are ALL
+  wide-channel indexed — two instances' channel 1 are fully independent
+  contexts. Slot 0's wide channels are numerically identical to the legacy
+  1..16 space, so every single-instance receipt/assertion is byte-stable.
+  Plugins only ever SEE their own 1..16.
+- **Wire protocol (additive):** `plugins[]` (the full desired instance set)
+  + `routing` {trackId → {inst, ch}}. The legacy `plugin` + `channels` pair
+  is still accepted (single instance, reserved id "hosted", slot 0).
+- **Audio:** the callback renders EVERY live instance into its own reusable
+  MidiBuffer and SUMS into the device buffer (the old single-instance render
+  ASSIGNED — identical for one instance). Session peak is now measured on
+  the SUMMED buffer (Σ instances + synth), not per-source — an honesty fix
+  the multi-mode peak assertion depends on. Side fix: the not-playing branch
+  no longer lets a hosted plugin's render overwrite the synth release tail.
+- **Rolling-transport guard (set form):** mid-play, a load whose plugin SET
+  differs from the live set (any id/binary mismatch, or any live instance
+  absent from the request) is REJECTED with a NAMED mismatch. An exact
+  match takes the routing-only reuse fast path (per-instance receipts).
+- **Worker:** per-entry instantiate (one broken binary retains its previous
+  instance and errors by id — never kills the set); state restore + real
+  device prepare per entry BEFORE publish; replaced/retired instances close
+  their editors by id, capture their state, and retire on the grace path.
+- **Editors:** instanceId ADDRESSES the instance (empty/"hosted" → first,
+  legacy). One editor per instance; simultaneous editors across instances;
+  close-by-id on retire.
+- **Persistence:** pluginSavedState carries instanceId → the blob embeds
+  into THAT group's pluginState; restore rides the load's plugins[] entry.
+
+### Frontend decisions
+
+- `buildEngineStream`: per-group instances; **profileId is now OPTIONAL** —
+  a group with pluginId+pluginPath but no built-in expression map hosts as
+  RAW NOTES (notes + static CC7; no UACC translation, no keyswitch
+  handling). This is what makes ANY well-behaved VST3 assignable without
+  shipping a map. The old keys/percussion family gate is GONE (3c-era,
+  single-instance): the user's explicit plugin assignment IS the intent.
+  Structure/chords/audio still never route (they carry no notes).
+- The track pill is per-track: a plugin-bound track opens ITS instance's
+  editor; an unbound track opens the VST browser (the old global
+  "some plugin hosted" gate is gone). Per-instance open-set drives the
+  focus affordance.
+- Channel namespaces are per-instance: 16 channels EACH. A 17th track on
+  one library stays on the test synth (receipt-visible); spreading tracks
+  across more libraries gives each its own 16.
+
+### CI proof (multi mode; the SAME free test VST3 twice — universality is the point)
+
+plugins[] = [inst-a, inst-b], routing = both tracks ch1 (same wire channel,
+DIFFERENT instances): 2× plugin_state loaded (ids + channels [1]); summed
+peak > 1.0 (single-source cap ≈0.787 — BOTH audible); ledger wide channels
+c=1 AND c=17; mid-play SAME-set reuse; mid-play CHANGED-set load_rejected
+(named mismatch); inst-b editor opens → repeat raises (focused) → inst-a
+opens a SECOND SIMULTANEOUS window → per-id closes (Windows; headless
+tolerates "no display" and skips); captureState → one pluginSavedState per
+instance (distinct ids). Plugin-side stdout proof: ch=1 NOTE_ONs from both
+instances.
+
+### Fire-rate honesty
+
+- CI proves the mechanism on two instances of the fixture. It CANNOT prove
+  the user's acceptance with REAL libraries (BBCSO + their other VSTs):
+  two instances of heavy libraries = 2× memory + 2× instantiate time; the
+  summed output can clip where one library did not (gain knob applies per
+  instance) — that is the user's by-ear gate.
+- The rolling guard now compares SETS: adding a library mid-play requires
+  stop (same contract as before, now set-scoped) — by design, not a
+  regression.

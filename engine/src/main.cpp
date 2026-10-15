@@ -142,10 +142,23 @@
 
 namespace {
 
-constexpr const char* kEngineVersion = "0.6.0";
+constexpr const char* kEngineVersion = "0.7.0";
 constexpr int kProtocolVersion = 1;
 constexpr int kDefaultPort = 9377;
 constexpr int kMaxVoices = 64;
+// ─── Stage 3d-4: MULTI-INSTANCE HOSTING ────────────────────────────────
+// The universal-hosting completion: each hosted plugin instance owns a
+// private 16-channel MIDI namespace. Internal ("WIDE") channel = slot*16 + ch
+// (slot 0..7, ch 1..16) — the ledger/articulation/mute-flush fabric is indexed
+// by wide channel, so per-instance state can never cross instances. Slot 0's
+// wide channels are numerically identical to the legacy 1..16 space, so every
+// single-instance receipt/assertion is byte-stable. Plugins only ever SEE
+// their own 1..16 (realChOfWide at MidiBuffer time).
+constexpr int kMaxInstances = 8;
+constexpr int kWideChannels = kMaxInstances * 16;   // 128
+inline int wideChannelOf(int slot, int ch) { return slot * 16 + ch; }
+inline int slotOfWide(int wide) { return (wide - 1) >> 4; }          // 1..128 → 0..7
+inline int realChOfWide(int wide) { return ((wide - 1) & 15) + 1; }  // → 1..16
 constexpr double kAttackMs = 10.0;
 // Stage 3c close-out — the release fade is the MUSICAL stop semantics: a
 // normal transport stop releases voices over ~15ms instead of killing them.
@@ -225,7 +238,8 @@ std::atomic<int> g_activeVoices{0};
 // Mute-flush requests: per-channel flags (index 0 = channel 1). Handlers
 // store true; the next buffer CC120-flushes the flagged channels and clears
 // the flags. Dedupes by channel naturally; no mutex, no vector, no alloc.
-std::atomic<bool> g_muteFlushPending[16] = {};
+// Stage 3d-4: indexed by WIDE channel (slot*16 + ch) — see below.
+std::atomic<bool> g_muteFlushPending[kWideChannels] = {};
 
 // ─── Stage 3c close-out — transport transitions are musical ─────────────────
 // Musical-release request: stop / seek / end-of-score set this; the NEXT
@@ -241,7 +255,7 @@ std::atomic<bool> g_releasePending{false};
 // servicing — never touched by WS threads). The count is mirrored to an
 // atomic at each buffer boundary so handlers can log an honest "at request
 // time" figure without touching audio-thread state.
-juce::BigInteger g_heldPluginNotes[16];
+juce::BigInteger g_heldPluginNotes[kWideChannels];   // 3d-4: wide-channel indexed
 std::atomic<int> g_heldPluginNoteCount{0};
 
 // Current articulation per channel (UACC CC#32 value), 0xFF = unknown. Seeded
@@ -251,7 +265,7 @@ std::atomic<int> g_heldPluginNoteCount{0};
 // dispatch. A CC#32 whose value equals the channel's current articulation is
 // REDUNDANT (the library re-articulates = the audible bow-scrape pluck) and
 // is suppressed — only genuine changes are sent. Reset to unknown at load.
-std::atomic<uint8_t> g_articulation[16] = {};
+std::atomic<uint8_t> g_articulation[kWideChannels] = {};   // 3d-4: wide-channel indexed
 constexpr uint8_t kArticulationUnknown = 0xFF;
 // Dispatch-ledger kind for SUPPRESSED (redundant) articulation sends —
 // ledger-only marker (never an event kind) so CI can assert suppression.
@@ -280,7 +294,8 @@ struct EngineState {
     // callback. The score is published as an immutable snapshot behind ONE
     // atomic pointer (g_score); voices are OWNED by the audio thread with
     // kill requests self-serviced at buffer boundaries (g_voiceKillPending);
-    // the hosted plugin is published behind ONE atomic pointer (g_hostedLive)
+    // the hosted plugin SET is published behind ONE atomic shared_ptr
+    // (g_instances — Stage 3d-4 multi-instance)
     // with worker-side retirement. The callback takes NO lock and performs
     // NO allocation.
     std::atomic<bool> playing{false};
@@ -396,13 +411,15 @@ struct LastMix { std::vector<std::string> muted, solo; };
 std::mutex g_lastMixMutex;          // WS threads only — NEVER the audio thread
 LastMix g_lastMix;                  // guarded by g_lastMixMutex
 
-// Hosted plugin: ONE VST3 instance for the whole orchestra (BBCSO standalone
-// multi-timbral — tracks are routed by MIDI channel within the instance).
-// Stage 3c-polish (D2): published behind ONE atomic pointer (g_hostedLive).
-// An instance is IMMUTABLE after publication — the worker fully constructs
-// and prepares it BEFORE the exchange, so the audio callback's plain atomic
-// load needs no lock. The instance replaced by a swap is RETIRED (freed by
-// the worker after a grace period — never on the audio thread).
+// Hosted plugin: VST3 instances for the whole orchestra (Stage 3d-4 —
+// MULTI-instance: one instance per plugin-bearing library group; tracks of a
+// group share its instance's 16-channel namespace, so a multi-timbral library
+// like BBCSO keeps the one-instance channel-routing model AND a
+// single-patch library gets its own instance per group). Each instance is
+// IMMUTABLE after publication — the worker fully constructs and prepares it
+// BEFORE the set swap, so the audio callback's plain atomic load needs no
+// lock. Instances replaced by a swap are RETIRED (freed by the worker after
+// a grace period — never on the audio thread).
 struct HostedPlugin {
     std::unique_ptr<juce::AudioPluginInstance> instance;
     std::string name, vendor;
@@ -413,11 +430,34 @@ struct HostedPlugin {
     // REJECTED — swapping instances mid-play was the empty-score regression.
     // Identity is immutable after publication (safe to read lock-free).
     std::string uid, path;
+    // Stage 3d-4: instance identity = the frontend's libraryGroup id (stable
+    // across reloads — the rebind key for editors, state capture and restore).
+    // The legacy single-plugin field maps to the reserved id "hosted".
+    std::string instanceId;
+    int slot = 0;   // wide-channel namespace owner (0..kMaxInstances-1)
 };
-std::atomic<HostedPlugin*> g_hostedLive{nullptr};
-// Plugin-reported latency in samples, readable by the audio thread without
-// touching the instance: updated at publish and after every real-device
-// prepare (latency can change with rate/buffer). Drives F4 compensation.
+// Immutable slot-ordered set published behind ONE atomic shared_ptr (same
+// publication pattern as RoutingTable/ScoreSnapshot — the audio callback
+// takes one acquire load per buffer and never locks; shared_ptr refcount
+// drops are the accepted pattern of this codebase, and actual PLUGIN
+// destruction stays on the worker's retire path).
+struct InstanceSet {
+    HostedPlugin* slots[kMaxInstances] = {};      // slot → instance (nullptr = empty)
+    int slotLatency[kMaxInstances] = {};          // F4 per-instance latency shift
+    HostedPlugin* byId(const std::string& iid) const {
+        for (int i = 0; i < kMaxInstances; ++i)
+            if (slots[i] != nullptr && slots[i]->instanceId == iid) return slots[i];
+        return nullptr;
+    }
+    HostedPlugin* first() const {
+        for (int i = 0; i < kMaxInstances; ++i)
+            if (slots[i] != nullptr) return slots[i];
+        return nullptr;
+    }
+};
+std::atomic<std::shared_ptr<const InstanceSet>> g_instances;
+// Legacy convenience: max live latency, mirrored for receipts/compensation
+// messages (the per-event F4 shift uses InstanceSet.slotLatency).
 std::atomic<int> g_pluginLatencySamples{0};
 
 // ─── Stage 3d-1: plugin editor windows (engine-owned popup) ────────────────
@@ -552,8 +592,12 @@ void destroyEditorWindow(const std::string& iid, bool captureOnClose) {
     broadcastJson(std::string("{\"type\":\"editorClosed\",\"instanceId\":\"") + escape_json(iid) + "\"}");
     engineLog("[editor] closed instance=" + iid);
     if (captureOnClose) {
-        if (auto* live = g_hostedLive.load(std::memory_order_acquire))
-            captureAndBroadcastState(*live, "editor-close");
+        // Stage 3d-4: capture the OWNING instance (by id), not "the" instance.
+        if (auto set = g_instances.load(std::memory_order_acquire)) {
+            HostedPlugin* h = set->byId(iid);
+            if (h == nullptr) h = set->first();   // legacy id "hosted" may map to the first
+            if (h != nullptr) captureAndBroadcastState(*h, "editor-close");
+        }
     }
 }
 
@@ -615,6 +659,7 @@ void captureAndBroadcastState(const HostedPlugin& h, const char* trigger) {
         }
         std::string msg = std::string("{\"type\":\"pluginSavedState\",\"uid\":\"") +
             escape_json(h.uid) + "\",\"path\":\"" + escape_json(h.path) +
+            "\",\"instanceId\":\"" + escape_json(h.instanceId) +
             "\",\"name\":\"" + escape_json(h.name) + "\",\"size\":" + std::to_string(n);
         if (n > kMaxPluginStateBytes) {
             // The cap protects project-JSON parseability, NOT a hosting limit:
@@ -646,13 +691,20 @@ void captureAndBroadcastState(const HostedPlugin& h, const char* trigger) {
 // never delayed); this single worker instantiates off-thread, latest
 // request wins (a newer load supersedes an in-flight instantiate — two
 // concurrent orchestra loads must never double-allocate the sample pool).
-struct PluginInitRequest {
-    juce::var pluginVar;        // the load's plugin field (uid+path)
-    long long seq = 0;
-    std::string channelsJson;   // hosted channels captured at queue time
+struct PluginInitEntry {
+    std::string instanceId;     // 3d-4: the load's plugins[] entry identity
+    int slot = 0;               // 3d-4: wide-channel namespace owner, assigned at parse
+    juce::var pluginVar;        // the entry object (uid+path)
+    std::string channelsJson;   // THIS instance's hosted wire channels, captured at queue time
     // Stage 3d-3: the project JSON's embedded state (base64), restored after
     // instantiate and BEFORE the real-device prepare. Empty = default state.
     std::string stateB64;
+};
+struct PluginInitRequest {
+    // Stage 3d-4: the load's FULL desired instance set (replace-all semantics:
+    // instances absent from this list retire when the set publishes).
+    std::vector<PluginInitEntry> entries;
+    long long seq = 0;
 };
 std::mutex g_pluginInitMutex;
 std::condition_variable g_pluginInitCv;
@@ -699,14 +751,13 @@ public:
         // are self-serviced HERE at the boundary.
 
         // ONE atomic load per shared object. Published objects are immutable
-        // (score snapshot / prepared plugin), so plain pointer loads suffice.
-        HostedPlugin* hosted = g_hostedLive.load(std::memory_order_acquire);
-        juce::AudioPluginInstance* plugin =
-            (hosted && hosted->instance) ? hosted->instance.get() : nullptr;
+        // (score snapshot / prepared instances), so plain pointer loads suffice.
+        // Stage 3d-4: the INSTANCE SET (slot-ordered, immutable) replaces the
+        // single pointer — every slot with a live instance renders this buffer.
+        const auto instances = g_instances.load(std::memory_order_acquire);
         const auto routing = g_routing.load(std::memory_order_acquire);
         const auto mix = g_mix.load(std::memory_order_acquire);
         ScoreSnapshot* score = g_score.load(std::memory_order_acquire);
-        const int pluginLatency = g_pluginLatencySamples.load(std::memory_order_relaxed);
         float peak = 0.0f;
 
         // Stage 3c-polish (D2): kill requests from PANIC and the play-time
@@ -715,9 +766,9 @@ public:
             for (auto& v : g_engine.voices) { v.releasing = false; v.active = false; v.env = 0; v.pitch = -1; }
         }
 
-        // Reusable per-buffer MIDI buffer (member): clear() keeps the
-        // internal capacity — steady-state dispatch allocates nothing.
-        midiBuf.clear();
+        // Reusable per-buffer MIDI buffers (members, one per slot): clear()
+        // keeps the internal capacity — steady-state dispatch allocates nothing.
+        for (int i = 0; i < kMaxInstances; ++i) instMidi[i].clear();
 
         // Stage 3c close-out — MUSICAL RELEASE (stop / seek / end-of-score):
         // (a) synth voices enter the ~15ms release fade (NOT the instant kill)
@@ -732,12 +783,18 @@ public:
                 if (v.active) { v.releasing = true; v.active = false; ++synthReleased; }
             int pluginOffs = 0;
             const bool logDispatch = g_dispatchLog.load(std::memory_order_relaxed);
-            if (plugin != nullptr) {
-                for (int ch = 1; ch <= 16; ++ch)
+            // Stage 3d-4: walk the WIDE channel space; each held note's note-off
+            // lands in its OWNING instance's buffer at the instance's real 1..16
+            // channel. Slot 0 wide channels == legacy 1..16 (byte-stable ledger).
+            if (instances != nullptr) {
+                for (int wide = 1; wide <= kWideChannels; ++wide) {
+                    HostedPlugin* h = instances->slots[slotOfWide(wide)];
+                    if (h == nullptr || !h->instance) continue;
                     for (int p = 0; p < 128; ++p)
-                        if (g_heldPluginNotes[ch - 1][p]) {
-                            midiBuf.addEvent(juce::MidiMessage::noteOff(ch, p, juce::uint8(0)), 0);
-                            g_heldPluginNotes[ch - 1].clearBit(p);
+                        if (g_heldPluginNotes[wide - 1][p]) {
+                            instMidi[slotOfWide(wide)].addEvent(
+                                juce::MidiMessage::noteOff(realChOfWide(wide), p, juce::uint8(0)), 0);
+                            g_heldPluginNotes[wide - 1].clearBit(p);
                             ++pluginOffs;
                             if (logDispatch &&
                                 g_ledgerWrite.load(std::memory_order_relaxed) -
@@ -746,10 +803,11 @@ public:
                                 DispatchEntry& e = g_ledger[li % kLedgerSize];
                                 e.s = 0;
                                 e.t = g_engine.lastTick.load();  // the stopped position
-                                e.k = kEvNoteOff; e.ch = ch; e.d1 = p; e.d2 = 0;
+                                e.k = kEvNoteOff; e.ch = static_cast<uint8_t>(wide); e.d1 = static_cast<uint8_t>(p); e.d2 = 0;
                                 g_ledgerWrite.store(li + 1, std::memory_order_release);
                             }
                         }
+                }
             }
             if ((synthReleased > 0 || pluginOffs > 0) && logDispatch) {
                 // Ledger marker: the release batch has CC123 (All Notes Off —
@@ -767,27 +825,36 @@ public:
         }
 
         // Stage 3c-2 — panic flush: PANIC (and the play-time pre-panic guard)
-        // send CC120 (All Sound Off) on ALL 16 channels into the plugin so
-        // hosted voices die instantly (amputation — deliberately NOT the stop
-        // semantics any more; the 3c close-out moved stop to musical release).
+        // send CC120 (All Sound Off) on ALL 16 channels of EVERY live instance
+        // so hosted voices die instantly (amputation — deliberately NOT the
+        // stop semantics any more; the 3c close-out moved stop to musical
+        // release). Stage 3d-4: per-instance buffers, real 1..16 channels.
         const bool panicFlush = g_pendingPanic.exchange(false);
-        if (panicFlush && plugin != nullptr) {
-            for (int ch = 1; ch <= 16; ++ch) {
-                midiBuf.addEvent(juce::MidiMessage::controllerEvent(ch, 120, 0), 0);
-                g_heldPluginNotes[ch - 1].clear();   // all sound off = nothing held
+        if (panicFlush && instances != nullptr) {
+            for (int slot = 0; slot < kMaxInstances; ++slot) {
+                HostedPlugin* h = instances->slots[slot];
+                if (h == nullptr || !h->instance) continue;
+                for (int ch = 1; ch <= 16; ++ch) {
+                    instMidi[slot].addEvent(juce::MidiMessage::controllerEvent(ch, 120, 0), 0);
+                    g_heldPluginNotes[wideChannelOf(slot, ch) - 1].clear();   // all sound off = nothing held
+                }
             }
         }
-        // Mute/solo lost-audibility flush: per-channel atomic flags — no
+        // Mute/solo lost-audibility flush: per-WIDE-channel atomic flags — no
         // mutex, no vector (the test-synth voices are killed via the kill
         // flag above; they don't need a MIDI round-trip).
         bool anyMuteFlush = false;
-        if (plugin != nullptr) {
-            for (int ch = 1; ch <= 16; ++ch)
-                if (g_muteFlushPending[ch - 1].exchange(false, std::memory_order_relaxed)) {
-                    midiBuf.addEvent(juce::MidiMessage::controllerEvent(ch, 120, 0), 0);
-                    g_heldPluginNotes[ch - 1].clear();
+        if (instances != nullptr) {
+            for (int wide = 1; wide <= kWideChannels; ++wide) {
+                HostedPlugin* h = instances->slots[slotOfWide(wide)];
+                if (h == nullptr || !h->instance) continue;
+                if (g_muteFlushPending[wide - 1].exchange(false, std::memory_order_relaxed)) {
+                    instMidi[slotOfWide(wide)].addEvent(
+                        juce::MidiMessage::controllerEvent(realChOfWide(wide), 120, 0), 0);
+                    g_heldPluginNotes[wide - 1].clear();
                     anyMuteFlush = true;
                 }
+            }
         }
 
         if (!g_engine.playing.load()) {
@@ -817,10 +884,27 @@ public:
                 const float out = synthScratch[static_cast<size_t>(s)];
                 for (int ch = 0; ch < numOutputChannels; ++ch)
                     outputChannelData[ch][s] += out;
-                peak = std::max(peak, std::abs(out));
             }
-            if (plugin != nullptr) {
-                renderPlugin(plugin, midiBuf, outputChannelData, numOutputChannels, numSamples, peak);
+            // Stage 3d-4: EVERY live instance renders (drains tails); outputs
+            // SUM into the device buffer (renderPlugin adds — the buffer was
+            // zeroed at callback entry). Side fix: the old single-instance
+            // render ASSIGNED, silently overwriting the synth tail above when
+            // a plugin was hosted — summing is the honest arithmetic.
+            if (instances != nullptr) {
+                for (int slot = 0; slot < kMaxInstances; ++slot) {
+                    HostedPlugin* h = instances->slots[slot];
+                    if (h == nullptr || !h->instance) continue;
+                    renderPlugin(h->instance.get(), instMidi[slot], outputChannelData,
+                                 numOutputChannels, numSamples, peak);
+                }
+            }
+            // Summed-buffer peak (see the playing branch — 3d-4 honesty);
+            // measured AFTER the instance renders so it sees the full mix.
+            for (int s = 0; s < numSamples; ++s) {
+                float mx = 0.0f;
+                for (int ch = 0; ch < numOutputChannels; ++ch)
+                    mx = std::max(mx, std::abs(outputChannelData[ch][s]));
+                peak = std::max(peak, mx);
             }
             g_lastPeak.store(peak, std::memory_order_relaxed);
             recountVoices();
@@ -843,12 +927,20 @@ public:
 
         // Routing-only plugin test (shared by the skip and dispatch walks and
         // by dispatchTo). F4: plugin-routed events dispatch EARLIER by the
-        // plugin's reported latency so the audible attack lands on the grid.
+        // OWNING instance's reported latency (3d-4: per-slot, from the
+        // immutable set) so the audible attack lands on the grid.
         auto isPluginRouted = [&](const EngineEvent& ev) -> bool {
-            if (plugin == nullptr || routing == nullptr || ev.trackRef == 0) return false;
+            if (instances == nullptr || routing == nullptr || ev.trackRef == 0) return false;
             if (ev.trackRef >= routing->slotChannel.size()) return false;
-            return routing->slotChannel[ev.trackRef] > 0 &&
-                   routing->pluginChannels.count(ev.channel) > 0;
+            if (routing->slotChannel[ev.trackRef] <= 0 ||
+                routing->pluginChannels.count(ev.channel) == 0) return false;
+            HostedPlugin* h = instances->slots[slotOfWide(ev.channel)];
+            return h != nullptr && h->instance != nullptr;
+        };
+        // F4 shift for a routed event: its instance's latency (0 otherwise).
+        auto latencyFor = [&](const EngineEvent& ev) -> int {
+            if (instances == nullptr) return 0;
+            return instances->slotLatency[slotOfWide(ev.channel)];
         };
 
         // Pass 1 — dispatch events (plugin → MidiBuffer, synth → voices) and
@@ -882,7 +974,7 @@ public:
         for (; eventIdx < eventCount; ++eventIdx) {
             const EngineEvent& ev = events[eventIdx];
             const int64_t raw = static_cast<int64_t>((ev.tick - playStartTick) * spt) -
-                (ev.tick >= playStartTick && isPluginRouted(ev) ? pluginLatency : 0);
+                (ev.tick >= playStartTick && isPluginRouted(ev) ? latencyFor(ev) : 0);
             // Events AT/AFTER the start tick may be pulled before buffer start
             // by the latency shift — they have NOT fired yet (the tick-0
             // pre-set / just-in-time pre-trigger case): clamp to 0, fire now.
@@ -905,10 +997,10 @@ public:
                 // past events never reach here (the skip walk consumed them).
                 const int64_t eventSample = std::max<int64_t>(0,
                     static_cast<int64_t>((ev.tick - playStartTick) * spt) -
-                    (ev.tick >= playStartTick && toPlugin ? pluginLatency : 0));
+                    (ev.tick >= playStartTick && toPlugin ? latencyFor(ev) : 0));
                 if (eventSample > absSample) break;
                 dispatchTo(ev, toPlugin, static_cast<int>(absSample - eventSample),
-                           absSample, spt, playStartTick, midiBuf, plugin, routing, mix);
+                           absSample, spt, playStartTick, instances, routing, mix);
                 ++eventIdx;
             }
 
@@ -941,21 +1033,39 @@ public:
         // handler — the walk above dispatches them at sample 0 like any other
         // event. Nothing extra to do here; the handler's receipt names them.
 
-        // Pass 2 — output = hosted plugin (when active) + built-in synth.
-        if (plugin != nullptr) {
-            renderPlugin(plugin, midiBuf, outputChannelData, numOutputChannels, numSamples, peak);
-            for (int s = 0; s < numSamples; ++s) {
-                const float out = synthScratch[static_cast<size_t>(s)];
-                for (int ch = 0; ch < numOutputChannels; ++ch)
-                    outputChannelData[ch][s] += out;
-                peak = std::max(peak, std::abs(out));
+        // Pass 2 — output = Σ hosted instances (3d-4) + built-in synth. The
+        // buffer was zeroed at callback entry; every path ADDS below (the old
+        // single-instance render ASSIGNED — identical result for one instance,
+        // and the sum is what multiple instances require).
+        {
+            if (instances != nullptr) {
+                for (int slot = 0; slot < kMaxInstances; ++slot) {
+                    HostedPlugin* h = instances->slots[slot];
+                    if (h == nullptr || !h->instance) continue;
+                    renderPlugin(h->instance.get(), instMidi[slot], outputChannelData,
+                                 numOutputChannels, numSamples, peak);
+                }
             }
-        } else {
+            const bool noPlugin = instances == nullptr;
             for (int s = 0; s < numSamples; ++s) {
                 const float out = synthScratch[static_cast<size_t>(s)];
+                if (noPlugin) {
+                    for (int ch = 0; ch < numOutputChannels; ++ch)
+                        outputChannelData[ch][s] = out;
+                } else {
+                    for (int ch = 0; ch < numOutputChannels; ++ch)
+                        outputChannelData[ch][s] += out;
+                }
+            }
+            // Stage 3d-4: the session peak is measured on the SUMMED device
+            // buffer (Σ instances + synth), NOT per-source — two 0.79 sources
+            // are a 1.57 mix, and the receipt must say so. Single-source peaks
+            // above are a loose lower bound only; this pass is the truth.
+            for (int s = 0; s < numSamples; ++s) {
+                float mx = 0.0f;
                 for (int ch = 0; ch < numOutputChannels; ++ch)
-                    outputChannelData[ch][s] = out;
-                peak = std::max(peak, std::abs(out));
+                    mx = std::max(mx, std::abs(outputChannelData[ch][s]));
+                peak = std::max(peak, mx);
             }
         }
         g_lastPeak.store(peak, std::memory_order_relaxed);
@@ -998,30 +1108,37 @@ public:
         // published plugin instance is immutable except for this prepare.
         ensureScratch(static_cast<size_t>(device->getCurrentBufferSizeSamples()));
         procBuf.setSize(2, device->getCurrentBufferSizeSamples(), false, true, false);
-        // Stage 3c-2/3c-polish (D1) — (re)prepare the hosted plugin for the
-        // REAL device (create-time used nominal 44100/512) and LOG the actual
-        // config pair so a prepare/config mismatch can never hide again.
-        HostedPlugin* h = g_hostedLive.load(std::memory_order_acquire);
-        if (h && h->instance) {
-            auto* p = h->instance.get();
-            p->setPlayConfigDetails(0, 2, device->getCurrentSampleRate(),
-                                    device->getCurrentBufferSizeSamples());
-            p->prepareToPlay(device->getCurrentSampleRate(),
-                             device->getCurrentBufferSizeSamples());
-            const int lat = static_cast<int>(p->getLatencySamples());
-            h->latencySamples = static_cast<double>(lat);
-            g_pluginLatencySamples.store(lat, std::memory_order_release);
-            const double devMs = static_cast<double>(device->getCurrentBufferSizeSamples()) /
-                                 device->getCurrentSampleRate() * 1000.0;
-            const double plugMs = p->getLatencySamples() / device->getCurrentSampleRate() * 1000.0;
-            std::cout << "[engine] latency: device=" << devMs << "ms plugin=" << plugMs
-                      << "ms total=" << (devMs + plugMs) << "ms" << std::endl;
-            engineLog("[plugin] prepared rate=" +
-                      std::to_string(static_cast<int>(device->getCurrentSampleRate())) +
-                      " buffer=" + std::to_string(device->getCurrentBufferSizeSamples()) +
-                      " latencySamples=" + std::to_string(lat) +
-                      " (device actual: \"" + device->getName().toStdString() + "\" type=" +
-                      device->getTypeName().toStdString() + ")");
+        // Stage 3c-2/3c-polish (D1) — (re)prepare EVERY hosted instance for
+        // the REAL device (create-time used nominal 44100/512) and LOG the
+        // actual config pair so a prepare/config mismatch can never hide
+        // again. Stage 3d-4: the whole live set re-prepares on device start.
+        if (auto set = g_instances.load(std::memory_order_acquire)) {
+            int maxLat = 0;
+            for (int slot = 0; slot < kMaxInstances; ++slot) {
+                HostedPlugin* h = set->slots[slot];
+                if (h == nullptr || !h->instance) continue;
+                auto* p = h->instance.get();
+                p->setPlayConfigDetails(0, 2, device->getCurrentSampleRate(),
+                                        device->getCurrentBufferSizeSamples());
+                p->prepareToPlay(device->getCurrentSampleRate(),
+                                 device->getCurrentBufferSizeSamples());
+                const int lat = static_cast<int>(p->getLatencySamples());
+                h->latencySamples = static_cast<double>(lat);
+                if (lat > maxLat) maxLat = lat;
+                const double devMs = static_cast<double>(device->getCurrentBufferSizeSamples()) /
+                                     device->getCurrentSampleRate() * 1000.0;
+                const double plugMs = p->getLatencySamples() / device->getCurrentSampleRate() * 1000.0;
+                std::cout << "[engine] latency: device=" << devMs << "ms plugin=" << plugMs
+                          << "ms total=" << (devMs + plugMs) << "ms instance=" << h->instanceId << std::endl;
+                engineLog("[plugin] prepared rate=" +
+                          std::to_string(static_cast<int>(device->getCurrentSampleRate())) +
+                          " buffer=" + std::to_string(device->getCurrentBufferSizeSamples()) +
+                          " latencySamples=" + std::to_string(lat) +
+                          " instance=" + h->instanceId +
+                          " (device actual: \"" + device->getName().toStdString() + "\" type=" +
+                          device->getTypeName().toStdString() + ")");
+            }
+            g_pluginLatencySamples.store(maxLat, std::memory_order_release);
         }
     }
 
@@ -1031,6 +1148,9 @@ private:
     std::vector<float> synthScratch;              // synth contribution per buffer
     juce::AudioBuffer<float> procBuf;             // hosted plugin render target
     juce::MidiBuffer midiBuf;                     // reusable per-buffer MIDI (clear() keeps capacity)
+    // Stage 3d-4: ONE reusable MidiBuffer PER SLOT (same steady-state
+    // no-alloc contract) — each instance receives only its own events.
+    juce::MidiBuffer instMidi[kMaxInstances];
 
     void ensureScratch(size_t numSamples) {
         if (synthScratch.size() < numSamples) synthScratch.resize(numSamples, 0.0f);
@@ -1047,9 +1167,10 @@ private:
 
     // Honest held-plugin-note count (the release receipt's "m=" figure),
     // recomputed at each buffer boundary from the audio-thread-owned ledger.
+    // 3d-4: the ledger spans the whole wide-channel space.
     void recountHeldNotes() {
         int n = 0;
-        for (int ch = 0; ch < 16; ++ch)
+        for (int ch = 0; ch < kWideChannels; ++ch)
             for (int p = 0; p < 128; ++p)
                 if (g_heldPluginNotes[ch][p]) ++n;
         g_heldPluginNoteCount.store(n, std::memory_order_relaxed);
@@ -1090,7 +1211,10 @@ private:
             for (int ch = 0; ch < numOutputChannels; ++ch) {
                 const int src = procChans > 1 ? juce::jmin(ch, 1) : 0;
                 const float out = procChans > 0 ? procBuf.getSample(src, s) * gain : 0.0f;
-                outputChannelData[ch][s] = out;
+                // Stage 3d-4: ADD (the device buffer is zeroed at callback
+                // entry and carries the Σ of all instances + the synth path;
+                // the old ASSIGN was only correct for one instance).
+                outputChannelData[ch][s] += out;
                 peakSample = std::max(peakSample, std::abs(out));
             }
             peak = std::max(peak, peakSample);
@@ -1101,9 +1225,14 @@ private:
     // debt, now audible), then plugin channel routing, then the test synth.
     // Stage 3c-polish (F4/D2): the routing decision is computed by the caller
     // (the dispatch walk needs it for the latency shift) and passed in.
+    // Stage 3d-4: dispatch is WIDE-CHANNEL aware. ev.channel is the internal
+    // wide channel (slot*16 + ch); the MIDI message carries the instance's
+    // REAL 1..16 channel into that instance's own MidiBuffer. The ledger
+    // (held notes / articulation / CI entries) is indexed by the wide channel
+    // — slot 0 wide == legacy 1..16, so single-instance receipts are stable.
     void dispatchTo(const EngineEvent& ev, bool toPlugin, int samplePos, int64_t absSample, double spt,
-                    int64_t playStartTick, juce::MidiBuffer& midi,
-                    juce::AudioPluginInstance* plugin,
+                    int64_t playStartTick,
+                    const std::shared_ptr<const InstanceSet>& instances,
                     const std::shared_ptr<const RoutingTable>& routing,
                     const std::shared_ptr<const MixState>& mix) {
         // Per-track mute/solo gating (trackRef 0 = legacy/ungated events).
@@ -1114,17 +1243,23 @@ private:
             if (!audible) return;
         }
         // Channel routing: ONLY tracks REGISTERED as plugin-routed (slot →
-        // channel map) send into the plugin — a synth-track event whose
-        // midiChannel numerically collides with a hosted channel can never
-        // leak into BBCSO. Everything else falls to the built-in test synth.
-        if (toPlugin) {
+        // wide-channel map) send into their owning instance — a synth-track
+        // event whose midiChannel numerically collides with a hosted channel
+        // can never leak into any hosted plugin. Everything else falls to the
+        // built-in test synth.
+        if (toPlugin && instances != nullptr) {
+            const int slot = slotOfWide(ev.channel);
+            HostedPlugin* h = instances->slots[slot];
+            if (h == nullptr || !h->instance) return;   // set raced a retire: drop, never crash
+            juce::MidiBuffer& midi = instMidi[slot];
+            const int ch = realChOfWide(ev.channel);
             switch (ev.kind) {
                 case kEvNoteOn:
-                    midi.addEvent(juce::MidiMessage::noteOn(ev.channel, ev.data1, juce::uint8(ev.data2)), samplePos);
-                    g_heldPluginNotes[ev.channel - 1].setBit(ev.data1);   // held-note ledger
+                    midi.addEvent(juce::MidiMessage::noteOn(ch, ev.data1, juce::uint8(ev.data2)), samplePos);
+                    g_heldPluginNotes[ev.channel - 1].setBit(ev.data1);   // held-note ledger (wide index)
                     break;
                 case kEvNoteOff:
-                    midi.addEvent(juce::MidiMessage::noteOff(ev.channel, ev.data1, juce::uint8(0)), samplePos);
+                    midi.addEvent(juce::MidiMessage::noteOff(ch, ev.data1, juce::uint8(0)), samplePos);
                     g_heldPluginNotes[ev.channel - 1].clearBit(ev.data1); // released
                     break;
                 case kEvCC:
@@ -1135,7 +1270,8 @@ private:
                     // articulation state is seeded from the score's past at
                     // play time and updated here as CC#32s dispatch — a
                     // redundant value is suppressed (ledger kind 6), only
-                    // genuine changes are sent.
+                    // genuine changes are sent. 3d-4: per WIDE channel — two
+                    // instances' channel 1 are independent articulation contexts.
                     if (ev.data1 == 32) {
                         const uint8_t cur =
                             g_articulation[ev.channel - 1].load(std::memory_order_relaxed);
@@ -1145,13 +1281,13 @@ private:
                         }
                         g_articulation[ev.channel - 1].store(ev.data2, std::memory_order_relaxed);
                     }
-                    midi.addEvent(juce::MidiMessage::controllerEvent(ev.channel, ev.data1, ev.data2), samplePos);
+                    midi.addEvent(juce::MidiMessage::controllerEvent(ch, ev.data1, ev.data2), samplePos);
                     break;
                 case kEvBend:
-                    midi.addEvent(juce::MidiMessage::pitchWheel(ev.channel, (static_cast<int>(ev.data2) << 7) | ev.data1), samplePos);
+                    midi.addEvent(juce::MidiMessage::pitchWheel(ch, (static_cast<int>(ev.data2) << 7) | ev.data1), samplePos);
                     break;
                 case kEvPC:
-                    midi.addEvent(juce::MidiMessage::programChange(ev.channel, ev.data1), samplePos);
+                    midi.addEvent(juce::MidiMessage::programChange(ch, ev.data1), samplePos);
                     break;
                 default: break;
             }
@@ -1469,7 +1605,7 @@ void shutdownAudio() {
         // block forever) and buys nothing: the audio callback above is already
         // stopped, no further processBlock can run, and process exit reclaims
         // every resource. The instance's lifetime IS the process lifetime —
-        // the g_hostedLive pointer and any retired instances are intentionally
+        // the g_instances set pointer and any retired instances are intentionally
         // leaked at exit (Stage 3c-polish: same policy, no lock needed).
     } catch (...) {
         // Swallow — shutdown must be robust.
@@ -1667,15 +1803,17 @@ void handle_scan(const juce::var& json, ix::WebSocket& ws) {
 //   transport stop is PANIC: all voices die immediately (hosted plugin gets
 //   a CC120 All-Sound-Off flush on all 16 channels).
 
-// Host ONE VST3 by id/path (Stage 3c-2). Single instance for the whole
-// orchestra (BBCSO standalone multi-timbral). Returns "" on success, else a
-// human-readable detail. On success the caller swaps it into g_hosted.
-std::string loadHostedPlugin(const juce::var& pluginVar, std::unique_ptr<HostedPlugin>& out) {
+// Host a VST3 by id/path (Stage 3c-2; 3d-4: one INSTANCE of possibly many —
+// identity = the frontend's libraryGroup id, "hosted" for the legacy field).
+// Returns "" on success, else a human-readable detail.
+std::string loadHostedPlugin(const juce::var& pluginVar, const std::string& instanceId,
+                             std::unique_ptr<HostedPlugin>& out) {
     juce::DynamicObject* pobj = pluginVar.getDynamicObject();
     if (pobj == nullptr) return "plugin field must be an object";
     const std::string path = pobj->getProperty("path").toString().toStdString();
     const std::string uid = pobj->getProperty("uid").toString().toStdString();
     if (path.empty()) return "plugin.path is required";
+    if (instanceId.empty()) return "plugin.instanceId is required (multi-instance hosting)";
     try {
         juce::AudioPluginFormatManager mgr;
         mgr.addDefaultFormats();  // VST3 registered when JUCE_PLUGINHOST_VST3=1
@@ -1719,6 +1857,7 @@ std::string loadHostedPlugin(const juce::var& pluginVar, std::unique_ptr<HostedP
         hosted->latencySamples = hosted->instance->getLatencySamples();
         hosted->uid = uid;
         hosted->path = path;
+        hosted->instanceId = instanceId;
         out = std::move(hosted);
         return "";
     } catch (const std::exception& e) {
@@ -1730,8 +1869,9 @@ std::string loadHostedPlugin(const juce::var& pluginVar, std::unique_ptr<HostedP
 
 void sendPluginState(ix::WebSocket& ws, const char* state, const std::string& name,
                      const std::string& vendor, double latencyMs, const std::string& detail,
-                     const std::string& channelsJson) {
+                     const std::string& channelsJson, const std::string& instanceId = "") {
     std::string msg = std::string("{\"type\":\"plugin_state\",\"state\":\"") + state + "\"";
+    if (!instanceId.empty()) msg += ",\"instanceId\":\"" + escape_json(instanceId) + "\"";
     if (!name.empty()) msg += ",\"name\":\"" + escape_json(name) + "\"";
     if (!vendor.empty()) msg += ",\"vendor\":\"" + escape_json(vendor) + "\"";
     if (latencyMs >= 0) {
@@ -1776,10 +1916,111 @@ void handle_load(const juce::var& json, ix::WebSocket& ws, size_t byteSize) {
 
     // Track table (slots) + channel assignments.
     RoutingTable table;
-    std::unordered_map<std::string, int> channelOfTrack;
+    std::unordered_map<std::string, int> channelOfTrack;   // trackId → WIDE channel (slot*16+ch)
     bool channelsBad = false;
     std::string channelsBadDetail;
-    if (auto* channelsObj = obj->getProperty("channels").getDynamicObject()) {
+
+    // ─── Stage 3d-4: MULTI-INSTANCE parse (additive over the legacy shape) ──
+    // NEW:  plugins = [{instanceId, uid, path, name?, state?}],
+    //       routing = {trackId: {inst, ch}}.
+    // LEGACY (still accepted, byte-compatible): plugin = {uid, path, ...}
+    // (ONE instance, reserved id "hosted", slot 0 — wide channels == 1..16),
+    // channels = {trackId: ch}.
+    struct ReqInstance { std::string instanceId; int slot = 0; juce::var pluginVar; std::string stateB64; };
+    std::vector<ReqInstance> reqInstances;
+    std::unordered_map<std::string, std::string> instanceOfTrack;   // trackId → instanceId
+    if (const auto* pluginsArr = obj->getProperty("plugins").getArray()) {
+        int pidx = -1;
+        for (auto& pv : *pluginsArr) {
+            ++pidx;
+            juce::DynamicObject* po = pv.getDynamicObject();
+            if (po == nullptr) {
+                channelsBad = true;
+                channelsBadDetail = "plugins[" + std::to_string(pidx) + "] is not an object";
+                continue;
+            }
+            const std::string iid = po->getProperty("instanceId").toString().toStdString();
+            if (iid.empty()) {
+                channelsBad = true;
+                channelsBadDetail = "plugins[" + std::to_string(pidx) + "].instanceId is required";
+                continue;
+            }
+            if (iid == "hosted") {
+                channelsBad = true;
+                channelsBadDetail = "instanceId \"hosted\" is reserved for the legacy plugin field";
+                continue;
+            }
+            bool dup = false;
+            for (const auto& r : reqInstances) if (r.instanceId == iid) { dup = true; break; }
+            if (dup) {
+                channelsBad = true;
+                channelsBadDetail = "duplicate instanceId \"" + iid + "\" in plugins[]";
+                continue;
+            }
+            if (static_cast<int>(reqInstances.size()) >= kMaxInstances) {
+                channelsBad = true;
+                channelsBadDetail = "too many plugin instances (max " + std::to_string(kMaxInstances) + ")";
+                continue;
+            }
+            ReqInstance r;
+            r.instanceId = iid;
+            r.slot = static_cast<int>(reqInstances.size());   // slot = declaration order (deterministic)
+            r.pluginVar = pv;
+            r.stateB64 = po->getProperty("state").toString().toStdString();
+            reqInstances.push_back(std::move(r));
+        }
+    }
+    const bool pluginsArraySent = !reqInstances.empty();
+    const auto& pluginVar = obj->getProperty("plugin");
+    if (!pluginsArraySent && pluginVar.getDynamicObject() != nullptr) {
+        // Legacy single-plugin load → the reserved "hosted" instance, slot 0.
+        ReqInstance r;
+        r.instanceId = "hosted";
+        r.slot = 0;
+        r.pluginVar = pluginVar;
+        r.stateB64 = pluginVar.getDynamicObject()->getProperty("state").toString().toStdString();
+        reqInstances.push_back(std::move(r));
+    }
+    const bool pluginRequested = !reqInstances.empty();
+
+    // Routing: NEW routing map first; legacy flat channels map otherwise.
+    // Both normalize into channelOfTrack (WIDE channels) + instanceOfTrack.
+    if (auto* routingObj = obj->getProperty("routing").getDynamicObject()) {
+        auto& props = routingObj->getProperties();
+        std::map<std::pair<std::string, int>, bool> seenPerInstance;   // (inst, ch) collision scope
+        for (int i = 0; i < props.size(); ++i) {
+            const std::string trackId = props.getName(i).toString().toStdString();
+            juce::DynamicObject* ro = props.getValueAt(i).getDynamicObject();
+            if (trackId.empty() || ro == nullptr) {
+                channelsBad = true;
+                channelsBadDetail = "routing entries must be {inst, ch} objects";
+                continue;
+            }
+            const std::string inst = ro->getProperty("inst").toString().toStdString();
+            const int ch = static_cast<int>(static_cast<double>(ro->getProperty("ch")));
+            if (ch < 1 || ch > 16) {
+                channelsBad = true;
+                channelsBadDetail = "engine channel must be an integer 1–16 (track " + trackId + ")";
+                continue;
+            }
+            int slot = -1;
+            for (const auto& r : reqInstances)
+                if (r.instanceId == inst) { slot = r.slot; break; }
+            if (slot < 0) {
+                channelsBad = true;
+                channelsBadDetail = "routing references unknown instanceId \"" + inst + "\" (track " + trackId + ")";
+                continue;
+            }
+            if (!seenPerInstance.emplace(std::make_pair(inst, ch), true).second) {
+                channelsBad = true;
+                channelsBadDetail = "instance \"" + inst + "\" channel " + std::to_string(ch) +
+                                    " assigned to more than one track (per-instance channel collision)";
+                continue;
+            }
+            channelOfTrack[trackId] = wideChannelOf(slot, ch);
+            instanceOfTrack[trackId] = inst;
+        }
+    } else if (auto* channelsObj = obj->getProperty("channels").getDynamicObject()) {
         auto& props = channelsObj->getProperties();
         std::unordered_set<int> seen;
         for (int i = 0; i < props.size(); ++i) {
@@ -1796,7 +2037,9 @@ void handle_load(const juce::var& json, ix::WebSocket& ws, size_t byteSize) {
                                     " assigned to more than one track (engine channel collision)";
                 continue;
             }
-            channelOfTrack[trackId] = ch;
+            // Legacy: slot 0 ("hosted") — wide == wire channel, byte-stable.
+            channelOfTrack[trackId] = wideChannelOf(0, ch);
+            if (pluginRequested) instanceOfTrack[trackId] = "hosted";
         }
     }
 
@@ -1901,9 +2144,6 @@ void handle_load(const juce::var& json, ix::WebSocket& ws, size_t byteSize) {
     if (!std::isfinite(bpm) || bpm <= 0.0) loadFail = loadFail.empty() ? "meta.bpm is not finite/positive" : loadFail;
     if (ppqn <= 0) loadFail = loadFail.empty() ? "meta.ppqn is not positive" : loadFail;
 
-    const auto& pluginVar = obj->getProperty("plugin");
-    const bool pluginRequested = pluginVar.getDynamicObject() != nullptr;
-
     if (!loadFail.empty()) {
         engineLog("[load-fail] " + loadFail + " | received " + std::to_string(byteSize) +
                   " bytes | seq " + std::to_string(seq) + " | skipped " +
@@ -1917,41 +2157,49 @@ void handle_load(const juce::var& json, ix::WebSocket& ws, size_t byteSize) {
         return;
     }
 
-    // ─── Stage 3c-regression — ROLLING-TRANSPORT LOAD GUARD ───
-    // The receipts caught the original empty-score regression red-handed:
-    // a duplicate load landed 5ms AFTER transport play, and the engine
-    // synchronously re-instantiated the plugin mid-playback — the live
-    // instance was released and the swapped-in one was never re-prepared
-    // for the real device. Transport kept rolling on a dead plugin graph:
-    // "playing · bar X" + silence + ~0 CPU.
-    // Rule (additive, engine-side): on a rolling transport a load whose
-    // plugin field DIFFERS from the live instance is REJECTED wholesale —
-    // score, routing, plugin and transport are all left untouched. A load
-    // with the SAME plugin (the live-edit reload) stays allowed and takes
-    // the routing-only fast path below. Non-plugin loads stay allowed (the
-    // events swap is per-buffer rescan-safe and touches no instance).
+    // ─── Stage 3c-regression — ROLLING-TRANSPORT LOAD GUARD (3d-4 set form) ──
+    // On a rolling transport a load whose plugin SET differs from the live
+    // set is REJECTED wholesale — score, routing, plugins and transport are
+    // all left untouched. "Differs" = any requested (instanceId → uid+path)
+    // not exactly matching a live slot, or any live slot absent from the
+    // request (retire-while-playing is the empty-score class). A load whose
+    // set EXACTLY matches (the live-edit reload) stays allowed and takes the
+    // routing-only fast path below. Non-plugin loads stay allowed.
     bool midPlayReuse = false;
     if (pluginRequested && !channelsBad && g_engine.playing.load()) {
-        const std::string reqUid = pluginVar.getDynamicObject()->getProperty("uid").toString().toStdString();
-        const std::string reqPath = pluginVar.getDynamicObject()->getProperty("path").toString().toStdString();
-        // Identity is immutable after publication — a plain atomic load
-        // snapshot is safe without any lock (the init worker publishes fully
-        // constructed instances only).
-        HostedPlugin* live = g_hostedLive.load(std::memory_order_acquire);
-        const bool haveLive = live != nullptr;
-        const std::string liveUid = live ? live->uid : "";
-        const std::string livePath = live ? live->path : "";
-        if (haveLive && !reqUid.empty() && !reqPath.empty() &&
-            reqUid == liveUid && reqPath == livePath) {
+        const auto live = g_instances.load(std::memory_order_acquire);
+        bool exact = live != nullptr;
+        std::string mismatch;
+        if (exact) {
+            for (const auto& r : reqInstances) {
+                HostedPlugin* h = live->byId(r.instanceId);
+                juce::DynamicObject* po = r.pluginVar.getDynamicObject();
+                const std::string reqUid = po ? po->getProperty("uid").toString().toStdString() : "";
+                const std::string reqPath = po ? po->getProperty("path").toString().toStdString() : "";
+                if (h == nullptr) { exact = false; mismatch = "instance \"" + r.instanceId + "\" is not hosted"; break; }
+                if (h->uid != reqUid || h->path != reqPath) {
+                    exact = false; mismatch = "instance \"" + r.instanceId + "\" changed binary"; break;
+                }
+            }
+        }
+        if (exact) {
+            for (int i = 0; i < kMaxInstances && exact; ++i) {
+                HostedPlugin* h = live->slots[i];
+                if (h == nullptr) continue;
+                bool requested = false;
+                for (const auto& r : reqInstances) if (r.instanceId == h->instanceId) { requested = true; break; }
+                if (!requested) { exact = false; mismatch = "hosted instance \"" + h->instanceId + "\" absent from load"; }
+            }
+        }
+        if (exact) {
             midPlayReuse = true;
         } else {
-            engineLog("[load] REJECTED while playing — plugin change requires stop" +
-                      std::string(reqUid.empty() ? "" : " (uid " + reqUid + ")") +
+            engineLog("[load] REJECTED while playing — plugin set change requires stop (" + mismatch + ")" +
                       " | seq " + std::to_string(seq) + " | received " +
                       std::to_string(byteSize) + " bytes — score, routing and transport UNTOUCHED");
             std::cout << "[engine] load rejected while playing (seq " << seq << ")" << std::endl;
             ws.send(std::string("{\"type\":\"error\",\"code\":\"load_rejected\",\"echo\":\"load\",\"detail\":\"") +
-                    "transport is playing — stop before loading a different plugin" + "\"}");
+                    "transport is playing — stop before changing the plugin set (" + escape_json(mismatch) + ")" + "\"}");
             return;
         }
     }
@@ -2041,72 +2289,86 @@ void handle_load(const juce::var& json, ix::WebSocket& ws, size_t byteSize) {
             (g_engine.playing.load() ? "true" : "false") +
             ",\"tick\":" + std::to_string(g_engine.currentTick()) + "}");
 
-    // Stage 3c-2 — hosting: ONE VST3 for the whole orchestra. On ANY failure
-    // the routing table ships with EMPTY plugin channels → every event renders
-    // through the built-in test synth (the app never dead-ends).
-    std::string channelsJson;
-    std::string hostName, hostVendor;
-    double latencyMs = -1.0;
-
+    // Stage 3c-2 + 3d-4 — hosting: the load's plugin SET (one instance per
+    // plugin-bearing library group). On ANY parse failure the routing table
+    // ships with EMPTY plugin channels → every event renders through the
+    // built-in test synth (the app never dead-ends).
     if (pluginRequested && channelsBad) {
         sendPluginState(ws, "error", "", "", -1.0,
                         channelsBadDetail + " — falling back to test synth", "");
         std::cout << "[engine] plugin hosting refused: " << channelsBadDetail << std::endl;
     } else if (pluginRequested) {
-        // Hosted channels flow from the load's channels map in ALL accepted
-        // plugin paths (reuse fast path AND async init): the routing table
-        // below must carry them even before the worker lands the instance
-        // (the callback's toPlugin check additionally requires a live
-        // instance, so the map alone can never route into a dead plugin).
-        std::vector<int> sortedChannels;
-        for (const auto& [trackId, ch] : channelOfTrack) {
-            table.pluginChannels.insert(ch);
-            table.channelOfTrack[trackId] = ch;
-            sortedChannels.push_back(ch);
+        // Hosted channels flow from the load's routing/channels map in ALL
+        // accepted plugin paths (reuse fast path AND async init): the routing
+        // table must carry them (as WIDE channels) even before the worker
+        // lands the instances (the callback's toPlugin check additionally
+        // requires a live instance, so the map alone can never route into a
+        // dead plugin).
+        std::map<std::string, std::vector<int>> chansPerInst;   // instanceId → wire channels
+        for (const auto& [trackId, wide] : channelOfTrack) {
+            auto iit = instanceOfTrack.find(trackId);
+            if (iit == instanceOfTrack.end()) continue;   // legacy channels without a plugin request
+            table.pluginChannels.insert(wide);
+            table.channelOfTrack[trackId] = wide;
+            chansPerInst[iit->second].push_back(realChOfWide(wide));
         }
-        std::sort(sortedChannels.begin(), sortedChannels.end());
-        for (const int ch : sortedChannels) {
-            if (!channelsJson.empty()) channelsJson += ",";
-            channelsJson += std::to_string(ch);
+        std::map<std::string, std::string> chansJsonPerInst;
+        for (auto& [iid, chans] : chansPerInst) {
+            std::sort(chans.begin(), chans.end());
+            std::string cj;
+            for (const int ch : chans) { if (!cj.empty()) cj += ","; cj += std::to_string(ch); }
+            chansJsonPerInst[iid] = cj;
         }
 
         if (midPlayReuse) {
-            // ── Fast path: SAME plugin on a rolling transport. The live
-            // instance is kept untouched (no re-instantiate, no swap, no
+            // ── Fast path: SAME instance set on a rolling transport. Every
+            // live instance is kept untouched (no re-instantiate, no swap, no
             // release) — only events + routing swapped above. This is the
             // mid-play live-edit reload, and it costs milliseconds.
-            if (HostedPlugin* live = g_hostedLive.load(std::memory_order_acquire)) {
-                hostName = live->name;
-                hostVendor = live->vendor;
-                latencyMs = (live->latencySamples + 512.0) / 44100.0 * 1000.0;
+            const auto live = g_instances.load(std::memory_order_acquire);
+            if (live != nullptr) {
+                for (const auto& r : reqInstances) {
+                    HostedPlugin* h = live->byId(r.instanceId);
+                    if (h == nullptr) continue;
+                    const double latMs = (h->latencySamples + 512.0) / 44100.0 * 1000.0;
+                    sendPluginState(ws, "loaded", h->name, h->vendor, latMs, "",
+                                    chansJsonPerInst[r.instanceId], r.instanceId);
+                    engineLog("[plugin] reuse while playing — no re-instantiate | seq " +
+                              std::to_string(seq) + " instance=" + r.instanceId +
+                              " channels=[" + chansJsonPerInst[r.instanceId] + "]");
+                }
+                std::cout << "[engine] plugin set reused (mid-play, seq " << seq
+                          << ", " << reqInstances.size() << " instance(s))" << std::endl;
             }
-            engineLog("[plugin] reuse while playing — no re-instantiate | seq " +
-                      std::to_string(seq) + " channels=[" + channelsJson + "]");
-            std::cout << "[engine] plugin reused (mid-play, seq " << seq << ")" << std::endl;
-            sendPluginState(ws, "loaded", hostName, hostVendor, latencyMs, "", channelsJson);
         } else {
-            // ── Async init: queue for the worker. The instantiate takes
-            // seconds for a real orchestra library (receipts: 5.7s for
-            // BBCSO) — it must NEVER run on the WS thread: the frozen loop
-            // delayed queued transport commands and timed out the NEXT
-            // load's loadAck. loadAck/state above already went out in
-            // milliseconds; plugin_state arrives when the instance is real.
-            std::string stateB64;
-            if (juce::DynamicObject* po = pluginVar.getDynamicObject())
-                stateB64 = po->getProperty("state").toString().toStdString();
+            // ── Async init: queue the FULL desired set for the worker. Each
+            // instantiate takes seconds for a real orchestra library — it must
+            // NEVER run on the WS thread. loadAck/state above already went out
+            // in milliseconds; plugin_state arrives per instance on completion.
+            std::vector<PluginInitEntry> entries;
+            entries.reserve(reqInstances.size());
+            for (const auto& r : reqInstances) {
+                PluginInitEntry e;
+                e.instanceId = r.instanceId;
+                e.slot = r.slot;
+                e.pluginVar = r.pluginVar;
+                e.stateB64 = r.stateB64;
+                auto cit = chansJsonPerInst.find(r.instanceId);
+                if (cit != chansJsonPerInst.end()) e.channelsJson = cit->second;
+                entries.push_back(std::move(e));
+            }
+            const size_t n = entries.size();
             {
                 std::lock_guard<std::mutex> lock(g_pluginInitMutex);
-                g_pluginInitRequest = PluginInitRequest{pluginVar, seq, channelsJson, stateB64};
+                g_pluginInitRequest = PluginInitRequest{std::move(entries), seq};
                 g_pluginInitPending = true;
                 ++g_pluginInitGen;
             }
             g_pluginInitCv.notify_one();
-            const std::string reqUid = pluginVar.getDynamicObject()->getProperty("uid").toString().toStdString();
-            engineLog("[plugin] init started (async) uid=" + reqUid +
-                      (stateB64.empty() ? "" : " + embedded state (" + std::to_string(stateB64.size()) + " b64 chars)") +
+            engineLog("[plugin] init started (async) instances=" + std::to_string(n) +
                       " | seq " + std::to_string(seq) +
-                      " — loadAck not delayed, plugin_state follows on completion");
-            std::cout << "[engine] plugin init queued (async, seq " << seq << ")" << std::endl;
+                      " — loadAck not delayed, plugin_state follows per instance on completion");
+            std::cout << "[engine] plugin init queued (async, " << n << " instance(s), seq " << seq << ")" << std::endl;
         }
     }
 
@@ -2184,7 +2446,7 @@ void handle_dispatch_log(const juce::var& json, ix::WebSocket& ws) {
 // load (new score context — the first CC#32 always sends) before play/seek
 // re-seed it from the score's past.
 void resetArticulations() {
-    for (int i = 0; i < 16; ++i)
+    for (int i = 0; i < kWideChannels; ++i)
         g_articulation[i].store(kArticulationUnknown, std::memory_order_relaxed);
 }
 
@@ -2215,7 +2477,7 @@ void seedArticulationsFromPast(int64_t startTick) {
 // release waiting. Pure function of the snapshot + startTick (no RNG).
 std::vector<EngineEvent> resumeReattacksFor(const ScoreSnapshot& s, int64_t startTick) {
     struct PairState { int on = 0; int off = 0; int vel = 0; uint32_t ref = 0; };
-    std::vector<PairState> st(16 * 128);
+    std::vector<PairState> st(kWideChannels * 128);
     auto idx = [](int ch, int p) { return (ch - 1) * 128 + p; };
     for (const auto& ev : s.events) {
         if (ev.flags & kEvFlagResumeReattack) continue;   // synthetic — never pairs
@@ -2231,7 +2493,7 @@ std::vector<EngineEvent> resumeReattacksFor(const ScoreSnapshot& s, int64_t star
         }
     }
     std::vector<EngineEvent> tails;
-    for (int ch = 1; ch <= 16; ++ch)
+    for (int ch = 1; ch <= kWideChannels; ++ch)
         for (int p = 0; p < 128; ++p) {
             const PairState& ps = st[idx(ch, p)];
             const int n = std::min(ps.on, ps.off);
@@ -2425,15 +2687,24 @@ void handle_panic() {
 // the message thread (window work is illegal anywhere else). No live
 // instance is the editor_unavailable negative path (CI asserts it).
 void handle_open_editor(const juce::var& json, ix::WebSocket& ws) {
-    HostedPlugin* live = g_hostedLive.load(std::memory_order_acquire);
-    if (live == nullptr || !live->instance) {
-        ws.send(std::string("{\"type\":\"error\",\"code\":\"editor_unavailable\",\"echo\":\"openEditor\",\"detail\":\"no hosted plugin instance\"}"));
-        engineLog("[editor] open refused — no live instance");
-        return;
-    }
+    // Stage 3d-4: instanceId now ADDRESSES a specific hosted instance (the
+    // frontend sends the track's libraryGroup id); an empty/"hosted" id
+    // resolves to the legacy first instance so old callers keep working.
+    const auto set = g_instances.load(std::memory_order_acquire);
+    HostedPlugin* live = nullptr;
     juce::DynamicObject* obj = json.getDynamicObject();
     std::string iid = obj ? obj->getProperty("instanceId").toString().toStdString() : "";
-    if (iid.empty()) iid = "hosted";
+    if (set != nullptr) {
+        if (!iid.empty()) live = set->byId(iid);
+        if (live == nullptr) live = set->first();   // legacy/unknown id → first live instance
+    }
+    if (live == nullptr || !live->instance) {
+        ws.send(std::string("{\"type\":\"error\",\"code\":\"editor_unavailable\",\"echo\":\"openEditor\",\"detail\":\"no hosted plugin instance\"}"));
+        engineLog("[editor] open refused — no live instance" +
+                  (iid.empty() ? std::string() : " (requested id \"" + iid + "\")"));
+        return;
+    }
+    if (iid.empty()) iid = live->instanceId;   // resolve to the REAL registry id
     bool alreadyOpen = false;
     {
         std::lock_guard<std::mutex> lock(g_editorMutex);
@@ -2470,12 +2741,19 @@ void handle_close_editor(const juce::var& json) {
 
 // {"type":"captureState"} — Stage 3d-3: capture the live instance's state
 // NOW (the frontend sends this on app close; best-effort). The capture runs
-// on the message thread via callAsync and reads g_hostedLive AT EXECUTION
-// time (the pointer captured now may be swapped by then).
+// on the message thread via callAsync and reads the LIVE SET at execution
+// time (a set swap may land between request and execution). Stage 3d-4:
+// captures EVERY live instance — one pluginSavedState per instance, each
+// carrying its instanceId so the app embeds it in the right LibraryGroup.
 void handle_capture_state() {
     juce::MessageManager::callAsync([] {
-        if (auto* live = g_hostedLive.load(std::memory_order_acquire))
-            captureAndBroadcastState(*live, "request");
+        if (auto set = g_instances.load(std::memory_order_acquire)) {
+            for (int slot = 0; slot < kMaxInstances; ++slot) {
+                HostedPlugin* h = set->slots[slot];
+                if (h != nullptr && h->instance)
+                    captureAndBroadcastState(*h, "request");
+            }
+        }
     });
 }
 
@@ -2740,126 +3018,194 @@ int main(int argc, char** argv) {
                 seenGen = g_pluginInitGen;
             }
             const auto t0 = std::chrono::steady_clock::now();
-            std::unique_ptr<HostedPlugin> loaded;
-            const std::string hostErr = loadHostedPlugin(req.pluginVar, loaded);
-            const auto initMs = std::chrono::duration_cast<std::chrono::milliseconds>(
-                std::chrono::steady_clock::now() - t0).count();
+            // ─── Stage 3d-4: instantiate the requested set, entry by entry ───
+            // Per-entry independence: one broken binary must not kill the
+            // other instances of the set (its id RETAINS the previous instance;
+            // the error receipt names it). A newer load supersedes the whole
+            // request (checked after each entry — the set is discarded whole).
+            struct EntryOutcome {
+                std::unique_ptr<HostedPlugin> hosted;
+                std::string err;
+                long long initMs = 0;
+            };
+            std::vector<EntryOutcome> outcomes(req.entries.size());
             bool superseded = false;
-            {
-                std::lock_guard<std::mutex> lock(g_pluginInitMutex);
-                superseded = seenGen != g_pluginInitGen;
-            }
-            if (g_should_exit.load()) { loaded.reset(); continue; }
-            if (superseded) {
-                // A newer load queued behind this instantiate — discard this
-                // instance; the loop picks up the newest request next pass.
-                engineLog("[plugin] init superseded after " + std::to_string(initMs) +
-                          "ms — instance discarded | seq " + std::to_string(req.seq));
-                loaded.reset();
-                continue;
-            }
-            if (!hostErr.empty()) {
-                engineLog("[plugin] FAILED after " + std::to_string(initMs) + "ms: " + hostErr +
-                          " — previous instance retained | seq " + std::to_string(req.seq));
-                std::cout << "[engine] plugin load FAILED: " << hostErr << std::endl;
-                const std::string ps = std::string("{\"type\":\"plugin_state\",\"state\":\"error\",\"detail\":\"") +
-                    escape_json(hostErr) + " — falling back to test synth\"}";
-                for (auto& client : server.getClients())
-                    if (client) client->send(ps);
-                continue;
-            }
-            // Prepare for the REAL device (create-time used nominal
-            // 44100/512) BEFORE the swap — a mis-prepared instance under a
-            // running callback was the other half of the empty-score
-            // regression. D1: log the ACTUAL prepared config (or the nominal
-            // fallback when audio has not started yet).
-            //
-            // Stage 3d-3 — restore the project's embedded state BEFORE the
-            // real-device prepare (documented order: instantiate → state →
-            // prepare). A restore failure NEVER kills hosting: the receipt
-            // names it and the plugin runs on its default state.
-            if (!req.stateB64.empty() && loaded->instance) {
-                // Decode via MemoryOutputStream backed by mb — and read the
-                // TRUE decoded size from the STREAM (mos.getDataSize()), not
-                // mb.getSize(): the stream commits its final size on flush,
-                // and reading the block early yields the PREALLOCATED
-                // capacity (empirically 224 vs the real 197 — the container
-                // format happened to be self-delimiting, but passing a
-                // capacity-garbage size to a plugin is a bug, not a
-                // contract).
-                juce::MemoryBlock mb;
-                juce::MemoryOutputStream mos(mb, false);
-                const bool decoded = juce::Base64::convertFromBase64(mos, juce::String(req.stateB64));
-                mos.flush();
-                const size_t restoredBytes = mos.getDataSize();
-                if (decoded && restoredBytes > 0 && restoredBytes <= kMaxPluginStateBytes * 2) {
-                    try {
-                        loaded->instance->setStateInformation(mos.getData(), static_cast<int>(restoredBytes));
-                        engineLog("[plugin] state restored " + std::to_string(restoredBytes) + " bytes (project embed)");
-                    } catch (const std::exception& e) {
-                        engineLog(std::string("[plugin] state restore FAILED: ") +
-                                  (e.what() ? e.what() : "unknown") + " — running on default state");
-                    } catch (...) {
-                        engineLog("[plugin] state restore FAILED: SEH/unknown — running on default state");
+            for (size_t i = 0; i < req.entries.size(); ++i) {
+                const PluginInitEntry& e = req.entries[i];
+                const auto te0 = std::chrono::steady_clock::now();
+                std::unique_ptr<HostedPlugin> h;
+                const std::string hostErr = loadHostedPlugin(e.pluginVar, e.instanceId, h);
+                outcomes[i].initMs = std::chrono::duration_cast<std::chrono::milliseconds>(
+                    std::chrono::steady_clock::now() - te0).count();
+                {
+                    std::lock_guard<std::mutex> lock(g_pluginInitMutex);
+                    superseded = seenGen != g_pluginInitGen;
+                }
+                if (g_should_exit.load() || superseded) break;
+                if (!hostErr.empty()) {
+                    outcomes[i].err = hostErr;
+                    engineLog("[plugin] FAILED after " + std::to_string(outcomes[i].initMs) + "ms: " + hostErr +
+                              " — instance \"" + e.instanceId + "\" retains its previous instance | seq " +
+                              std::to_string(req.seq));
+                    std::cout << "[engine] plugin load FAILED (" << e.instanceId << "): " << hostErr << std::endl;
+                    const std::string ps = std::string("{\"type\":\"plugin_state\",\"state\":\"error\",\"instanceId\":\"") +
+                        escape_json(e.instanceId) + "\",\"detail\":\"" +
+                        escape_json(hostErr) + " — previous instance retained\"}";
+                    for (auto& client : server.getClients())
+                        if (client) client->send(ps);
+                    continue;
+                }
+                // Stage 3d-3 — restore the project's embedded state BEFORE the
+                // real-device prepare (documented order: instantiate → state →
+                // prepare). A restore failure NEVER kills hosting: the receipt
+                // names it and the plugin runs on its default state.
+                if (!e.stateB64.empty() && h->instance) {
+                    // Decode via MemoryOutputStream backed by mb — and read the
+                    // TRUE decoded size from the STREAM (mos.getDataSize()), not
+                    // mb.getSize(): the stream commits its final size on flush,
+                    // and reading the block early yields the PREALLOCATED
+                    // capacity (empirically 224 vs the real 197 — the container
+                    // format happened to be self-delimiting, but passing a
+                    // capacity-garbage size to a plugin is a bug, not a
+                    // contract).
+                    juce::MemoryBlock mb;
+                    juce::MemoryOutputStream mos(mb, false);
+                    const bool decoded = juce::Base64::convertFromBase64(mos, juce::String(e.stateB64));
+                    mos.flush();
+                    const size_t restoredBytes = mos.getDataSize();
+                    if (decoded && restoredBytes > 0 && restoredBytes <= kMaxPluginStateBytes * 2) {
+                        try {
+                            h->instance->setStateInformation(mos.getData(), static_cast<int>(restoredBytes));
+                            engineLog("[plugin] state restored " + std::to_string(restoredBytes) +
+                                      " bytes (project embed) instance=" + e.instanceId);
+                        } catch (const std::exception& ex) {
+                            engineLog(std::string("[plugin] state restore FAILED: ") +
+                                      (ex.what() ? ex.what() : "unknown") + " — running on default state");
+                        } catch (...) {
+                            engineLog("[plugin] state restore FAILED: SEH/unknown — running on default state");
+                        }
+                    } else {
+                        engineLog("[plugin] state restore SKIPPED — empty/oversized blob (" +
+                                  std::to_string(e.stateB64.size()) + " b64 chars, decoded " +
+                                  std::to_string(decoded ? restoredBytes : 0) + " bytes)");
                     }
-                } else {
-                    engineLog("[plugin] state restore SKIPPED — empty/oversized blob (" +
-                              std::to_string(req.stateB64.size()) + " b64 chars, decoded " +
-                              std::to_string(decoded ? restoredBytes : 0) + " bytes)");
+                }
+                // Prepare for the REAL device (create-time used nominal
+                // 44100/512) BEFORE the swap — a mis-prepared instance under a
+                // running callback was the other half of the empty-score
+                // regression. D1: log the ACTUAL prepared config.
+                const double devRate = g_engine.sampleRate.load();
+                const int devBuf = g_deviceBufferSize.load();
+                if (devRate > 0.0 && h->instance) {
+                    h->instance->setPlayConfigDetails(0, 2, devRate, devBuf);
+                    h->instance->prepareToPlay(devRate, devBuf);
+                }
+                int preparedLat = 0;
+                if (h->instance) {
+                    preparedLat = static_cast<int>(h->instance->getLatencySamples());
+                    h->latencySamples = static_cast<double>(preparedLat);
+                }
+                engineLog("[plugin] prepared (async) rate=" +
+                          std::to_string(static_cast<int>(devRate > 0.0 ? devRate : 44100.0)) +
+                          " buffer=" + std::to_string(devRate > 0.0 ? devBuf : 512) +
+                          " latencySamples=" + std::to_string(preparedLat) +
+                          " instance=" + e.instanceId +
+                          (devRate > 0.0 ? " (real device)" : " (nominal — device not started yet; AboutToStart re-prepares)"));
+                outcomes[i].hosted = std::move(h);
+            }
+            if (g_should_exit.load()) continue;   // unique_ptrs free the set
+            if (superseded) {
+                // A newer load queued behind this instantiate — discard the
+                // whole set; the loop picks up the newest request next pass.
+                long long totalMs = std::chrono::duration_cast<std::chrono::milliseconds>(
+                    std::chrono::steady_clock::now() - t0).count();
+                engineLog("[plugin] init superseded after " + std::to_string(totalMs) +
+                          "ms — instance set discarded | seq " + std::to_string(req.seq));
+                continue;
+            }
+            // ─── Publish the new SET (Stage 3d-4) ───
+            // Successful entries take their parse-assigned slots; a requested
+            // id whose instantiate FAILED RETAINS its previous instance (moved
+            // into the new set at the requested slot — slots always mirror the
+            // request, so the just-published routing table stays truthful);
+            // ids absent from the request retire (the group vanished from the
+            // project). Replaced/retired instances: editors close BEFORE the
+            // swap, state captured after (alive in the 250ms retire grace).
+            auto nextSet = std::make_shared<InstanceSet>();
+            std::unordered_map<std::string, size_t> entryIdxById;
+            for (size_t i = 0; i < req.entries.size(); ++i)
+                entryIdxById[req.entries[i].instanceId] = i;
+            int maxLat = 0;
+            for (size_t i = 0; i < req.entries.size(); ++i) {
+                if (!outcomes[i].hosted) continue;
+                HostedPlugin* raw = outcomes[i].hosted.release();   // the set owns it from here
+                raw->slot = req.entries[i].slot;
+                nextSet->slots[raw->slot] = raw;
+                nextSet->slotLatency[raw->slot] = static_cast<int>(raw->latencySamples);
+                if (nextSet->slotLatency[raw->slot] > maxLat) maxLat = nextSet->slotLatency[raw->slot];
+            }
+            const auto oldSet = g_instances.load(std::memory_order_acquire);
+            std::vector<HostedPlugin*> retiredNow;
+            if (oldSet != nullptr) {
+                for (int s = 0; s < kMaxInstances; ++s) {
+                    HostedPlugin* old = oldSet->slots[s];
+                    if (old == nullptr) continue;
+                    auto eit = entryIdxById.find(old->instanceId);
+                    if (eit == entryIdxById.end()) {
+                        retiredNow.push_back(old);   // group vanished from the project
+                        continue;
+                    }
+                    if (outcomes[eit->second].hosted == nullptr) {
+                        // FAILED entry → retain the previous instance at the
+                        // REQUESTED slot (routing truth = request order).
+                        old->slot = req.entries[eit->second].slot;
+                        nextSet->slots[old->slot] = old;
+                        nextSet->slotLatency[old->slot] = static_cast<int>(old->latencySamples);
+                        if (nextSet->slotLatency[old->slot] > maxLat) maxLat = nextSet->slotLatency[old->slot];
+                    } else {
+                        retiredNow.push_back(old);   // replaced by the fresh instance
+                    }
                 }
             }
-            const double devRate = g_engine.sampleRate.load();
-            const int devBuf = g_deviceBufferSize.load();
-            if (devRate > 0.0 && loaded->instance) {
-                loaded->instance->setPlayConfigDetails(0, 2, devRate, devBuf);
-                loaded->instance->prepareToPlay(devRate, devBuf);
-            }
-            int preparedLat = 0;
-            if (loaded->instance) {
-                preparedLat = static_cast<int>(loaded->instance->getLatencySamples());
-                loaded->latencySamples = static_cast<double>(preparedLat);
-            }
-            g_pluginLatencySamples.store(preparedLat, std::memory_order_release);
-            engineLog("[plugin] prepared (async) rate=" +
-                      std::to_string(static_cast<int>(devRate > 0.0 ? devRate : 44100.0)) +
-                      " buffer=" + std::to_string(devRate > 0.0 ? devBuf : 512) +
-                      " latencySamples=" + std::to_string(preparedLat) +
-                      (devRate > 0.0 ? " (real device)" : " (nominal — device not started yet; AboutToStart re-prepares)"));
-            // Stage 3c-polish (D2): publish via ONE atomic exchange. The
-            // replaced instance is RETIRED — the worker frees it after a
-            // grace period (an in-flight buffer may still hold the pointer);
-            // the audio thread NEVER locks or frees.
-            HostedPlugin* raw = loaded.release();   // g_hostedLive owns it from here
-            // Stage 3d-1: the outgoing instance's editors must not outlive it.
-            // Close ALL editors BEFORE the swap (scheduled — runs on the pump
-            // thread well inside the retire grace period; the audio callback
-            // never touches editors).
-            closeAllEditorsAsync();
-            HostedPlugin* oldRaw = g_hostedLive.exchange(raw, std::memory_order_acq_rel);
-            // Stage 3d-3: capture the OUTGOING instance's state (its patches
-            // are the user's work — a reload must not lose them). oldRaw is
-            // retired but alive (250ms grace); capture immediately.
-            if (oldRaw && oldRaw->instance)
-                captureAndBroadcastState(*oldRaw, "replace");
-            if (oldRaw) {
+            g_pluginLatencySamples.store(maxLat, std::memory_order_release);
+            // Stage 3d-1: the outgoing instances' editors must not outlive
+            // them — close by id BEFORE the swap (scheduled on the pump thread,
+            // well inside the retire grace; the audio callback never touches
+            // editors).
+            for (HostedPlugin* old : retiredNow) closeEditorAsync(old->instanceId);
+            g_instances.store(std::move(nextSet), std::memory_order_acq_rel);
+            // Stage 3d-3: capture the OUTGOING instances' states (the user's
+            // patches — a reload must not lose them). Alive in the retire grace.
+            for (HostedPlugin* old : retiredNow) {
+                if (old->instance) captureAndBroadcastState(*old, "replace");
                 std::lock_guard<std::mutex> rlock(g_retireMutex);
-                g_retiredPlugins.push_back({oldRaw, std::chrono::steady_clock::now()});
+                g_retiredPlugins.push_back({old, std::chrono::steady_clock::now()});
             }
-            const HostedPlugin* live = g_hostedLive.load(std::memory_order_acquire);
-            engineLog("[plugin] loaded name=" + live->name + " vendor=" + live->vendor +
-                      " in " + std::to_string(initMs) + "ms | seq " + std::to_string(req.seq) +
-                      " channels=[" + req.channelsJson + "]");
-            std::cout << "[engine] plugin loaded: name=" << live->name
-                      << " vendor=" << live->vendor
-                      << " init=" << initMs << "ms channels=[" << req.channelsJson << "]" << std::endl;
-            const double latencyMs = (live->latencySamples + 512.0) / 44100.0 * 1000.0;
-            char latBuf[32];
-            std::snprintf(latBuf, sizeof(latBuf), "%.2f", latencyMs);
-            const std::string ps = std::string("{\"type\":\"plugin_state\",\"state\":\"loaded\",\"name\":\"") +
-                escape_json(live->name) + "\",\"vendor\":\"" + escape_json(live->vendor) +
-                "\",\"latencyMs\":" + latBuf + ",\"channels\":[" + req.channelsJson + "]}";
-            for (auto& client : server.getClients())
-                if (client) client->send(ps);
+            // Per-instance loaded receipts (log + plugin_state, additive
+            // instanceId field). Retained-on-failure instances re-report too —
+            // the frontend's editor gate keys on plugin_state per instance.
+            const auto liveSet = g_instances.load(std::memory_order_acquire);
+            for (const auto& e : req.entries) {
+                HostedPlugin* h = liveSet ? liveSet->byId(e.instanceId) : nullptr;
+                if (h == nullptr) continue;
+                engineLog("[plugin] loaded name=" + h->name + " vendor=" + h->vendor +
+                          " instance=" + h->instanceId + " slot=" + std::to_string(h->slot) +
+                          " | seq " + std::to_string(req.seq) +
+                          " channels=[" + e.channelsJson + "]");
+                std::cout << "[engine] plugin loaded: name=" << h->name
+                          << " instance=" << h->instanceId
+                          << " init=" << (outcomes[entryIdxById[e.instanceId]].initMs) << "ms"
+                          << " channels=[" << e.channelsJson << "]" << std::endl;
+                const double latencyMs = (h->latencySamples + 512.0) / 44100.0 * 1000.0;
+                char latBuf[32];
+                std::snprintf(latBuf, sizeof(latBuf), "%.2f", latencyMs);
+                const std::string ps = std::string("{\"type\":\"plugin_state\",\"state\":\"loaded\",\"instanceId\":\"") +
+                    escape_json(h->instanceId) + "\",\"name\":\"" + escape_json(h->name) +
+                    "\",\"vendor\":\"" + escape_json(h->vendor) +
+                    "\",\"latencyMs\":" + latBuf + ",\"channels\":[" + e.channelsJson + "]}";
+                for (auto& client : server.getClients())
+                    if (client) client->send(ps);
+            }
         }
     });
 

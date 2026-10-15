@@ -43,7 +43,7 @@ import { exposedBreakdownRoles, planRotation, resolveRotationConfig } from "../g
 import { consolidateSustains } from "../generation/sustain";
 import { cc7ForWeight, acousticWeightForTrack, DEFAULT_BALANCE_CONFIG } from "../generation/balance";
 import { builtInProfileById, vst3EventAdapter } from "../plugins/expressionMaps";
-import { buildEngineStream, ENGINE_ELIGIBLE_FAMILIES, resolveEngineChannels } from "../engine/engineStream";
+import { buildEngineStream, resolveInstanceRouting } from "../engine/engineStream";
 import userProjectJson from "../fixtures/user-project.json";
 import { mulberry32 } from "../generation/prng";
 import { snapshotDigest } from "../generation/efgGolden";
@@ -938,28 +938,60 @@ export function runUnitTests(): TestResult[] {
       assert(validateProject(project).ok, "absent engineChannel must stay valid (additive optional field)");
       return "1–16 enforced, 'engine channel' error style, cross-track collision rejected, absence valid";
     }),
-    timed("Stage 3c: resolveEngineChannels — explicit wins, first-come eligible order, keys/percussion unassigned", () => {
+    timed("Stage 3d-4: resolveInstanceRouting — explicit wins (per-instance scope), first-come order, ALL plugin-bound tracks route (universal)", () => {
       const project = fixture();
-      // Bind EVERY track to one BBCSO plugin group (profileId + pluginId + path).
+      // Bind EVERY track to ONE plugin group (profileId + pluginId + path).
       const group = { id: "lg_test", name: "BBCSO Test", pluginId: "uid-1", pluginState: null, profileId: "spitfire-bbcso", pluginPath: "C:/VST3/BBCSO.vst3" };
       project.libraryGroups = [group];
       project.tracks.forEach((t) => { t.libraryGroupId = "lg_test"; });
-      const resolved = resolveEngineChannels(project);
-      const eligible = project.tracks.filter((t) => ENGINE_ELIGIBLE_FAMILIES.has(t.family));
-      // First-come by track order over eligible tracks fills 1..N with no gaps.
-      eligible.forEach((t, i) => assert(resolved[t.id] === i + 1, `first-come order broken at ${t.role}: ${resolved[t.id]} != ${i + 1}`));
-      // Keys/percussion are NOT auto-assigned (documented default).
-      project.tracks.filter((t) => !ENGINE_ELIGIBLE_FAMILIES.has(t.family)).forEach((t) => {
-        assert(resolved[t.id] === undefined, `${t.family} must not auto-assign`);
+      const { routing, plugins } = resolveInstanceRouting(project);
+      // 3d-4: EVERY plugin-bound INSTRUMENT track routes (the old
+      // keys/percussion family gate belonged to the BBCSO-era single-instance
+      // model; the user's explicit assignment IS the intent). Structure/
+      // chords/audio stay un-routed (they carry no notes — same rule as the
+      // event builder).
+      project.tracks.forEach((t) => {
+        const r = routing[t.id];
+        if (t.role === "structure" || t.family === "structure" || t.family === "audio") {
+          assert(r === undefined, `${t.family} must stay un-routed (no notes)`);
+          return;
+        }
+        if (r === undefined) return;   // namespace full (16 channels) — documented overflow
+        assert(r.inst === "lg_test", `instance must be the group id, got ${r.inst}`);
+        assert(r.ch >= 1 && r.ch <= 16, `channel out of namespace: ${r.ch}`);
       });
-      // Explicit wins and is SKIPPED by the first-come sweep.
-      const first = eligible[0];
+      // Per-instance channel uniqueness + the 16-channel namespace cap: the
+      // fixture binds 20 instrument tracks to ONE instance — exactly 16 route.
+      const routed = project.tracks.filter((t) => routing[t.id] !== undefined);
+      const chans = routed.map((t) => routing[t.id]!.ch);
+      assert(new Set(chans).size === chans.length, "per-instance channel collision in the resolved map");
+      assert(chans.length === 16, `namespace cap: expected 16 routed tracks, got ${chans.length}`);
+      assert(new Set(chans).size === 16 && chans.every((c) => c >= 1 && c <= 16), "routed channels must fill 1..16 with no gaps");
+      // Exactly ONE instance, in the set, carrying the group's binding.
+      assert(plugins.length === 1 && plugins[0].instanceId === "lg_test" && plugins[0].uid === "uid-1" && plugins[0].path === "C:/VST3/BBCSO.vst3", "instance set must carry the group's plugin");
+      // Explicit wins within its instance and is SKIPPED by the first-come sweep.
+      const first = routed[0];   // a ROUTED instrument track (never structure)
       first.engineChannel = 16;
-      const resolved2 = resolveEngineChannels(project);
-      assert(resolved2[first.id] === 16, "explicit engineChannel must win");
-      eligible.slice(1).forEach((t, i) => assert(resolved2[t.id] === i + 1, `first-come must skip the explicit channel: ${t.role} got ${resolved2[t.id]}`));
-      assert(!Object.values(resolved2).includes(first.engineChannel === 16 ? 16 : -1) || Object.values(resolved2).filter((c) => c === 16).length === 1, "no duplicate channels in the resolved map");
-      return `${eligible.length} eligible tracks first-come (explicit 16 skipped); keys/percussion stay test-synth by default`;
+      const resolved2 = resolveInstanceRouting(project);
+      assert(resolved2.routing[first.id].ch === 16, "explicit engineChannel must win");
+      const routed2 = Object.values(resolved2.routing).map((r) => r.ch);
+      assert(new Set(routed2).size === routed2.length, "explicit channel must not collide with the first-come sweep");
+      return `${project.tracks.length} plugin-bound tracks routed into ONE instance (explicit 16 skipped); universal — no family gate`;
+    }),
+    timed("Stage 3d-4: resolveInstanceRouting — TWO groups ⇒ TWO instances, SAME channel namespaces, group order deterministic", () => {
+      const project = fixture();
+      const gA = { id: "lg_a", name: "BBCSO", pluginId: "uid-a", pluginState: null, profileId: "spitfire-bbcso", pluginPath: "C:/VST3/A.vst3" };
+      const gB = { id: "lg_b", name: "Solo Strings", pluginId: "uid-b", pluginState: null, pluginPath: "C:/VST3/B.vst3" };  // NO profileId — raw-notes path
+      project.libraryGroups = [gA, gB];
+      const tracks = project.tracks.filter((t) => t.family !== "structure" && t.family !== "audio" && t.role !== "structure");
+      tracks[0].libraryGroupId = "lg_a";
+      tracks[1].libraryGroupId = "lg_b";
+      const { routing, plugins } = resolveInstanceRouting(project);
+      assert(routing[tracks[0].id].inst === "lg_a" && routing[tracks[0].id].ch === 1, "track 1 → instance A ch1");
+      assert(routing[tracks[1].id].inst === "lg_b" && routing[tracks[1].id].ch === 1, "track 2 → instance B ch1 (SAME channel, DIFFERENT instance namespace)");
+      assert(plugins.length === 2 && plugins[0].instanceId === "lg_a" && plugins[1].instanceId === "lg_b", "instance set must hold BOTH groups in first-appearance order");
+      assert(plugins[1].state === undefined && plugins[1].uid === "uid-b", "profile-less group still hosts (raw-notes path)");
+      return "2 instances, both ch1 (per-instance namespaces); profile-less group hosts; order deterministic";
     }),
     timed("Stage 3c: buildEngineStream — deterministic M9 profile path (UACC CC#32 pre-trigger, CC7, remap, trackId)", () => {
       const project = fixture();
@@ -981,9 +1013,10 @@ export function runUnitTests(): TestResult[] {
       // Determinism: same project ⇒ byte-identical stream (NO RNG).
       const b = buildEngineStream(project);
       assert(JSON.stringify(a) === JSON.stringify(b), "buildEngineStream is not deterministic");
-      // Plugin binding: ONE hosted instance from the group.
-      assert(a.plugin && a.plugin.uid === "uid-9" && a.plugin.path === "/plugins/BBCSO.vst3", "plugin ref must come from the group");
-      assert(a.channels[target.id] === 1, "first-come channel must be 1");
+      // Plugin binding: the instance set carries the group (3d-4 shape).
+      assert(a.plugins.length === 1 && a.plugins[0].uid === "uid-9" && a.plugins[0].path === "/plugins/BBCSO.vst3", "instance set must come from the group");
+      assert(a.plugins[0].instanceId === "lg_stream", "instanceId must be the group id");
+      assert(a.routing[target.id]?.inst === "lg_stream" && a.routing[target.id]?.ch === 1, "first-come channel must be 1 within the instance namespace");
       // THE M9 PROFILE PATH: SPICCATO → UACC CC#32=42 exactly 38 ticks before
       // the note (20ms at 120bpm/960ppqn), on the track's ENGINE channel.
       const cc32 = a.events.find((e) => e.eventType === "CONTROL_CHANGE" && e.data1 === 32);
@@ -995,7 +1028,7 @@ export function runUnitTests(): TestResult[] {
       assert(!!cc7 && cc7.data2 === cc7ForWeight(acousticWeightForTrack(target)), "CC7 must be cc7ForWeight(acousticWeightForTrack)");
       // The unbound string track keeps notes-only events (test synth), tagged.
       const otherNote = a.events.find((e) => e.trackId === other.id && e.eventType === "NOTE_ON");
-      assert(!!otherNote && otherNote.channel === other.midiChannel && a.channels[other.id] === undefined, "unbound track must stay test-synth with trackId tags");
+      assert(!!otherNote && otherNote.channel === other.midiChannel && a.routing[other.id] === undefined, "unbound track must stay test-synth with trackId tags");
       // Export PARITY: the adapter output (channel-remapped) is the exporter's
       // own translation — no drift in the mapping truth source.
       const profile = builtInProfileById("spitfire-bbcso")!;

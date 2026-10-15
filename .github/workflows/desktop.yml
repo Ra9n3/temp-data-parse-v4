@@ -275,6 +275,48 @@ jobs:
             Remove-Item Env:\SCORCH_TESTVST_LOG -ErrorAction SilentlyContinue
           }
 
+          # Test D2 — Stage 3d-4 MULTI-INSTANCE hosting: the SAME free test
+          # VST3 hosted TWICE (inst-a + inst-b) via plugins[]+routing — the
+          # universal-hosting completion proof. Over the wire: 2× plugin_state
+          # loaded (per-instance ids), BOTH instances audible (summed peak >
+          # single-source cap), per-instance dispatch (wide channels 1 AND 17
+          # in the ledger), mid-play SAME-set reuse, mid-play CHANGED-set
+          # rejection, TWO SIMULTANEOUS editor windows (open inst-b → raise →
+          # open inst-a → per-id closes), state captured PER INSTANCE.
+          # No plugin-name logic anywhere: the second instance is the SAME
+          # binary under a DIFFERENT libraryGroup id — universality is the point.
+          Write-Host "=== Test D2: multi-instance hosting (editors, per-instance state) ==="
+          $env:SCORCH_TESTVST_LOG = "1"
+          $procD2 = Start-Process -FilePath "engine/build/scorch-engine.exe" -ArgumentList "--port","9383","--null-audio" -PassThru -NoNewWindow -RedirectStandardOutput "engine-d2-stdout.txt" -RedirectStandardError "engine-d2-stderr.txt"
+          Start-Sleep -Seconds 3
+          try {
+            if ($procD2.HasExited) {
+              Write-Host "Engine D2 exited early (code=$($procD2.ExitCode)). stdout:"
+              if (Test-Path engine-d2-stdout.txt) { Get-Content engine-d2-stdout.txt }
+              throw "Engine D2 process exited before test could connect"
+            }
+            node .github/scripts/test-engine-protocol.mjs 9383 multi "$env:SCAN_FIXTURES"
+            if ($LASTEXITCODE -ne 0) {
+              Write-Host "Engine D2 stdout:"
+              if (Test-Path engine-d2-stdout.txt) { Get-Content engine-d2-stdout.txt }
+              Write-Host "Engine D2 stderr:"
+              if (Test-Path engine-d2-stderr.txt) { Get-Content engine-d2-stderr.txt }
+              throw "Engine D2 multi-instance test failed"
+            }
+            # Plugin-side proof: BOTH instances received notes on channel 1
+            # (two separate processes-in-process instances of the same binary).
+            $instNotes = Select-String -Path "engine-d2-stdout.txt" -Pattern "\[testvst\].*ch=1 k=NOTE_ON"
+            $instCount = ($instNotes | Measure-Object).Count
+            if ($instCount -lt 2) { throw "multi-instance plugin-side proof missing: expected notes from BOTH instances on ch=1, got $instCount" }
+            Write-Host "Multi-instance plugin-side proof: $instCount ch=1 NOTE_ONs across TWO instances"
+            $procD2.WaitForExit(10000) | Out-Null
+            if (-not $procD2.HasExited -or $procD2.ExitCode -ne 0) { throw "Engine D2 did not exit cleanly (code=$($procD2.ExitCode))" }
+            Write-Host "Engine D2 clean exit 0 (multi-instance hosting verified)"
+          } finally {
+            Stop-Process -Id $procD2.Id -Force -ErrorAction SilentlyContinue
+            Remove-Item Env:\SCORCH_TESTVST_LOG -ErrorAction SilentlyContinue
+          }
+
           # Test E — Stage 3c-hotfix: REAL-PROJECT-SIZED load. The CI gap was
           # scale; this closes it: a deterministic 13,824-event (~1.1 MB)
           # fixture is sent as ONE load message and the loadAck receipt must

@@ -84,6 +84,61 @@ const port = parseInt(process.argv[2] ?? "9378", 10);
 const mode = process.argv[3] ?? "null-audio";
 const fixtureDir = process.argv[4] ?? "";
 const url = `ws://127.0.0.1:${port}`;
+
+// ─── Stage 3d-4: MULTI-INSTANCE mode (argv[3]="multi", argv[4]=fixture dir) ──
+// The universal-hosting completion proof, against the SAME free test VST3
+// hosted TWICE under DIFFERENT instance ids (no plugin-name logic anywhere —
+// the second instance is the SAME binary; universality is the point):
+//   plugins[]  = [{instanceId:"inst-a",...},{instanceId:"inst-b",...}]
+//   routing    = {t1:{inst:"inst-a",ch:1}, t2:{inst:"inst-b",ch:1}}  ← SAME wire
+//                channel 1 on BOTH instances (per-instance namespaces prove
+//                independently — internally wide channels 1 and 17).
+// Asserts, all over the wire:
+//   TWO plugin_state loaded receipts, each with its instanceId + channels [1];
+//   BOTH instances audible: the summed peak EXCEEDS the single-instance
+//     maximum (1.574 pinned by host mode) — one instance alone cannot;
+//   dispatch ledger carries BOTH wide channels (c=1 inst-a, c=17 inst-b) —
+//     per-instance routing is REAL, not a receipt claim;
+//   mid-play SAME-set reload → reuse receipts per instance (no re-instantiate);
+//   mid-play CHANGED-set load (only inst-a) → load_rejected (rolling guard);
+//   editors: openEditor inst-b OPENS (Windows CI; headless runs tolerate
+//     editor_unavailable "no display"), a repeat RAISES (focused), inst-a
+//     opens a SECOND SIMULTANEOUS window, each closes by id;
+//   captureState → one pluginSavedState PER INSTANCE (distinct instanceIds);
+//   clean shutdown.
+const MULTI_META = { bpm: 120, ppqn: 960, timeSignature: { numerator: 4, denominator: 4 }, endTick: 8448 };
+const multiEvents = [
+  { eventType: "CONTROL_CHANGE", channel: 1, data1: 7, data2: 127, timestampTicks: 0, trackId: "t1" },
+  { eventType: "CONTROL_CHANGE", channel: 1, data1: 11, data2: 127, timestampTicks: 0, trackId: "t1" },
+  { eventType: "CONTROL_CHANGE", channel: 1, data1: 7, data2: 127, timestampTicks: 0, trackId: "t2" },
+  { eventType: "CONTROL_CHANGE", channel: 1, data1: 11, data2: 127, timestampTicks: 0, trackId: "t2" },
+  { eventType: "NOTE_ON", channel: 1, data1: 60, data2: 100, timestampTicks: 480, trackId: "t1" },
+  { eventType: "NOTE_OFF", channel: 1, data1: 60, data2: 0, timestampTicks: 8448, trackId: "t1" },
+  { eventType: "NOTE_ON", channel: 1, data1: 67, data2: 100, timestampTicks: 960, trackId: "t2" },
+  { eventType: "NOTE_OFF", channel: 1, data1: 67, data2: 0, timestampTicks: 8448, trackId: "t2" },
+];
+let multiPhase = 0, multiScanSent = false;
+let multiScanPlugin = null;
+const multiReloadSame = () => ({
+  type: "load", seq: 2, events: multiEvents, meta: MULTI_META,
+  plugins: [
+    { instanceId: "inst-a", uid: multiScanPlugin.uid, path: multiScanPlugin.path, name: multiScanPlugin.name },
+    { instanceId: "inst-b", uid: multiScanPlugin.uid, path: multiScanPlugin.path, name: multiScanPlugin.name },
+  ],
+  routing: { t1: { inst: "inst-a", ch: 1 }, t2: { inst: "inst-b", ch: 1 } },
+});
+const multiReloadChanged = () => ({
+  type: "load", seq: 3, events: multiEvents, meta: MULTI_META,
+  plugins: [
+    { instanceId: "inst-a", uid: multiScanPlugin.uid, path: multiScanPlugin.path, name: multiScanPlugin.name },
+  ],
+  routing: { t1: { inst: "inst-a", ch: 1 }, t2: { inst: "inst-a", ch: 2 } },
+});
+let multiStateOk = 0, multiLoaded = new Set(), multiReuseOk = 0, multiRejectOk = false;
+let multiPeak = 0, multiLedger = [], multiWideA = false, multiWideB = false;
+let multiEdOpenB = false, multiEdFocusB = false, multiEdOpenA = false, multiEdCloseA = false, multiEdCloseB = false;
+let multiCapIds = new Set(), multiHeadlessSkip = false;
+
 // Events chosen so a note IS sounding when the test stops (tick ~600): the
 // stop-panic kill count in the engine's stdout ("voices killed (n=…)") is then
 // ≥1 — real evidence, not an empty-path no-op. The first note (0→300) lies
@@ -161,11 +216,13 @@ const timeout = setTimeout(() => {
     console.error(`TIMEOUT at step ${step} (hello=${helloOk} scanSent=${scanSent} scanResult=${scanResultOk} aliveAfterCrash=${aliveAfterCrashOk} defaultScan=${defaultScanOk})`);
   } else if (mode === "host") {
     console.error(`TIMEOUT at step ${step} phase=${hostPhase} (scan=${hostScanSent} pluginState=${hostPluginStateOk} editorNeg=${hostEditorNegOk} editorOpen=${hostEditorOpenOk} editorFocus=${hostEditorFocusOk} editorClose=${hostEditorCloseOk} stateCap=${hostStateCaptureOk} stateRestore=${hostStateRestoreOk} stateRT=${hostStateRoundtripOk} reloadAck=${hostReloadAckOk} reject=${hostRejectOk} stillPlaying=${hostPlayingAfterReject} stops=${hostStopTick1}/${hostStopTick2} peaks A/B/C=${hostPeakA.toFixed(3)}/${hostPeakB.toFixed(3)}/${hostPeakC.toFixed(3)} entries=${hostEntries.length})`);
+  } else if (mode === "multi") {
+    console.error(`TIMEOUT at step ${step} phase=${multiPhase} (scan=${multiScanPlugin ? "ok" : "none"} loaded=${[...multiLoaded].join(",")} reuse=${multiReuseOk} reject=${multiRejectOk} peak=${multiPeak.toFixed(3)} wideA=${multiWideA} wideB=${multiWideB} editors=${multiEdOpenB}/${multiEdFocusB}/${multiEdOpenA}/${multiEdCloseA}/${multiEdCloseB} headlessSkip=${multiHeadlessSkip} captures=${[...multiCapIds].join(",")} entries=${multiLedger.length})`);
   } else {
     console.error(`TIMEOUT at step ${step} (hello=${helloOk} pong=${pongOk} load=${loadOk} noDeviceErr=${noDeviceErrOk} pongAfterErr=${pongAfterErrOk} stillFunctional=${stillFunctionalOk})`);
   }
   process.exit(1);
-}, mode === "host" ? 40000 : 30000);
+}, mode === "host" || mode === "multi" ? 40000 : 30000);
 
 // scan-mode flags
 let scanSent = false, scanResultOk = false, aliveAfterCrashOk = false, defaultScanOk = false;
@@ -346,6 +403,136 @@ ws.addEventListener("message", (event) => {
   const msg = JSON.parse(event.data);
   console.log("[test] RX:", JSON.stringify(msg).slice(0, 140));
   step++;
+
+  if (mode === "multi") {
+    // ── Stage 3d-4: MULTI-INSTANCE hosting proof (see header docs) ──
+    if (msg.type === "hello" && multiPhase === 0) {
+      if (msg.protocol !== 1) fail(`expected protocol 1, got ${msg.protocol}`);
+      if (msg.engineVersion !== "0.7.0") fail(`expected 0.7.0, got ${msg.engineVersion}`);
+      if (!fixtureDir) fail("multi mode requires a fixture dir argument");
+      console.log("[test] hello OK (0.7.0) — scanning for the stand-in host plugin...");
+      multiPhase = 1;
+      ws.send(JSON.stringify({ type: "scan", dirs: [fixtureDir] }));
+    } else if (msg.type === "scan_result" && multiPhase === 1) {
+      const valid = (msg.plugins ?? []).find((p) => p.name === "Scorch Test Synth");
+      if (!valid) fail(`multi mode: stand-in plugin not found in scan (${JSON.stringify(msg.plugins)})`);
+      multiScanPlugin = valid;
+      console.log(`[test] stand-in found: "${valid.name}" — loading TWO instances (inst-a + inst-b, both ch1)`);
+      multiPhase = 2;
+      ws.send(JSON.stringify({ type: "dispatch_log", enable: true }));
+      ws.send(JSON.stringify({
+        type: "load",
+        seq: 1,
+        events: multiEvents,
+        meta: MULTI_META,
+        plugins: [
+          { instanceId: "inst-a", uid: valid.uid, path: valid.path, name: valid.name },
+          { instanceId: "inst-b", uid: valid.uid, path: valid.path, name: valid.name },
+        ],
+        routing: { t1: { inst: "inst-a", ch: 1 }, t2: { inst: "inst-b", ch: 1 } },
+      }));
+    } else if (msg.type === "dispatch" && multiPhase >= 2) {
+      for (const e of msg.entries ?? []) {
+        multiLedger.push(e);
+        if (e.k === 1 && e.c === 1) multiWideA = true;    // inst-a wide channel 1
+        if (e.k === 1 && e.c === 17) multiWideB = true;   // inst-b wide channel 17 (slot 1 + ch 1)
+      }
+    } else if (msg.type === "plugin_state" && multiPhase === 2 && msg.state === "loaded") {
+      if (msg.instanceId !== "inst-a" && msg.instanceId !== "inst-b") {
+        fail(`multi: plugin_state loaded must carry a known instanceId, got ${msg.instanceId}`);
+      }
+      if (multiLoaded.has(msg.instanceId)) fail(`multi: duplicate plugin_state for ${msg.instanceId}`);
+      multiLoaded.add(msg.instanceId);
+      if (JSON.stringify(msg.channels) !== "[1]") fail(`multi: ${msg.instanceId} channels must be [1], got ${JSON.stringify(msg.channels)}`);
+      if (typeof msg.latencyMs !== "number" || msg.latencyMs >= 100) fail(`multi: ${msg.instanceId} latencyMs must be < 100, got ${msg.latencyMs}`);
+      if (multiLoaded.size === 2) {
+        multiStateOk = 2;
+        console.log("[test] phase M-1 ✓ BOTH instances loaded (inst-a + inst-b, each channels [1], latency < 100ms) — playing");
+        multiPhase = 3;
+        ws.send(JSON.stringify({ type: "transport", command: "play", tick: 0 }));
+      }
+    } else if (msg.type === "state" && multiPhase === 3 && msg.playing) {
+      multiPeak = Math.max(multiPeak, msg.peak ?? 0);
+      if (msg.tick >= 2400) {
+        // Peak + routing asserts — then the mid-play reload probes.
+        if (multiPeak <= 1.0) fail(`multi: peak ${multiPeak.toFixed(3)} does not exceed 1.0 — single-instance contributions cap at ≈0.787, so the second instance is not audible in the SUMMED mix`);
+        if (!multiWideA || !multiWideB) fail(`multi: dispatch ledger missing wide-channel proof (c1=${multiWideA} c17=${multiWideB}) — per-instance routing broken`);
+        console.log(`[test] phase M-2 ✓ both instances audible (summed peak ${multiPeak.toFixed(3)} > 1.0, single-source cap ≈0.787) + wide-channel ledger proof (c=1 AND c=17)`);
+        console.log("[test] phase M-3 — SAME-set reload mid-play (reuse fast path, seq 2)...");
+        multiPhase = 4;
+        ws.send(JSON.stringify(multiReloadSame()));
+      }
+    } else if (msg.type === "plugin_state" && multiPhase === 4 && msg.state === "loaded") {
+      multiReuseOk++;
+      if (multiReuseOk === 2) {
+        console.log("[test] phase M-4 ✓ SAME-set reload REUSED both live instances (no re-instantiate) — sending CHANGED set (must REJECT, seq 3)");
+        multiPhase = 5;
+        ws.send(JSON.stringify(multiReloadChanged()));
+      }
+    } else if (msg.type === "error" && multiPhase === 5 && msg.code === "load_rejected") {
+      multiRejectOk = true;
+      console.log(`[test] phase M-5 ✓ changed plugin set REJECTED while playing ("${msg.detail}") — stopping`);
+      multiPhase = 6;
+      ws.send(JSON.stringify({ type: "transport", command: "stop" }));
+    } else if (msg.type === "state" && multiPhase === 6 && msg.playing === false) {
+      console.log("[test] phase M-6 ✓ clean stop after the guard sequence — editor windows (per-instance)...");
+      multiPhase = 7;
+      ws.send(JSON.stringify({ type: "openEditor", instanceId: "inst-b" }));
+    } else if (msg.type === "editorOpened" && multiPhase === 7) {
+      if (msg.instanceId !== "inst-b") fail(`multi: editorOpened must echo inst-b, got ${msg.instanceId}`);
+      if (!msg.width || msg.width <= 0 || !msg.height || msg.height <= 0) fail(`multi: editorOpened lacks real geometry: ${JSON.stringify(msg)}`);
+      multiEdOpenB = true;
+      console.log(`[test] phase M-7 ✓ inst-b editor OPENED ${msg.width}x${msg.height} — repeat must RAISE, then inst-a must open a SECOND window`);
+      multiPhase = 8;
+      ws.send(JSON.stringify({ type: "openEditor", instanceId: "inst-b" }));
+    } else if (msg.type === "editorOpened" && multiPhase === 8) {
+      if (msg.instanceId !== "inst-b" || msg.focused !== true) fail(`multi: repeat openEditor must focus inst-b, got ${JSON.stringify(msg)}`);
+      multiEdFocusB = true;
+      console.log("[test] phase M-8 ✓ repeat RAISED inst-b's window (focused, one editor per instance) — opening inst-a's editor SIMULTANEOUSLY");
+      multiPhase = 9;
+      ws.send(JSON.stringify({ type: "openEditor", instanceId: "inst-a" }));
+    } else if (msg.type === "editorOpened" && multiPhase === 9) {
+      if (msg.instanceId !== "inst-a") fail(`multi: second editor must be inst-a, got ${msg.instanceId}`);
+      if (msg.focused === true) fail("multi: inst-a's first open must OPEN, not focus");
+      multiEdOpenA = true;
+      console.log("[test] phase M-9 ✓ TWO SIMULTANEOUS editors (inst-a + inst-b) — closing each by id");
+      multiPhase = 10;
+      ws.send(JSON.stringify({ type: "closeEditor", instanceId: "inst-a" }));
+    } else if (msg.type === "editorClosed" && multiPhase === 10) {
+      if (msg.instanceId !== "inst-a") fail(`multi: editorClosed must echo inst-a, got ${msg.instanceId}`);
+      multiEdCloseA = true;
+      multiPhase = 11;
+      ws.send(JSON.stringify({ type: "closeEditor", instanceId: "inst-b" }));
+    } else if (msg.type === "editorClosed" && multiPhase === 11) {
+      if (msg.instanceId !== "inst-b") fail(`multi: editorClosed must echo inst-b, got ${msg.instanceId}`);
+      multiEdCloseB = true;
+      console.log("[test] phase M-11 ✓ editors closed cleanly per instance — state capture (per instance)...");
+      multiPhase = 12;
+      ws.send(JSON.stringify({ type: "captureState" }));
+    } else if (msg.type === "pluginSavedState" && multiPhase === 12) {
+      if (!msg.instanceId || (msg.instanceId !== "inst-a" && msg.instanceId !== "inst-b")) {
+        fail(`multi: pluginSavedState must carry a known instanceId, got ${msg.instanceId}`);
+      }
+      multiCapIds.add(msg.instanceId);
+      if (multiCapIds.size === 2) {
+        console.log("[test] phase M-12 ✓ state captured PER INSTANCE (inst-a + inst-b, distinct ids) — shutdown");
+        finishAndShutdown();
+      }
+    } else if (msg.type === "error" && msg.code === "editor_unavailable" && multiPhase === 7 && !multiHeadlessSkip) {
+      // Headless host (local validation): the display guard answers
+      // editor_unavailable — tolerate ONLY that detail and skip the window
+      // phases (Windows CI proves the real geometry path via host-mode J/K/L
+      // AND this mode's strict branches).
+      if (!/no display/i.test(msg.detail ?? "")) fail(`multi: unexpected editor_unavailable detail: ${msg.detail}`);
+      multiHeadlessSkip = true;
+      console.log(`[test] phase M-7 (headless) editor_unavailable tolerated ("${msg.detail}") — skipping to state capture`);
+      multiPhase = 12;
+      ws.send(JSON.stringify({ type: "captureState" }));
+    } else if (msg.type === "error" && multiPhase >= 2 && !multiRejectOk) {
+      fail(`multi mode: unexpected error: ${msg.code} ${msg.detail ?? ""}`);
+    }
+    return;
+  }
 
   if (mode === "host") {
     // ── Stage 3c-2: hosting proof against the free test VST3 ──
@@ -650,7 +837,7 @@ ws.addEventListener("message", (event) => {
     if (msg.type === "hello" && !helloOk) {
       helloOk = true;
       if (msg.protocol !== 1) fail(`expected protocol 1, got ${msg.protocol}`);
-      if (msg.engineVersion !== "0.6.0") fail(`expected 0.6.0, got ${msg.engineVersion}`);
+      if (msg.engineVersion !== "0.7.0") fail(`expected 0.7.0, got ${msg.engineVersion}`);
       // Stage 3c close-out: the dispatch ledger streams what the engine
       // ACTUALLY dispatched — the replay-burst and re-attack asserts read it.
       ws.send(JSON.stringify({ type: "dispatch_log", enable: true }));
@@ -919,6 +1106,29 @@ ws.addEventListener("close", () => {
       process.exit(0);
     } else {
       console.error(`FAILED: hello=${helloOk} pong=${pongOk} error=${errorOk} loadAck=${loadAckOk} load=${loadOk} play1=${play1Ok} adv1=${adv1Ok} stop=${stopOk} play2=${play2Ok} adv2=${adv2Ok} panic=${panicOk} noReplay48=${noReplay48Ok} reattack=${reattackOk}`);
+      process.exit(1);
+    }
+  } else if (mode === "multi") {
+    const editorOk = multiHeadlessSkip || (multiEdOpenB && multiEdFocusB && multiEdOpenA && multiEdCloseA && multiEdCloseB);
+    allOk = multiStateOk === 2 && multiReuseOk === 2 && multiRejectOk &&
+            multiWideA && multiWideB && multiPeak > 1.0 && multiCapIds.size === 2 && editorOk;
+    if (allOk) {
+      console.log("");
+      console.log("========================================");
+      console.log("ALL MULTI-INSTANCE TESTS PASSED (3d-4):");
+      console.log("  TWO instances of ONE plugin: scan → plugins[]+routing → 2× plugin_state loaded (per-instance ids)");
+      console.log(`  summed output: peak ${multiPeak.toFixed(3)} > 1.0 (single-source cap ≈0.787 — BOTH instances audible in the mix)`);
+      console.log("  per-instance routing: dispatch ledger wide channels c=1 (inst-a) AND c=17 (inst-b)");
+      console.log("  mid-play SAME-set reload → both instances REUSED (no re-instantiate)");
+      console.log("  mid-play CHANGED-set load → load_rejected (rolling guard, set form)");
+      console.log(multiHeadlessSkip
+        ? "  editors: SKIPPED on this headless host (editor_unavailable tolerated; Windows CI proves the window path)"
+        : "  editors: inst-b opens → repeat raises (focused) → inst-a opens a SECOND SIMULTANEOUS window → per-id closes");
+      console.log("  captureState → one pluginSavedState PER INSTANCE (distinct instanceIds)");
+      console.log("========================================");
+      process.exit(0);
+    } else {
+      console.error(`FAILED: loaded=${[...multiLoaded].join(",")} reuse=${multiReuseOk} reject=${multiRejectOk} wideA=${multiWideA} wideB=${multiWideB} peak=${multiPeak.toFixed(3)} caps=${[...multiCapIds].join(",")} editors=${multiEdOpenB}/${multiEdFocusB}/${multiEdOpenA}/${multiEdCloseA}/${multiEdCloseB} headlessSkip=${multiHeadlessSkip}`);
       process.exit(1);
     }
   } else if (mode === "host") {
