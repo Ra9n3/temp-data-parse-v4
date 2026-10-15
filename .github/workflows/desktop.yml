@@ -107,7 +107,15 @@ jobs:
           # A compile-gated (mute) build cannot print this.
           $versionOut = & "engine/build/scorch-engine.exe" --version
           Write-Host "Version output: $versionOut"
-          if ($versionOut -notmatch "scorch-engine 0\.3\.0") { throw "Version check failed: $versionOut" }
+          # Expected version is DERIVED from kEngineVersion in main.cpp, not
+          # hardcoded — an engine version bump no longer needs a matching
+          # workflow edit (the 0.4.0 bump broke this gate once), and a stale
+          # prebuilt binary in the checkout still fails this check because the
+          # binary must match the source it was built from.
+          $expected = (Get-Content "engine/src/main.cpp" | Select-String 'kEngineVersion\s*=\s*"([^"]+)"').Matches[0].Groups[1].Value
+          Write-Host "Expected version (from main.cpp): $expected"
+          if (-not $expected) { throw "Could not read kEngineVersion from engine/src/main.cpp" }
+          if ($versionOut -notmatch [regex]::Escape("scorch-engine $expected")) { throw "Version check failed: $versionOut (expected scorch-engine $expected)" }
           if ($versionOut -notmatch "audio: built-in") { throw "Audio compile gate still present — engine reports no audio support" }
 
           # Stage 3c-hotfix: start the protocol-test step with a CLEAN
