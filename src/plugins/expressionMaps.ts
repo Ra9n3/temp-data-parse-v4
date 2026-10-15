@@ -117,6 +117,9 @@ export interface PhysicalMidiStreamEvent {
   timestampTicks: number;
   /** True for the articulation trigger events (KS note-on / UACC CC). */
   isArticulationSwitch?: boolean;
+  /** Stage 3c — owning track id (engine load path only; export streams never
+   * set it). The engine uses it for per-track mute/solo gating + routing. */
+  trackId?: string;
 }
 
 /** Full runtime list of legal articulationMap keys (mirrors the union in

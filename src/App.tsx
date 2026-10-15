@@ -5,7 +5,8 @@ import dorianFixture from "./fixtures/dorian-16bars.json";
 import { TopBar } from "./components/TopBar";
 import { Arranger } from "./components/Arranger";
 import { GenerationSettingsPanel } from "./components/GenerationSettingsPanel";
-import { EngineClient, notesToEngineEvents, type EngineLoadMeta, type EngineStatus, type ScanResultMessage } from "./engine/engineClient";
+import { EngineClient, type EngineLoadMeta, type EngineStatus, type PluginStateMessage, type ScanResultMessage } from "./engine/engineClient";
+import { buildEngineStream } from "./engine/engineStream";
 import { PPQ, projectEndTick, tickToBar } from "./shared/schema";
 import {
   AboutDialog,
@@ -84,8 +85,8 @@ let toastSeq = 0;
 // audio playback state (3b: "ENGINE: playing · bar X" during engine playback),
 // and the audio-init failure state (3b-fix: "engine: no audio device" in red
 // when a transport play was rejected because no device was found).
-function EngineIndicator({ status, rtt, playing, playheadTick, timeSignature, audioError }: {
-  status: EngineStatus; rtt: number | null; playing: boolean; playheadTick: number; timeSignature: { numerator: number; denominator: number }; audioError: string | null;
+function EngineIndicator({ status, rtt, playing, playheadTick, timeSignature, audioError, pluginState }: {
+  status: EngineStatus; rtt: number | null; playing: boolean; playheadTick: number; timeSignature: { numerator: number; denominator: number }; audioError: string | null; pluginState: PluginStateMessage | null;
 }) {
   const label = (() => {
     switch (status) {
@@ -111,7 +112,22 @@ function EngineIndicator({ status, rtt, playing, playheadTick, timeSignature, au
     : status === "failed" ? "text-red-400"
     : status === "off" ? "text-stone-500"
     : "text-amber-400";
-  return <span className={`hidden sm:inline ${color}`}>{label}</span>;
+  return (
+    <span className="hidden sm:inline">
+      <span className={color}>{label}</span>
+      {/* Stage 3c-2: hosting outcome at a glance — hosted plugin name, or the
+          fallback state (error NEVER dead-ends: tracks stay audible on the
+          engine's test synth). */}
+      {status === "ready" && pluginState && (
+        <span className={pluginState.state === "loaded" ? "text-sky-300" : "text-amber-300"}>
+          {" · "}
+          {pluginState.state === "loaded"
+            ? `${pluginState.name ?? "plugin"} hosted`
+            : "plugin failed → test synth"}
+        </span>
+      )}
+    </span>
+  );
 }
 
 export default function App() {
@@ -178,6 +194,9 @@ export default function App() {
   const [engineAudioError, setEngineAudioError] = useState<string | null>(null);
   // Stage 3c-1: the engine's real VST3 scan result (desktop VstBrowser mode).
   const [desktopScan, setDesktopScan] = useState<ScanResultMessage | null>(null);
+  // Stage 3c-2: hosting outcome. Loaded → footer shows the hosted plugin;
+  // error → toast + every track stays on the built-in test synth (no dead-end).
+  const [pluginState, setPluginState] = useState<PluginStateMessage | null>(null);
   // Chord v2 — the editing chord id is LIFTED here (was local to the Arranger
   // lane) so the top-bar panel and the in-lane editor share one source of
   // truth: creation/retarget/Esc/delete all stay in sync. No schema change.
@@ -253,6 +272,16 @@ export default function App() {
       if (disposed) return;
       setDesktopScan(result);
       setVstState(result.plugins.length > 0 ? "loaded" : "empty");
+    });
+    // Stage 3c-2: hosting outcome → toast + footer; error never dead-ends.
+    client.onPluginState((result) => {
+      if (disposed) return;
+      setPluginState(result);
+      if (result.state === "loaded") {
+        toast("ok", `${result.name ?? "Plugin"} hosted (latency ${result.latencyMs?.toFixed(1) ?? "?"}ms, channels ${(result.channels ?? []).join(",")})`);
+      } else {
+        toast("error", `${result.name ?? "Plugin"} failed to load — falling back to test synth: ${result.detail ?? "unknown"}`);
+      }
     });
     engineClientRef.current = client;
 
@@ -374,14 +403,25 @@ export default function App() {
       // engine session). Skip-loading on repeat plays removes the load-ack
       // state{playing:false} round-trip that used to flicker the UI.
       if (lastLoadedRef.current !== project) {
-        const events = notesToEngineEvents(project);
+        // Stage 3c-2: the M9 profile path builds the stream — profiled tracks
+        // ride the hosted plugin (UACC CC#32 pre-trigger, CC7/11/74), the rest
+        // stay on the engine's test synth. Deterministic; no RNG.
+        const stream = buildEngineStream(project);
         const meta: EngineLoadMeta = {
           bpm: project.bpm,
           ppqn: PPQ,
           timeSignature: project.timeSignature,
           endTick: projectEndTick(project),
         };
-        client.load(events, meta);
+        client.load(stream.events, meta, {
+          channels: stream.channels,
+          plugin: stream.plugin ?? undefined,
+        });
+        // Mix state rides every (re)load — the engine rebuilds its snapshot.
+        client.mix(
+          project.tracks.filter((t) => t.muted).map((t) => t.id),
+          project.tracks.filter((t) => t.soloed).map((t) => t.id),
+        );
         lastLoadedRef.current = project;
       }
       // FULL disengagement of the webview synth before the engine renders —
@@ -456,17 +496,38 @@ export default function App() {
   // Reload engine score when project changes during engine playback.
   useEffect(() => {
     if (enginePlaying && engineClientRef.current?.getStatus() === "ready") {
-      const events = notesToEngineEvents(project);
+      const stream = buildEngineStream(project);
       const meta: EngineLoadMeta = {
         bpm: project.bpm,
         ppqn: PPQ,
         timeSignature: project.timeSignature,
         endTick: projectEndTick(project),
       };
-      engineClientRef.current?.load(events, meta);
+      engineClientRef.current?.load(stream.events, meta, {
+        channels: stream.channels,
+        plugin: stream.plugin ?? undefined,
+      });
+      engineClientRef.current?.mix(
+        project.tracks.filter((t) => t.muted).map((t) => t.id),
+        project.tracks.filter((t) => t.soloed).map((t) => t.id),
+      );
       lastLoadedRef.current = project; // cache stays in sync (see enginePlay)
     }
   }, [project, enginePlaying]);
+
+  // Stage 3c-2 — live mute/solo: while the engine drives, every toggle ships
+  // a mix message so the engine re-gates BEFORE any channel send (and flushes
+  // lost channels — the change is audible immediately).
+  const mixSignature =
+    project.tracks.map((t) => `${t.id}:${t.muted ? 1 : 0}${t.soloed ? 1 : 0}`).join("|");
+  useEffect(() => {
+    if (!engineDrive || engineClientRef.current?.getStatus() !== "ready") return;
+    engineClientRef.current?.mix(
+      project.tracks.filter((t) => t.muted).map((t) => t.id),
+      project.tracks.filter((t) => t.soloed).map((t) => t.id),
+    );
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [mixSignature, engineDrive]);
 
   const noteCount = useMemo(
     () => project.tracks.reduce((n, t) => n + t.notes.length, 0),
@@ -678,7 +739,7 @@ export default function App() {
           </span>
         </div>
         <div className="flex items-center gap-2">
-          <EngineIndicator status={engineStatus} rtt={engineRtt} playing={enginePlaying} playheadTick={enginePlayheadTick} timeSignature={project.timeSignature} audioError={engineAudioError} />
+          <EngineIndicator status={engineStatus} rtt={engineRtt} playing={enginePlaying} playheadTick={enginePlayheadTick} timeSignature={project.timeSignature} audioError={engineAudioError} pluginState={pluginState} />
           <button type="button" className="hover:text-stone-200" onClick={() => jsonInputRef.current?.click()} title="Import project JSON">
             Import
           </button>
@@ -728,29 +789,55 @@ export default function App() {
         onClose={() => setVstOpen(false)}
         onState={setVstState}
         desktop={desktopVst}
-        onPick={(pluginId, name) => {
+        onPick={(pluginId, name, pluginPath) => {
           if (!vstTrackId) return;
-          const g = { id: makeId("lg"), name, pluginId, pluginState: null };
+          // Stage 3c — binding a scanned plugin ALSO auto-matches a built-in
+          // expression map when the name identifies one (deterministic name
+          // heuristic, documented): "BBCSO"/"BBC Symphony" ⇒ spitfire-bbcso.
+          // The profile drives UACC CC#32 / 20ms pre-trigger / cc74Scale 0.5;
+          // the pluginId+pluginPath bind the hosted binary.
+          const profileId = /bbcso|bbc symphony/i.test(name) ? "spitfire-bbcso" : undefined;
+          const g = {
+            id: makeId("lg"),
+            name,
+            pluginId,
+            pluginState: null,
+            ...(pluginPath ? { pluginPath } : {}),
+            ...(profileId ? { profileId } : {}),
+          };
           commit({
             ...project,
             libraryGroups: [...project.libraryGroups, g],
             tracks: project.tracks.map((t) => (t.id === vstTrackId ? { ...t, libraryGroupId: g.id } : t)),
           });
           setPluginLabels((p) => ({ ...p, [vstTrackId]: name }));
-          toast("ok", `Assigned ${name}`);
+          toast("ok", `Assigned ${name}${profileId ? " (expression map bound — tracks route to its engine channels)" : ""}`);
         }}
         onPickProfile={(profileId, name) => {
           if (!vstTrackId) return;
           // Module 9: built-in expression maps create the group with profileId
           // set (no scanned plugin); the exporter then takes the profile path.
-          const g = { id: makeId("lg"), name, pluginId: null, pluginState: null, profileId };
+          // Stage 3c — in desktop mode a matching scanned plugin binds too
+          // (same deterministic name heuristic as onPick), so the map is
+          // playable through the hosted instance, not just export.
+          const match = desktopScan?.plugins.find((p) =>
+            /bbcso|bbc symphony/i.test(p.name)) ?? undefined;
+          const needsBbcso = profileId === "spitfire-bbcso";
+          const g = {
+            id: makeId("lg"),
+            name,
+            pluginId: needsBbcso && match ? match.uid : null,
+            pluginState: null,
+            profileId,
+            ...(needsBbcso && match ? { pluginPath: match.path } : {}),
+          };
           commit({
             ...project,
             libraryGroups: [...project.libraryGroups, g],
             tracks: project.tracks.map((t) => (t.id === vstTrackId ? { ...t, libraryGroupId: g.id } : t)),
           });
           setPluginLabels((p) => ({ ...p, [vstTrackId]: name }));
-          toast("ok", `Assigned ${name} (expression map)`);
+          toast("ok", `Assigned ${name} (expression map)${needsBbcso && match ? " + hosted plugin" : ""}`);
         }}
       />
       <ExportDialog

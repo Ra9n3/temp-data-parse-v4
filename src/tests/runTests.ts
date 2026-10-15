@@ -3,7 +3,7 @@ import { Midi } from "@tonejs/midi";
 import { parseChord } from "../shared/schema/chords";
 import { cloneProject, createDefaultProject, nextMidiChannel } from "../shared/schema/factory";
 import { type ModeName, type Project, type TimeSignature } from "../shared/schema/types";
-import { msToTicks, ticksPerBar, ticksPerBeat } from "../shared/schema/time";
+import { msToTicks, projectEndTick, ticksPerBar, ticksPerBeat } from "../shared/schema/time";
 import { validateProject } from "../shared/schema/validate";
 import { exportMergedMidi, exportPerTrackMidi, midiDurationTicks, parseMidiNotes } from "../export/midi";
 import { validateDoubleStop } from "../generation/strings";
@@ -41,7 +41,9 @@ import { realizeRhythm } from "../generation/rhythm";
 import { guardTrackNotes, verifyMonophonyInvariant } from "../generation/monophony";
 import { exposedBreakdownRoles, planRotation, resolveRotationConfig } from "../generation/rotation";
 import { consolidateSustains } from "../generation/sustain";
-import { cc7ForWeight, DEFAULT_BALANCE_CONFIG } from "../generation/balance";
+import { cc7ForWeight, acousticWeightForTrack, DEFAULT_BALANCE_CONFIG } from "../generation/balance";
+import { builtInProfileById, vst3EventAdapter } from "../plugins/expressionMaps";
+import { buildEngineStream, ENGINE_ELIGIBLE_FAMILIES, resolveEngineChannels } from "../engine/engineStream";
 import userProjectJson from "../fixtures/user-project.json";
 import { mulberry32 } from "../generation/prng";
 import { snapshotDigest } from "../generation/efgGolden";
@@ -914,6 +916,110 @@ export function runUnitTests(): TestResult[] {
       goodConfig.generationSettings = { ...(goodConfig.generationSettings ?? DEFAULT_GENERATION_SETTINGS), strings: { sectionProfile: "CHAMBER_12", panningProfile: "STUDIO_CENTERED_BASS" } };
       assert(validateProject(goodConfig).ok, "valid strings config rejected");
       return "S.7 both vectors pinned; CLASSICAL pans exported per string track; strings config validated";
+    }),
+    timed("Stage 3c: engineChannel validation (1–16, 'engine channel' style) + collision", () => {
+      const project = fixture();
+      const v1 = project.tracks.find((t) => t.family === "strings")!;
+      const v2 = project.tracks.filter((t) => t.family === "strings")[1] ?? v1;
+      v1.engineChannel = 3;
+      assert(validateProject(project).ok, "valid engineChannel 3 rejected");
+      v1.engineChannel = 0;
+      const r0 = validateProject(project);
+      assert(!r0.ok && r0.errors.some((e) => e.includes("engineChannel must be an integer 1–16 (engine channel)")), "engineChannel 0 must fail with the engine-channel error style");
+      v1.engineChannel = 17;
+      const r17 = validateProject(project);
+      assert(!r17.ok && r17.errors.some((e) => e.includes("(engine channel)")), "engineChannel 17 must fail");
+      v1.engineChannel = 5;
+      v2.engineChannel = 5;
+      const rCollide = validateProject(project);
+      assert(!rCollide.ok && rCollide.errors.some((e) => e.includes("engine channel 5 is already assigned to") && e.includes("(engine channel collision)")), "two tracks on one engine channel must collide");
+      delete v2.engineChannel;
+      delete (v1 as { engineChannel?: number }).engineChannel;
+      assert(validateProject(project).ok, "absent engineChannel must stay valid (additive optional field)");
+      return "1–16 enforced, 'engine channel' error style, cross-track collision rejected, absence valid";
+    }),
+    timed("Stage 3c: resolveEngineChannels — explicit wins, first-come eligible order, keys/percussion unassigned", () => {
+      const project = fixture();
+      // Bind EVERY track to one BBCSO plugin group (profileId + pluginId + path).
+      const group = { id: "lg_test", name: "BBCSO Test", pluginId: "uid-1", pluginState: null, profileId: "spitfire-bbcso", pluginPath: "C:/VST3/BBCSO.vst3" };
+      project.libraryGroups = [group];
+      project.tracks.forEach((t) => { t.libraryGroupId = "lg_test"; });
+      const resolved = resolveEngineChannels(project);
+      const eligible = project.tracks.filter((t) => ENGINE_ELIGIBLE_FAMILIES.has(t.family));
+      // First-come by track order over eligible tracks fills 1..N with no gaps.
+      eligible.forEach((t, i) => assert(resolved[t.id] === i + 1, `first-come order broken at ${t.role}: ${resolved[t.id]} != ${i + 1}`));
+      // Keys/percussion are NOT auto-assigned (documented default).
+      project.tracks.filter((t) => !ENGINE_ELIGIBLE_FAMILIES.has(t.family)).forEach((t) => {
+        assert(resolved[t.id] === undefined, `${t.family} must not auto-assign`);
+      });
+      // Explicit wins and is SKIPPED by the first-come sweep.
+      const first = eligible[0];
+      first.engineChannel = 16;
+      const resolved2 = resolveEngineChannels(project);
+      assert(resolved2[first.id] === 16, "explicit engineChannel must win");
+      eligible.slice(1).forEach((t, i) => assert(resolved2[t.id] === i + 1, `first-come must skip the explicit channel: ${t.role} got ${resolved2[t.id]}`));
+      assert(!Object.values(resolved2).includes(first.engineChannel === 16 ? 16 : -1) || Object.values(resolved2).filter((c) => c === 16).length === 1, "no duplicate channels in the resolved map");
+      return `${eligible.length} eligible tracks first-come (explicit 16 skipped); keys/percussion stay test-synth by default`;
+    }),
+    timed("Stage 3c: buildEngineStream — deterministic M9 profile path (UACC CC#32 pre-trigger, CC7, remap, trackId)", () => {
+      const project = fixture();
+      project.bpm = 120;  // pin the arithmetic: 20ms = 38 ticks at 120bpm/960ppqn
+      const group = { id: "lg_stream", name: "BBCSO Stream", pluginId: "uid-9", pluginState: null, profileId: "spitfire-bbcso", pluginPath: "/plugins/BBCSO.vst3" };
+      project.libraryGroups = [group];
+      const strings = project.tracks.filter((t) => t.family === "strings");
+      const target = strings[0];
+      project.tracks.forEach((t) => { t.libraryGroupId = t === target ? "lg_stream" : null; });
+      target.notes = [
+        { pitch: 60, startTick: 480, durationTicks: 480, velocity: 90, technique: "SPICCATO" },
+        { pitch: 62, startTick: 960, durationTicks: 480, velocity: 80, technique: "LEGATO" },
+      ];
+      // Give the (unbound) second string track one note BEFORE the build —
+      // its notes-only events must appear tagged for engine-side gating.
+      const other = strings[1];
+      other.notes = [{ pitch: 55, startTick: 240, durationTicks: 240, velocity: 70 }];
+      const a = buildEngineStream(project);
+      // Determinism: same project ⇒ byte-identical stream (NO RNG).
+      const b = buildEngineStream(project);
+      assert(JSON.stringify(a) === JSON.stringify(b), "buildEngineStream is not deterministic");
+      // Plugin binding: ONE hosted instance from the group.
+      assert(a.plugin && a.plugin.uid === "uid-9" && a.plugin.path === "/plugins/BBCSO.vst3", "plugin ref must come from the group");
+      assert(a.channels[target.id] === 1, "first-come channel must be 1");
+      // THE M9 PROFILE PATH: SPICCATO → UACC CC#32=42 exactly 38 ticks before
+      // the note (20ms at 120bpm/960ppqn), on the track's ENGINE channel.
+      const cc32 = a.events.find((e) => e.eventType === "CONTROL_CHANGE" && e.data1 === 32);
+      assert(!!cc32 && cc32.data2 === 42 && cc32.timestampTicks === 442 && cc32.channel === 1 && cc32.trackId === target.id, `UACC CC#32 pre-trigger event wrong: ${JSON.stringify(cc32)}`);
+      const noteOn = a.events.find((e) => e.eventType === "NOTE_ON" && e.data1 === 60);
+      assert(!!noteOn && noteOn.timestampTicks === 480 && noteOn.channel === 1 && noteOn.trackId === target.id, "note event must ride the engine channel + trackId");
+      // CC7 fader from the SAME balance table the exporter uses.
+      const cc7 = a.events.find((e) => e.eventType === "CONTROL_CHANGE" && e.data1 === 7);
+      assert(!!cc7 && cc7.data2 === cc7ForWeight(acousticWeightForTrack(target)), "CC7 must be cc7ForWeight(acousticWeightForTrack)");
+      // The unbound string track keeps notes-only events (test synth), tagged.
+      const otherNote = a.events.find((e) => e.trackId === other.id && e.eventType === "NOTE_ON");
+      assert(!!otherNote && otherNote.channel === other.midiChannel && a.channels[other.id] === undefined, "unbound track must stay test-synth with trackId tags");
+      // Export PARITY: the adapter output (channel-remapped) is the exporter's
+      // own translation — no drift in the mapping truth source.
+      const profile = builtInProfileById("spitfire-bbcso")!;
+      const exported = vst3EventAdapter(target.notes, profile, project.bpm, { endTick: projectEndTick(project) });
+      const cc32Export = exported.find((e) => e.eventType === "CONTROL_CHANGE" && e.data1 === 32);
+      assert(!!cc32Export && cc32Export.timestampTicks === 442, "export adapter must agree on the pre-trigger tick");
+      return "deterministic; CC#32=42 @ 480−38 ticks; CC7 from balance; remap+trackId; unbound tracks test-synth; export parity";
+    }),
+    timed("Stage 3c: vst3EventAdapter pre-trigger arithmetic — 20ms→38 ticks @120bpm, zero-clamp at transport start", () => {
+      assert(Math.round(msToTicks(20, 120)) === 38, "20ms at 120bpm/960ppqn must be 38 ticks");
+      const profile = builtInProfileById("spitfire-bbcso")!;
+      const early = vst3EventAdapter(
+        [{ pitch: 60, startTick: 10, durationTicks: 240, velocity: 80, technique: "SPICCATO" }],
+        profile, 120,
+      );
+      const earlyCc = early.find((e) => e.eventType === "CONTROL_CHANGE" && e.data1 === 32);
+      assert(!!earlyCc && earlyCc.timestampTicks === 0, "pre-trigger clamps at tick 0 (transport start) — no negative ticks");
+      const late = vst3EventAdapter(
+        [{ pitch: 60, startTick: 1042, durationTicks: 240, velocity: 80, technique: "SPICCATO" }],
+        profile, 120,
+      );
+      const lateCc = late.find((e) => e.eventType === "CONTROL_CHANGE" && e.data1 === 32);
+      assert(!!lateCc && lateCc.timestampTicks === 1004, "1042 − 38 = 1004 (real pre-trigger, no clamp)");
+      return "20ms = 38 ticks @120bpm; clamp only at transport start; real offsets elsewhere";
     }),
   ];
 }

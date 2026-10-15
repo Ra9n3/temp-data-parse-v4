@@ -63,7 +63,9 @@ export function VstBrowser({
   open: boolean;
   state: PluginScanState;
   onClose: () => void;
-  onPick: (id: string, name: string) => void;
+  /** Desktop real-scan picks pass the scanned path as the 3rd argument
+   * (browser mock picks pass two — no on-disk binary to bind). */
+  onPick: (id: string, name: string, path?: string) => void;
   /** Module 9: picking a built-in expression map creates the group with
    * profileId set (instead of a scanned pluginId) and assigns the track. */
   onPickProfile: (profileId: string, name: string) => void;
@@ -191,7 +193,7 @@ export function VstBrowser({
                     onClick={() => {
                       if (isReal) {
                         const r = p as ScannedPlugin;
-                        onPick(r.uid, r.name);
+                        onPick(r.uid, r.name, r.path);
                       } else {
                         const m = p as { id: string; rawName: string };
                         onPick(m.id, pluginDisplayName(m.rawName));

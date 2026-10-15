@@ -406,6 +406,13 @@ export interface Track {
   libraryGroupId: string | null;
   /** 1–16, informational for export / hosting. */
   midiChannel: number;
+  /** Stage 3c — ENGINE channel for the hosted VST3 (BBCSO standalone
+   * multi-timbral): when set (1–16) the track renders through the hosted
+   * plugin on this MIDI channel; when absent the track either auto-assigns
+   * (first-come by track order among eligible families — see
+   * engine/engineStream.ts resolveEngineChannels) or stays on the built-in
+   * test synth. Optional + additive; export ignores it (byte-identical). */
+  engineChannel?: number;
   frozen: boolean;
   notes: Note[];
 }
@@ -425,6 +432,10 @@ export interface LibraryGroup {
    * (profile.preTriggerOffsetMs owns the pre-trigger, reconciliation #2);
    * set both profileId and keySwitchMap ⇒ profileId wins (exporter warns). */
   profileId?: string;
+  /** Stage 3c — the scanned VST3's on-disk path (from the engine scan). Bound
+   * alongside pluginId so the engine can host THIS binary by id + path.
+   * Optional + additive; validate-style checks live in engineStream. */
+  pluginPath?: string;
 }
 
 export interface Project {

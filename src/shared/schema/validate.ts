@@ -80,6 +80,12 @@ function validateTrack(track: Track, index: number, errors: string[]): void {
   if (!isInt(track.midiChannel) || track.midiChannel < 1 || track.midiChannel > 16) {
     errors.push(`${p}.midiChannel must be an integer 1–16`);
   }
+  // Stage 3c — engine channel for the hosted VST3 (optional, additive).
+  if (track.engineChannel !== undefined) {
+    if (!isInt(track.engineChannel) || track.engineChannel < 1 || track.engineChannel > 16) {
+      errors.push(`${p}.engineChannel must be an integer 1–16 (engine channel)`);
+    }
+  }
   if (!Array.isArray(track.notes)) {
     errors.push(`${p}.notes must be an array`);
     return;
@@ -448,6 +454,22 @@ export function validateProject(input: unknown): ValidationResult {
         errors.push(
           `tracks[${i}] (${t.name ?? t.id}) references missing libraryGroupId "${t.libraryGroupId}"`,
         );
+      }
+    });
+    // Stage 3c — engine channel collision (explicit assignments only): two
+    // tracks must not claim the same hosted channel. Error style follows the
+    // "engine channel" wording (brief), reported at assignment time.
+    const engineChannelOwner = new Map<number, string>();
+    p.tracks.forEach((t, i) => {
+      const ch = (t as Track)?.engineChannel;
+      if (typeof ch !== "number") return;
+      const owner = engineChannelOwner.get(ch);
+      if (owner !== undefined) {
+        errors.push(
+          `tracks[${i}] (${t.name ?? t.id}) engine channel ${ch} is already assigned to ${owner} (engine channel collision)`,
+        );
+      } else {
+        engineChannelOwner.set(ch, t.name ?? t.id ?? `tracks[${i}]`);
       }
     });
   }

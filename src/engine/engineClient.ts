@@ -63,7 +63,22 @@ export interface ScanResultMessage {
   scannedDirs: { dir: string; status: string }[];
 }
 
-type EngineMessage = HelloMessage | PongMessage | ErrorMessage | StateMessage | ScanResultMessage;
+/** Stage 3c-2 — hosting outcome. "loaded" carries the real name/vendor/latency
+ * and the hosted channels; "error" carries the detail and means ALL tracks
+ * fell back to the engine's built-in test synth (the app never dead-ends). */
+export interface PluginStateMessage {
+  type: "plugin_state";
+  state: "loaded" | "error";
+  name?: string;
+  vendor?: string;
+  /** Total reported latency (plugin + device), milliseconds. */
+  latencyMs?: number;
+  /** The hosted channels (sorted). */
+  channels?: number[];
+  detail?: string;
+}
+
+type EngineMessage = HelloMessage | PongMessage | ErrorMessage | StateMessage | ScanResultMessage | PluginStateMessage;
 
 // Deterministic backoff sequence (seconds): 1, 2, 4, 8, 16 — no jitter.
 const BACKOFF_SEQUENCE = [1, 2, 4, 8, 16] as const;
@@ -127,6 +142,7 @@ export class EngineClient {
   private onStateChange: ((playing: boolean, tick: number) => void) | null = null;
   private onAudioErrorChange: ((code: string | null, detail: string) => void) | null = null;
   private onScanResultChange: ((result: ScanResultMessage) => void) | null = null;
+  private onPluginStateChange: ((result: PluginStateMessage) => void) | null = null;
 
   constructor(onStatusChange: (status: EngineStatus, rtt: number | null) => void) {
     this.onStatusChange = onStatusChange;
@@ -153,6 +169,11 @@ export class EngineClient {
   /** Stage 3c-1: register a callback for VST3 scan results. */
   onScanResult(cb: (result: ScanResultMessage) => void): void {
     this.onScanResultChange = cb;
+  }
+
+  /** Stage 3c-2: register a callback for plugin hosting outcomes. */
+  onPluginState(cb: (result: PluginStateMessage) => void): void {
+    this.onPluginStateChange = cb;
   }
 
   connect(port: number): void {
@@ -198,6 +219,8 @@ export class EngineClient {
           }
         } else if (msg.type === "scan_result") {
           this.onScanResultChange?.(msg);
+        } else if (msg.type === "plugin_state") {
+          this.onPluginStateChange?.(msg);
         } else if (msg.type === "error") {
           console.warn("[engine] error:", msg.code, msg.echo, msg.detail ?? "");
           // Stage 3b-fix: surface audio-init failure to the UI (footer shows
@@ -233,10 +256,33 @@ export class EngineClient {
     }
   }
 
-  /** Load events + meta into the engine (full replace, idempotent). */
-  load(events: PhysicalMidiStreamEvent[], meta: EngineLoadMeta): void {
+  /**
+   * Stage 3c-2: per-track mute/solo. The engine gates at dispatch BEFORE any
+   * channel send (and CC120-flushes channels whose audibility was lost, so
+   * the change is immediately audible).
+   */
+  mix(mutedTrackIds: string[], soloTrackIds: string[]): void {
     if (this.ws && this.ws.readyState === WebSocket.OPEN) {
-      this.ws.send(JSON.stringify({ type: "load", events, meta }));
+      this.ws.send(JSON.stringify({ type: "mix", mutedTracks: mutedTrackIds, soloTracks: soloTrackIds }));
+    }
+  }
+
+  /**
+   * Load events + meta into the engine (full replace, idempotent).
+   * Stage 3c-2 additive options: `channels` (trackId → 1–16 hosted channel
+   * map) and `plugin` (uid+path from the scan — host ONE VST3 for the whole
+   * orchestra). Omitted = legacy test-synth load (byte-identical to 3b).
+   */
+  load(
+    events: PhysicalMidiStreamEvent[],
+    meta: EngineLoadMeta,
+    opts?: { channels?: Record<string, number>; plugin?: { uid: string; path: string; name?: string } },
+  ): void {
+    if (this.ws && this.ws.readyState === WebSocket.OPEN) {
+      const msg: Record<string, unknown> = { type: "load", events, meta };
+      if (opts?.channels && Object.keys(opts.channels).length > 0) msg.channels = opts.channels;
+      if (opts?.plugin) msg.plugin = opts.plugin;
+      this.ws.send(JSON.stringify(msg));
     }
   }
 

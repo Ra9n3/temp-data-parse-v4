@@ -214,6 +214,47 @@ jobs:
             Stop-Process -Id $procC.Id -Force -ErrorAction SilentlyContinue
           }
 
+          # Test D — Stage 3c-2 HOSTING: load the free test VST3 by uid+path,
+          # prove over the wire: plugin_state loaded (latency<100ms), UACC
+          # pre-trigger arithmetic (CC#32 exactly 38 ticks ≈ 20ms before its
+          # note, sample-accurate), channel routing (ch1+ch2 dispatched AND
+          # received by the plugin — the [testvst] stdout log), AUDIBLE
+          # mute/solo gating (peaks: unmuted > 0, muted = 0, gated note never
+          # dispatched, unmute restores), stop kills hosted voices.
+          Write-Host "=== Test D: VST3 hosting + channel routing + audible gating ==="
+          $env:SCORCH_TESTVST_LOG = "1"
+          $procD = Start-Process -FilePath "engine/build/scorch-engine.exe" -ArgumentList "--port","9381","--null-audio" -PassThru -NoNewWindow -RedirectStandardOutput "engine-d-stdout.txt" -RedirectStandardError "engine-d-stderr.txt"
+          Start-Sleep -Seconds 3
+          try {
+            if ($procD.HasExited) {
+              Write-Host "Engine D exited early (code=$($procD.ExitCode)). stdout:"
+              if (Test-Path engine-d-stdout.txt) { Get-Content engine-d-stdout.txt }
+              throw "Engine D process exited before test could connect"
+            }
+            node .github/scripts/test-engine-protocol.mjs 9381 host "$env:SCAN_FIXTURES"
+            if ($LASTEXITCODE -ne 0) {
+              Write-Host "Engine D stdout:"
+              if (Test-Path engine-d-stdout.txt) { Get-Content engine-d-stdout.txt }
+              Write-Host "Engine D stderr:"
+              if (Test-Path engine-d-stderr.txt) { Get-Content engine-d-stderr.txt }
+              throw "Engine D hosting test failed"
+            }
+            # END-TO-END routing proof from the PLUGIN's own stdout: the hosted
+            # plugin received the dispatched notes on BOTH hosted channels.
+            $ch2Note = Select-String -Path "engine-d-stdout.txt" -Pattern "\[testvst\].*ch=2 k=NOTE_ON"
+            if (-not $ch2Note) { throw "channel routing proof missing: plugin never received a ch=2 NOTE_ON" }
+            Write-Host "Plugin-side routing proof: $($ch2Note.Line[0])"
+            $pluginLoaded = Select-String -Path "engine-d-stdout.txt" -Pattern "\[engine\] plugin loaded: name=Scorch Test Synth"
+            if (-not $pluginLoaded) { throw "plugin-loaded proof missing from engine stdout" }
+            foreach ($l in $pluginLoaded.Line) { Write-Host "Hosting proof: $l" }
+            $procD.WaitForExit(10000) | Out-Null
+            if (-not $procD.HasExited -or $procD.ExitCode -ne 0) { throw "Engine D did not exit cleanly (code=$($procD.ExitCode))" }
+            Write-Host "Engine D clean exit 0 (hosting + routing + gating verified)"
+          } finally {
+            Stop-Process -Id $procD.Id -Force -ErrorAction SilentlyContinue
+            Remove-Item Env:\SCORCH_TESTVST_LOG -ErrorAction SilentlyContinue
+          }
+
       - run: npm ci
 
       - name: Build web (vite)
