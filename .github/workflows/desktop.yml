@@ -386,12 +386,17 @@ jobs:
           if ($releaseReceipts -lt 3) { throw "engine.log missing musical-release stop receipts (got $releaseReceipts, need 3)" }
           $reattackReceipts = (Select-String -Path $engineLog -Pattern "resume re-attacks: [1-9]").Count
           if ($reattackReceipts -lt 1) { throw "engine.log missing a resume re-attack receipt (straddle handling regressed)" }
-          # Stage 3d-1: editor-window receipts — unavailable (negative), ONE
-          # real open (single editor per instance), one focus echo, one close.
+          # Stage 3d-1 + 3d-4: editor-window receipts — unavailable (negative),
+          # one REAL open per DISTINCT instance (the one-editor-per-INSTANCE
+          # invariant: a repeat request must RAISE, never re-open — duplicates
+          # of the same instance id are the regression signal), one focus echo
+          # per repeat, closes per id. The suite opens 3 editors across 3
+          # distinct instances: host-mode "hosted" + multi-mode inst-a/inst-b.
           $editorNegReceipts = (Select-String -Path $engineLog -Pattern "\[editor\] open refused — no live instance").Count
           if ($editorNegReceipts -lt 1) { throw "engine.log missing the editor_unavailable negative-path receipt" }
-          $editorOpenReceipts = (Select-String -Path $engineLog -Pattern "\[editor\] opened instance=").Count
-          if ($editorOpenReceipts -ne 1) { throw "engine.log must show EXACTLY ONE editor open (repeat request focuses, got $editorOpenReceipts)" }
+          $editorOpenIds = (Select-String -Path $engineLog -Pattern "\[editor\] opened instance=([^\s]+)").Matches | ForEach-Object { $_.Groups[1].Value }
+          if ($editorOpenIds.Count -ne ($editorOpenIds | Sort-Object -Unique).Count) { throw "engine.log shows a DUPLICATE editor open for the same instance (one-editor-per-instance broken): $($editorOpenIds -join ',')" }
+          if ($editorOpenIds.Count -lt 3) { throw "engine.log missing editor-open receipts (got $($editorOpenIds.Count), need 3: 1 host + 2 multi instances)" }
           $editorFocusReceipts = (Select-String -Path $engineLog -Pattern "\[editor\] focus existing instance=").Count
           if ($editorFocusReceipts -lt 1) { throw "engine.log missing the repeat-open focus receipt" }
           $editorCloseReceipts = (Select-String -Path $engineLog -Pattern "\[editor\] closed instance=").Count
