@@ -764,16 +764,18 @@ void shutdownAudio() {
             g_audio.manager.reset();
         }
         g_audio.ready = false;
-        // Stage 3c-2 — the hosted plugin dies with the audio subsystem: the
-        // callback is removed above (no concurrent processBlock), so a plain
-        // swap-out + release + destroy is safe here.
+        // Stage 3c — the hosted plugin is deliberately NOT released or
+        // destroyed here. VST3 module teardown inside a dying process is a
+        // known hosting-deadlock hazard (module terminate/editor teardown can
+        // block forever) and buys nothing: the audio callback above is already
+        // stopped, no further processBlock can run, and process exit reclaims
+        // every resource. The instance's lifetime IS the process lifetime.
         std::unique_ptr<HostedPlugin> hosted;
         {
             std::lock_guard<std::mutex> lock(g_engine.voicesMutex);
             hosted = std::move(g_hosted);
         }
-        if (hosted && hosted->instance) hosted->instance->releaseResources();
-        hosted.reset();
+        hosted.release();  // leak-by-design at shutdown (see above)
     } catch (...) {
         // Swallow — shutdown must be robust.
     }
