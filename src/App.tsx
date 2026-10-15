@@ -484,7 +484,7 @@ export default function App() {
   const engineStop = useCallback(() => {
     if (engineDrive) {
       try {
-        engineClientRef.current?.transport("stop"); // engine-side PANIC semantics
+        engineClientRef.current?.transport("stop"); // engine-side MUSICAL RELEASE (3c close-out): note-offs + release tails; instant kill is panic-only
       } catch (err) {
         writeErrorLog("engineStop", err);
       }

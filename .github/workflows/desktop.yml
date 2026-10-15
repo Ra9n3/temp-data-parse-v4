@@ -138,12 +138,16 @@ jobs:
               if (Test-Path engine-a-stderr.txt) { Get-Content engine-a-stderr.txt }
               throw "Engine A null-audio protocol test failed"
             }
-            # Stage 3b polish — stop-is-panic proof from the engine's own stdout:
-            # the stop handler reports the voices it killed. Missing line = the
-            # panic semantics regressed.
-            $killProof = Select-String -Path "engine-a-stdout.txt" -Pattern "voices killed"
-            if (-not $killProof) { throw "stop panic-semantics proof missing: 'voices killed' not in engine stdout" }
-            Write-Host "Voice-kill proof: $($killProof.Line)"
+            # Stage 3c close-out — MUSICAL RELEASE proof from the engine's own
+            # stdout: the stop handler reports the musical release (voices
+            # releasing + plugin note-offs), NOT an instant kill. Missing line
+            # = the transport-transition semantics regressed.
+            $killProof = Select-String -Path "engine-a-stdout.txt" -Pattern "musical release"
+            if (-not $killProof) { throw "stop musical-release proof missing: 'musical release' not in engine stdout" }
+            Write-Host "Musical-release proof: $($killProof.Line)"
+            $reattackProof = Select-String -Path "engine-a-stdout.txt" -Pattern "re-attacks"
+            if (-not $reattackProof) { throw "resume re-attack proof missing: no 're-attacks' in engine stdout (straddle handling regressed)" }
+            Write-Host "Resume re-attack proof: $($reattackProof.Line)"
             $resumeProof = Select-String -Path "engine-a-stdout.txt" -Pattern "transport play from tick"
             if (-not $resumeProof) { throw "resume proof missing: no 'transport play from tick' lines in engine stdout" }
             foreach ($l in $resumeProof.Line) { Write-Host "Resume proof: $l" }
@@ -225,7 +229,10 @@ jobs:
           # note, sample-accurate), channel routing (ch1+ch2 dispatched AND
           # received by the plugin — the [testvst] stdout log), AUDIBLE
           # mute/solo gating (peaks: unmuted > 0, muted = 0, gated note never
-          # dispatched, unmute restores), stop kills hosted voices.
+          # dispatched, unmute restores). Stage 3c close-out: MUSICAL stops
+          # (release marker + exact held-note offs, NO CC120), resume with
+          # gentle re-attacks + UACC articulation suppression of redundant
+          # CC#32 sends.
           Write-Host "=== Test D: VST3 hosting + channel routing + audible gating ==="
           $env:SCORCH_TESTVST_LOG = "1"
           $procD = Start-Process -FilePath "engine/build/scorch-engine.exe" -ArgumentList "--port","9381","--null-audio" -PassThru -NoNewWindow -RedirectStandardOutput "engine-d-stdout.txt" -RedirectStandardError "engine-d-stderr.txt"
@@ -324,7 +331,12 @@ jobs:
           if ($preparedReceipts -lt 3) { throw "engine.log missing [plugin] prepared receipts (got $preparedReceipts, need 3: AboutToStart + 2 async in test D)" }
           $peakReceipts = (Select-String -Path $engineLog -Pattern "session peak").Count
           if ($peakReceipts -lt 3) { throw "engine.log missing session-peak stop receipts (got $peakReceipts, need 3)" }
-          Write-Host "engine.log receipt assertions passed (scale load, play, load-fail, async init, reuse, rolling-transport reject, audio config, prepare config, session peak all present)"
+          # Stage 3c close-out: musical-release stop receipts + resume re-attack counts.
+          $releaseReceipts = (Select-String -Path $engineLog -Pattern "\[stop\] transport stop — musical release").Count
+          if ($releaseReceipts -lt 3) { throw "engine.log missing musical-release stop receipts (got $releaseReceipts, need 3)" }
+          $reattackReceipts = (Select-String -Path $engineLog -Pattern "resume re-attacks: [1-9]").Count
+          if ($reattackReceipts -lt 1) { throw "engine.log missing a resume re-attack receipt (straddle handling regressed)" }
+          Write-Host "engine.log receipt assertions passed (scale load, play, load-fail, async init, reuse, rolling-transport reject, audio config, prepare config, session peak, musical release, resume re-attacks all present)"
 
       - run: npm ci
 

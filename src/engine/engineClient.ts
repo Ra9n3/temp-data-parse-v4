@@ -418,7 +418,9 @@ export class EngineClient {
    * Stage 3b polish: play MAY carry a start tick. The frontend ALWAYS sends
    * one (the last engine-reported position or a seek target); the engine
    * resumes from its remembered position when the tick is absent and NEVER
-   * auto-resets to 0. Stop is panic semantics on the engine side.
+   * auto-resets to 0. Stage 3c close-out: stop = MUSICAL RELEASE engine-side
+   * (held notes get real note-offs, voices fade ~15ms); instant kill is
+   * reserved for the explicit panic message and the play-time pre-panic guard.
    */
   transport(command: "play" | "stop" | "seek", tick?: number): void {
     if (this.ws && this.ws.readyState === WebSocket.OPEN) {

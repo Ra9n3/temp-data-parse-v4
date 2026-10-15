@@ -12,6 +12,12 @@
 //       stop            → state tick = the STOPPED position (kept, NOT reset)
 //       play (no tick)  → resumes from the stopped position (NOT 0)
 //     plus state tick continuity across the stop/play boundary.
+//     Stage 3c close-out (transport transitions are musical):
+//       play(tick 480) must NOT replay the PAST events (tick 0/300 pitch 48 —
+//         the F4-clamp resume-replay burst receipt),
+//       stop mid-note = MUSICAL RELEASE (no instant kill),
+//       resume must GENTLY RE-ATTACK the straddling note (velocity capped at
+//         80, dispatched at sample 0 of the resume buffer).
 //   no-device — engine runs with NO audio flag on a device-less runner. Asserts
 //     transport play returns the graceful {"code":"no_audio_device","detail":...}
 //     error (the historical 0xC0000005 headless crash is now a clean reply) and
@@ -43,7 +49,13 @@
 //         mute flush kills sounding notes — gating is HEARD), a note inside
 //         the muted window is NOT dispatched (gating before any send),
 //         sound returns after unmute (late note);
-//       stop → silence + playing=false; dispatch_log/dispatch protocol shape.
+//       Stage 3c close-out: stop = MUSICAL RELEASE (the ledger shows the
+//         release marker + EXACT note-offs for every held note — and NONE for
+//         the never-dispatched gated pitch; NO CC120 All-Sound-Off at stop);
+//         resume re-attacks the straddling notes gently (vel 80, at the
+//         resume tick, sample 0); the redundant CC#32 (same value the channel
+//         is already in) is SUPPRESSED (ledger kind 6) while a genuine change
+//         is SENT; dispatch_log/dispatch protocol shape.
 //   scale — Stage 3c-hotfix: REAL-PROJECT-SIZED load. The CI gap was scale;
 //     this closes it. A deterministic full-density fixture (16 channels × 27
 //     bars, 13,824 events ≈ 1.1 MB serialized) is sent as ONE load message
@@ -109,6 +121,10 @@ let loadAckOk = false, loadOk = false, play1Ok = false, adv1Ok = false, stopOk =
 let play2Ok = false, adv2Ok = false, panicOk = false;
 let midPlayAckOk = false;   // Stage 3c-regression: mid-play live-edit reload contract
 let first1 = 0, last1 = 0, frames1 = 0, stopTick = 0, first2 = 0, last2 = 0, frames2 = 0;
+// Stage 3c close-out: dispatch-ledger collection (null-audio) — the resume
+// replay-burst + gentle re-attack asserts read what the engine ACTUALLY sent.
+const ledgerEntries = [];
+let noReplay48Ok = false, reattackOk = false;
 // no-device mode flags
 let noDeviceErrOk = false, pongAfterErrOk = false, stillFunctionalOk = false;
 // scale mode flags (Stage 3c-hotfix)
@@ -126,13 +142,13 @@ const fail = (msg) => {
 
 const timeout = setTimeout(() => {
   if (mode === "null-audio") {
-    console.error(`TIMEOUT at step ${step} (hello=${helloOk} pong=${pongOk} error=${errorOk} loadAck=${loadAckOk} load=${loadOk} play1=${play1Ok} adv1=${adv1Ok} midPlayAck=${midPlayAckOk} stop=${stopOk} play2=${play2Ok} adv2=${adv2Ok} panic=${panicOk})`);
+    console.error(`TIMEOUT at step ${step} (hello=${helloOk} pong=${pongOk} error=${errorOk} loadAck=${loadAckOk} load=${loadOk} play1=${play1Ok} adv1=${adv1Ok} midPlayAck=${midPlayAckOk} stop=${stopOk} play2=${play2Ok} adv2=${adv2Ok} panic=${panicOk} ledger=${ledgerEntries.length})`);
   } else if (mode === "scale") {
     console.error(`TIMEOUT at step ${step} (phase=${scalePhase} scaleAck=${scaleAckOk} negArray=${negArrayOk} negEvent=${negEventOk} restore=${restoreOk} play=${scalePlayOk} ticks=${scaleTicksOk} stop=${scaleStopOk} panic=${scalePanicOk} sent=${SCALE_SENT} events/${SCALE_SENT_BYTES} bytes)`);
   } else if (mode === "scan") {
     console.error(`TIMEOUT at step ${step} (hello=${helloOk} scanSent=${scanSent} scanResult=${scanResultOk} aliveAfterCrash=${aliveAfterCrashOk} defaultScan=${defaultScanOk})`);
   } else if (mode === "host") {
-    console.error(`TIMEOUT at step ${step} phase=${hostPhase} (scan=${hostScanSent} pluginState=${hostPluginStateOk} reloadAck=${hostReloadAckOk} reject=${hostRejectOk} stillPlaying=${hostPlayingAfterReject} peaks A/B/C=${hostPeakA.toFixed(3)}/${hostPeakB.toFixed(3)}/${hostPeakC.toFixed(3)} entries=${hostEntries.length})`);
+    console.error(`TIMEOUT at step ${step} phase=${hostPhase} (scan=${hostScanSent} pluginState=${hostPluginStateOk} reloadAck=${hostReloadAckOk} reject=${hostRejectOk} stillPlaying=${hostPlayingAfterReject} stops=${hostStopTick1}/${hostStopTick2} peaks A/B/C=${hostPeakA.toFixed(3)}/${hostPeakB.toFixed(3)}/${hostPeakC.toFixed(3)} entries=${hostEntries.length})`);
   } else {
     console.error(`TIMEOUT at step ${step} (hello=${helloOk} pong=${pongOk} load=${loadOk} noDeviceErr=${noDeviceErrOk} pongAfterErr=${pongAfterErrOk} stillFunctional=${stillFunctionalOk})`);
   }
@@ -149,6 +165,65 @@ const hostEntries = [];   // accumulated dispatch ledger entries
 const hostStates = [];    // {tick, peak} while playing (tick-correlated)
 let hostPeakA = 0, hostPeakB = 0, hostPeakC = 0;   // assertion results
 let hostLatency = 0, hostDeltaSamples = 0;
+let hostStopTick1 = 0, hostStopTick2 = 0;          // 3c close-out stop positions
+let hostReleaseWait = 0;                           // ledger-arrival wait (observation race)
+
+// Stage 3c close-out — MUSICAL STOP proof: at the stop tick the ledger must
+// carry the release marker (ch=0 CC123 semantics — distinct from panic/mute
+// CC120) and EXACT note-offs for the notes the engine HOLDS AT THAT STOP, and
+// NONE for the never-dispatched gated pitch 62 (gating × release interaction).
+// No CC120 may appear at/after the stop (instant kill is panic-only now).
+// expectedHeld: stop 1 holds ONLY the post-unmute late note (the mute flush's
+// CC120 genuinely killed 60/64 — the ledger must agree); stop 2 holds all
+// three (the resume re-attacked them).
+function assertHostRelease(stopTick, which, expectedHeld, forbidGated62) {
+  const dump = hostEntries.filter((e) => e.c === 0 || e.k === 0)
+    .slice(-24).map((e) => `k${e.k}/c${e.c}/a${e.a}/t${e.t}/s${e.s}`).join(" | ");
+  const marker = hostEntries.find((e) => e.k === 2 && e.a === 123 && e.c === 0 && e.t === stopTick);
+  if (!marker) fail(`stop ${which}: no musical-release marker (ch=0 CC123) at tick ${stopTick} — stop is not musical (last ch0/noteoff records: ${dump})`);
+  for (const [ch, pitch] of expectedHeld) {
+    const off = hostEntries.find((e) => e.k === 0 && e.c === ch && e.a === pitch && e.t === stopTick);
+    if (!off) fail(`stop ${which}: no release NOTE_OFF for held note ch${ch} pitch ${pitch} at tick ${stopTick} — the plugin was amputated, not released`);
+  }
+  // Stop 1 only: pitch 62 was gated (never dispatched) and not yet resumed —
+  // it cannot be held. By stop 2 the resume legitimately re-attacked it
+  // (unmute restores audibility — same contract as the phase-C late note).
+  if (forbidGated62 && hostEntries.some((e) => e.k === 0 && e.c === 1 && e.a === 62))
+    fail("stop: release NOTE_OFF for pitch 62 — a never-dispatched (gated) note cannot be held");
+  if (hostEntries.some((e) => e.k === 2 && e.a === 120 && e.t >= stopTick))
+    fail(`stop ${which}: CC120 All-Sound-Off dispatched at/after the stop tick — instant kill is panic-only`);
+}
+
+// Stage 3c close-out — RESUME proof: straddling notes re-attack GENTLY (vel
+// 80, sample 0, at the resume tick), a redundant CC#32 (same value the
+// channel is already in) is SUPPRESSED (ledger kind 6), and a genuine change
+// is SENT — all at their latency-compensated dispatch positions.
+function assertResumeLedger() {
+  const spt = 44100 * 60 / (120 * 960);
+  const PLUGIN_LATENCY = 128;
+  const dispatchTick = (gridTick) => Math.round((Math.floor(gridTick * spt) - PLUGIN_LATENCY) / spt);
+  // Gentle re-attacks of the straddling held notes, at the resume tick
+  // (= stop 1's tick), dispatched at sample 0 of the resume buffer. Pitch 62
+  // (gated at its grid time, audible again after the unmute) re-attacks too —
+  // the straddle scan works on the authored score; the CURRENT mute state
+  // decides audibility (the same unmute-restores-sound contract as phase C).
+  for (const [ch, pitch] of [[1, 60], [1, 62], [2, 64], [2, 67]]) {
+    const re = hostEntries.find((e) => e.k === 1 && e.c === ch && e.a === pitch && e.b === 80 && e.s === 0 && e.t === hostStopTick1);
+    if (!re) fail(`resume: no GENTLE re-attack of ch${ch} pitch ${pitch} (vel 80, s=0, t=${hostStopTick1}) — straddling sustain not resumed`);
+  }
+  // No replay burst: NO past event may re-dispatch at the resume buffer. The
+  // pre-resume note-ons (480/960/6144... plus the ORIGINAL vel-100 sends) must
+  // not reappear with s=0 at the resume tick.
+  const burst = hostEntries.filter((e) => e.s === 0 && e.t === hostStopTick1 && e.b === 100);
+  if (burst.length > 0) fail(`resume: ${burst.length} FULL-VELOCITY events re-dispatched at sample 0 of the resume buffer — the replay burst is back`);
+  // Redundant CC#32 suppressed (ledger kind 6) at its compensated position.
+  const suppressed = hostEntries.find((e) => e.k === 6 && e.c === 1 && e.a === 32 && e.b === 42 && e.t === dispatchTick(7200));
+  if (!suppressed) fail(`resume: CC#32=42@7200 was not SUPPRESSED (expected a kind-6 record at t=${dispatchTick(7200)}) — the bow-scrape pluck is back`);
+  // Genuine change SENT at its compensated position.
+  const sent = hostEntries.find((e) => e.k === 2 && e.c === 1 && e.a === 32 && e.b === 20 && e.t === dispatchTick(7600));
+  if (!sent) fail(`resume: genuine CC#32 change (42→20) not dispatched at t=${dispatchTick(7600)} — articulation suppression is over-eager`);
+  console.log(`[test] resume ✓ 3 gentle re-attacks (vel 80 @ s=0, t=${hostStopTick1}); CC#32=42@7200 SUPPRESSED (k=6); genuine CC#32=20@7600 SENT`);
+}
 
 // Tick-correlated phase assertions (latency-immune): the mute flush leaves a
 // ch=0 CC120 marker in the ledger; peaks are only compared within windows
@@ -170,7 +245,13 @@ function assertHostWindows() {
   const during = hostStates.filter((s) => s.tick >= flush.t + SLACK && s.tick < 5200);
   hostPeakB = during.reduce((m, s) => Math.max(m, s.peak), 0);
   if (hostPeakB >= 0.02) fail(`phase B: peak ${hostPeakB} while muted (ticks ${flush.t + SLACK}..5200) — mute is not audible (gating broken)`);
-  if (hostEntries.some((e) => e.k === 1 && e.c === 1 && e.d1 === 62)) fail("the muted-window note (pitch 62) WAS dispatched — gating does not run before the channel send");
+  // The muted-window note (pitch 62, on@3840) must never dispatch INSIDE the
+  // muted window. (Pre-3c-close-out this assert read e.d1 — a field the ledger
+  // JSON never carried — so it was a silent no-op; the field is `a`, and the
+  // window is scoped by tick because the close-out resume legitimately
+  // re-attacks this note LATER, after the unmute.)
+  if (hostEntries.some((e) => e.k === 1 && e.c === 1 && e.a === 62 && e.t >= flush.t + SLACK && e.t < 5200))
+    fail("the muted-window note (pitch 62) WAS dispatched inside the muted window — gating does not run before the channel send");
   console.log(`[test] phase A ✓ unmuted peak=${hostPeakA.toFixed(3)}; phase B ✓ muted peak=${hostPeakB.toFixed(3)}, muted-window note gated`);
   // Phase C — after unmute the late note (grid t=6144, ch2) must dispatch + sound.
   // Stage 3c-polish F4: the ledger's t is the DISPATCH-time tick — shifted
@@ -223,6 +304,12 @@ const HOST_EVENTS = [
   // Late note after unmute — must dispatch (unmute restores audibility)
   { eventType: "NOTE_ON", channel: 2, data1: 67, data2: 100, timestampTicks: 6144, trackId: "t2" },
   { eventType: "NOTE_OFF", channel: 2, data1: 67, data2: 0, timestampTicks: 8448, trackId: "t2" },
+  // Stage 3c close-out — articulation-aware resume: a REDUNDANT CC#32 (the
+  // channel is already in 42 from the tick-442 switch) must be SUPPRESSED on
+  // the resumed transport, and a GENUINE change (42 → 20) must be SENT. Both
+  // sit AFTER the phase-C stop point (~6900) so pass 1 never reaches them.
+  { eventType: "CONTROL_CHANGE", channel: 1, data1: 32, data2: 42, timestampTicks: 7200, trackId: "t1", isArticulationSwitch: true },
+  { eventType: "CONTROL_CHANGE", channel: 1, data1: 32, data2: 20, timestampTicks: 7600, trackId: "t1", isArticulationSwitch: true },
 ];
 const HOST_META = { bpm: 120, ppqn: 960, timeSignature: { numerator: 4, denominator: 4 }, endTick: 8448 };
 
@@ -298,11 +385,34 @@ ws.addEventListener("message", (event) => {
         hostPhase = 5;
         ws.send(JSON.stringify({ type: "transport", command: "stop" }));
       }
-    } else if (msg.type === "state" && hostPhase === 5) {
-      if (msg.playing === false) {
-        if ((msg.peak ?? 0) >= 0.02) fail(`after stop peak ${msg.peak} — hosted voices not killed cleanly`);
-        console.log(`[test] phase D ✓ stop → playing=false, peak=${msg.peak} (hosted voices killed) — re-hosting SAME plugin while STOPPED (async init path, seq 2)`);
+    } else if (msg.type === "state" && (hostPhase === 5 || hostPhase === 7) && msg.playing === false) {
+      // Stage 3c close-out — STOP = MUSICAL RELEASE. The transport stops; the
+      // release tail may still ring on the first stopped frame (that is the
+      // POINT), but the stand-in releases in 128 samples, so by the first
+      // state frame (~33ms) the decay is complete. The REAL proof is in the
+      // ledger: the CC123-semantics release marker + EXACT note-offs for every
+      // held note, and NO CC120 (All Sound Off) at stop.
+      // OBSERVATION RACE: the release batch is written by the NEXT AUDIO
+      // BUFFER (≤12ms) while state frames arrive at 33Hz — the first stopped
+      // frame can beat the ledger. Wait (bounded) for the release marker at
+      // this stop's tick before asserting.
+      const stopTick = msg.tick;
+      const which = hostPhase === 5 ? 1 : 2;
+      const have = hostEntries.some((e) => e.k === 2 && e.a === 123 && e.c === 0 && e.t === stopTick);
+      if (!have && ++hostReleaseWait <= 30) return;   // ~1s ceiling, then assert anyway (fails with a dump)
+      hostReleaseWait = 0;
+      if (which === 1) {
+        hostStopTick1 = stopTick;
+        if ((msg.peak ?? 0) >= 0.02) fail(`after stop peak ${msg.peak} — release tail did not decay (stand-in releases in 128 samples)`);
+        assertHostRelease(hostStopTick1, 1, [[2, 67]], true);
+        console.log(`[test] phase D ✓ MUSICAL stop at tick ${hostStopTick1}: release marker + exact held-note offs in the ledger, NO CC120 — resuming`);
         hostPhase = 6;
+        ws.send(JSON.stringify({ type: "transport", command: "play" }));
+      } else {
+        hostStopTick2 = stopTick;
+        assertHostRelease(hostStopTick2, 2, [[1, 60], [1, 62], [2, 64], [2, 67]], false);
+        console.log(`[test] phase E ✓ stop 2 also musical at tick ${hostStopTick2} — re-hosting SAME plugin while STOPPED (async init path, seq 2)`);
+        hostPhase = 8;
         ws.send(JSON.stringify({
           type: "load",
           seq: 2,
@@ -312,16 +422,22 @@ ws.addEventListener("message", (event) => {
           plugin: { uid: hostValidUid, path: hostValidPath, name: hostValidName },
         }));
       }
-    } else if (msg.type === "plugin_state" && hostPhase === 6) {
+    } else if (msg.type === "state" && hostPhase === 6 && msg.playing && msg.tick >= 7700) {
+      // Stage 3c close-out — RESUME: no replay burst, gentle re-attacks, and
+      // articulation-aware CC#32 handling (suppressed redundant / sent change).
+      assertResumeLedger();
+      hostPhase = 7;
+      ws.send(JSON.stringify({ type: "transport", command: "stop" }));
+    } else if (msg.type === "plugin_state" && hostPhase === 8) {
       // Stage 3c-regression: plugin init is ASYNC — this plugin_state comes
       // from the init worker thread after the off-thread instantiate.
-      if (msg.state !== "loaded") fail(`phase 6: plugin_state must be loaded, got ${msg.state} (${msg.detail ?? ""})`);
-      console.log(`[test] phase E ✓ async re-host while stopped ("${msg.name}") — playing again`);
-      hostPhase = 7;
+      if (msg.state !== "loaded") fail(`phase 8: plugin_state must be loaded, got ${msg.state} (${msg.detail ?? ""})`);
+      console.log(`[test] phase F ✓ async re-host while stopped ("${msg.name}") — playing again`);
+      hostPhase = 9;
       ws.send(JSON.stringify({ type: "transport", command: "play", tick: 0 }));
-    } else if (msg.type === "state" && hostPhase === 7 && msg.playing) {
-      console.log("[test] phase F — sending SAME-plugin load mid-play (reuse fast path, seq 3)");
-      hostPhase = 8;
+    } else if (msg.type === "state" && hostPhase === 9 && msg.playing) {
+      console.log("[test] phase G — sending SAME-plugin load mid-play (reuse fast path, seq 3)");
+      hostPhase = 10;
       ws.send(JSON.stringify({
         type: "load",
         seq: 3,
@@ -330,10 +446,10 @@ ws.addEventListener("message", (event) => {
         channels: { t1: 1, t2: 2 },
         plugin: { uid: hostValidUid, path: hostValidPath, name: hostValidName },
       }));
-    } else if (msg.type === "loadAck" && hostPhase === 8 && msg.seq === 3 && !hostReloadAckOk) {
+    } else if (msg.type === "loadAck" && hostPhase === 10 && msg.seq === 3 && !hostReloadAckOk) {
       hostReloadAckOk = true;
-      console.log("[test] phase F ✓ same-plugin mid-play reload ACKED (live instance reused, no re-instantiate) — sending DIFFERENT-plugin load (must be REJECTED, seq 4)");
-      hostPhase = 9;
+      console.log("[test] phase G ✓ same-plugin mid-play reload ACKED (live instance reused, no re-instantiate) — sending DIFFERENT-plugin load (must be REJECTED, seq 4)");
+      hostPhase = 11;
       ws.send(JSON.stringify({
         type: "load",
         seq: 4,
@@ -342,18 +458,18 @@ ws.addEventListener("message", (event) => {
         channels: { t1: 1, t2: 2 },
         plugin: { uid: hostValidUid + "0", path: hostValidPath, name: hostValidName },
       }));
-    } else if (msg.type === "error" && hostPhase === 9 && msg.code === "load_rejected" && !hostRejectOk) {
+    } else if (msg.type === "error" && hostPhase === 11 && msg.code === "load_rejected" && !hostRejectOk) {
       hostRejectOk = true;
-      console.log(`[test] phase G ✓ plugin-change load REJECTED while playing (detail: "${msg.detail}") — waiting for proof the transport still plays`);
-    } else if (msg.type === "state" && hostPhase === 9 && hostRejectOk && msg.playing) {
+      console.log(`[test] phase H ✓ plugin-change load REJECTED while playing (detail: "${msg.detail}") — waiting for proof the transport still plays`);
+    } else if (msg.type === "state" && hostPhase === 11 && hostRejectOk && msg.playing) {
       hostPlayingAfterReject = true;
-      console.log("[test] phase G ✓ transport STILL PLAYING after rejection — stopping");
-      hostPhase = 10;
+      console.log("[test] phase H ✓ transport STILL PLAYING after rejection — stopping");
+      hostPhase = 12;
       ws.send(JSON.stringify({ type: "transport", command: "stop" }));
-    } else if (msg.type === "state" && hostPhase === 10) {
+    } else if (msg.type === "state" && hostPhase === 12) {
       if (msg.playing === false) {
-        console.log("[test] phase H ✓ clean stop after the guard sequence — shutdown");
-        hostPhase = 11;
+        console.log("[test] phase I ✓ clean stop after the guard sequence — shutdown");
+        hostPhase = 13;
         finishAndShutdown();
       }
     } else if (msg.type === "error" && hostPluginStateOk && !hostRejectOk) {
@@ -412,8 +528,15 @@ ws.addEventListener("message", (event) => {
     if (msg.type === "hello" && !helloOk) {
       helloOk = true;
       if (msg.protocol !== 1) fail(`expected protocol 1, got ${msg.protocol}`);
-      if (msg.engineVersion !== "0.3.0") fail(`expected 0.3.0, got ${msg.engineVersion}`);
+      if (msg.engineVersion !== "0.4.0") fail(`expected 0.4.0, got ${msg.engineVersion}`);
+      // Stage 3c close-out: the dispatch ledger streams what the engine
+      // ACTUALLY dispatched — the replay-burst and re-attack asserts read it.
+      ws.send(JSON.stringify({ type: "dispatch_log", enable: true }));
       ws.send(JSON.stringify({ type: "ping" }));
+    } else if (msg.type === "dispatch_log" && helloOk && !pongOk) {
+      // ledger-enable ack — wait for the pong before the error probe
+    } else if (msg.type === "dispatch") {
+      for (const e of msg.entries ?? []) ledgerEntries.push(e);
     } else if (msg.type === "pong" && !pongOk) {
       pongOk = true;
       if (typeof msg.t !== "number") fail("pong.t must be number");
@@ -644,18 +767,52 @@ ws.addEventListener("close", () => {
   clearTimeout(timeout);
   console.log("[test] connection closed");
   let allOk;
-  if (mode === "host") {
-    allOk = helloOk && hostScanSent && hostPluginStateOk && hostPhase >= 6;
+  if (mode === "null-audio") {
+    // Stage 3c close-out — the dispatch-ledger contract, evaluated once the
+    // stream is complete: (1) the PAST events (tick 0/300, pitch 48) must
+    // NEVER dispatch — play(tick 480) and the resume at ~stopTick must both
+    // skip them (the F4-clamp replay burst is fixed); (2) the straddling
+    // note (480→1440) must be GENTLY RE-ATTACKED on the resume: vel capped
+    // at 80 (original 100/88), sample 0, ledger t = the resume tick.
+    noReplay48Ok = !ledgerEntries.some((e) => (e.k === 0 || e.k === 1) && e.a === 48);
+    reattackOk = ledgerEntries.some((e) => e.k === 1 && e.a === 60 && e.b === 80 && e.s === 0 && e.t === stopTick);
+    if (!noReplay48Ok) console.error(`FAIL: past events REPLAYED — pitch 48 appears ${ledgerEntries.filter((e) => (e.k === 0 || e.k === 1) && e.a === 48).length}× in the dispatch ledger (resume-replay burst)`);
+    if (!reattackOk) console.error(`FAIL: no gentle re-attack of pitch 60 (vel 80, s=0, t=${stopTick}) — resume straddle handling broken`);
+    allOk = helloOk && pongOk && errorOk && loadAckOk && loadOk && play1Ok && adv1Ok && stopOk && play2Ok && adv2Ok && panicOk && noReplay48Ok && reattackOk;
     if (allOk) {
       console.log("");
       console.log("========================================");
-      console.log("ALL HOSTING TESTS PASSED (3c-2, stand-in host):");
+      console.log("ALL PROTOCOL TESTS PASSED (null-audio):");
+      console.log("  v1: hello, ping->pong, unknown->error, shutdown");
+      console.log("  v1 ext: load + loadAck receipt, transport play, state@30Hz, transport stop, panic");
+      console.log("  3c-hotfix: load receipt names received/loaded/skipped/byteSize");
+      console.log(`  3b-fix: play on null device OK, state ticks ADVANCED (${first1} → ${last1})`);
+      console.log(`  3b-polish RESUME: play(tick 480) started at ${first1} (NOT 0)`);
+      console.log(`           stop KEPT position (tick ${stopTick})`);
+      console.log(`           play WITHOUT tick RESUMED at ${first2} (stopped at ${stopTick}, NOT 0)`);
+      console.log(`           ticks advanced after resume (${first2} → ${last2})`);
+      console.log("  3c close-out: NO past-event replay (pitch 48 never dispatched);");
+      console.log(`           straddling note GENTLY re-attacked on resume (vel 80 @ s=0, t=${stopTick})`);
+      console.log("========================================");
+      process.exit(0);
+    } else {
+      console.error(`FAILED: hello=${helloOk} pong=${pongOk} error=${errorOk} loadAck=${loadAckOk} load=${loadOk} play1=${play1Ok} adv1=${adv1Ok} stop=${stopOk} play2=${play2Ok} adv2=${adv2Ok} panic=${panicOk} noReplay48=${noReplay48Ok} reattack=${reattackOk}`);
+      process.exit(1);
+    }
+  } else if (mode === "host") {
+    allOk = helloOk && hostScanSent && hostPluginStateOk && hostPhase >= 13;
+    if (allOk) {
+      console.log("");
+      console.log("========================================");
+      console.log("ALL HOSTING TESTS PASSED (3c-2 + 3c close-out, stand-in host):");
       console.log('  plugin host by id: scan → load(uid,path) → plugin_state loaded');
       console.log(`  latency: ${hostLatency}ms (<100ms pinned CI assertion)`);
       console.log(`  pre-trigger: CC#32 at t=442, note at t=480 — 38 ticks (${hostDeltaSamples} samples ≈ 20ms) sample-accurate`);
       console.log('  channel routing: ch1 + ch2 dispatched (plugin stdout cross-checked in CI)');
       console.log(`  mute/solo gating AUDIBLE: peaks A/B/C = ${hostPeakA.toFixed(3)} / ${hostPeakB.toFixed(3)} / ${hostPeakC.toFixed(3)}`);
-      console.log('  muted-window note never dispatched; unmute restores sound; stop kills voices');
+      console.log('  muted-window note never dispatched; unmute restores sound');
+      console.log(`  MUSICAL stops at ticks ${hostStopTick1}/${hostStopTick2}: release marker + exact held-note offs, NO CC120`);
+      console.log(`  RESUME: gentle re-attacks (vel 80) + redundant CC#32 SUPPRESSED (k=6) + genuine change SENT`);
       console.log("========================================");
       process.exit(0);
     } else {
@@ -693,26 +850,6 @@ ws.addEventListener("close", () => {
       process.exit(0);
     } else {
       console.error(`FAILED: hello=${helloOk} pong=${pongOk} scaleAck=${scaleAckOk} negArray=${negArrayOk} negEvent=${negEventOk} restore=${restoreOk} play=${scalePlayOk} ticks=${scaleTicksOk} stop=${scaleStopOk} panic=${scalePanicOk}`);
-      process.exit(1);
-    }
-  } else if (mode === "null-audio") {
-    allOk = helloOk && pongOk && errorOk && loadAckOk && loadOk && play1Ok && adv1Ok && stopOk && play2Ok && adv2Ok && panicOk;
-    if (allOk) {
-      console.log("");
-      console.log("========================================");
-      console.log("ALL PROTOCOL TESTS PASSED (null-audio):");
-      console.log("  v1: hello, ping->pong, unknown->error, shutdown");
-      console.log("  v1 ext: load + loadAck receipt, transport play, state@30Hz, transport stop, panic");
-      console.log("  3c-hotfix: load receipt names received/loaded/skipped/byteSize");
-      console.log(`  3b-fix: play on null device OK, state ticks ADVANCED (${first1} → ${last1})`);
-      console.log(`  3b-polish RESUME: play(tick 480) started at ${first1} (NOT 0)`);
-      console.log(`           stop KEPT position (tick ${stopTick})`);
-      console.log(`           play WITHOUT tick RESUMED at ${first2} (stopped at ${stopTick}, NOT 0)`);
-      console.log(`           ticks advanced after resume (${first2} → ${last2})`);
-      console.log("========================================");
-      process.exit(0);
-    } else {
-      console.error(`FAILED: hello=${helloOk} pong=${pongOk} error=${errorOk} loadAck=${loadAckOk} load=${loadOk} play1=${play1Ok} adv1=${adv1Ok} stop=${stopOk} play2=${play2Ok} adv2=${adv2Ok} panic=${panicOk}`);
       process.exit(1);
     }
   } else {

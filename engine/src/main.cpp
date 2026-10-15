@@ -4,7 +4,11 @@
 //   client -> server: {"type":"transport","command":"play"|"stop"|"seek","tick":<n?>}
 //                     play: "tick" OPTIONAL (3b polish) — explicit start tick,
 //                     or RESUME from the stopped position when omitted.
-//                     stop: PANIC — kills all voices immediately.
+//                     Straddling notes (on before the start tick, off after)
+//                     are GENTLY RE-ATTACKED at the start tick (3c close-out).
+//                     stop: MUSICAL RELEASE (3c close-out) — held notes get
+//                     real note-offs and synth voices fade ~15ms; instant kill
+//                     is reserved for panic and the play-time pre-panic guard.
 //   client -> server: {"type":"panic"}
 //   client -> server: {"type":"scan","dirs":[...]?}   (3c-1, OPTIONAL dirs;
 //                     default: %COMMONPROGRAMFILES%\VST3 + %APPDATA%\VST3 on
@@ -100,12 +104,20 @@
 
 namespace {
 
-constexpr const char* kEngineVersion = "0.3.0";
+constexpr const char* kEngineVersion = "0.4.0";
 constexpr int kProtocolVersion = 1;
 constexpr int kDefaultPort = 9377;
 constexpr int kMaxVoices = 64;
 constexpr double kAttackMs = 10.0;
-constexpr double kReleaseMs = 10.0;
+// Stage 3c close-out — the release fade is the MUSICAL stop semantics: a
+// normal transport stop releases voices over ~15ms instead of killing them.
+constexpr double kReleaseMs = 15.0;
+// Resume re-attacks (3c close-out): a straddling note (on before the resume
+// tick, off after) re-attacks at the resume tick with a GENTLE velocity —
+// capped at 80 so a mid-phrase re-entry never hits at full attack. Constant
+// (not a CLI flag): deterministic, tuned once for the close-out.
+constexpr uint8_t kReattackVelCap = 80;
+constexpr uint8_t kEvFlagResumeReattack = 0x01;  // EngineEvent.flags bit
 
 std::atomic<bool> g_should_exit{false};
 bool g_nullAudio = false;      // --null-audio: JUCE null device (CI / device-less)
@@ -127,6 +139,7 @@ struct EngineEvent {
     uint8_t data2;   // velocity / cc value / bend MSB
     int64_t tick;    // timestampTicks
     uint32_t trackRef = 0;  // 1-based slot into the load's track table (0 = none)
+    uint8_t flags = 0;      // kEvFlag* (resume re-attacks are synthetic)
 };
 
 // ─── Synth voice ────────────────────────────────────────────────────────────
@@ -175,6 +188,36 @@ std::atomic<int> g_activeVoices{0};
 // store true; the next buffer CC120-flushes the flagged channels and clears
 // the flags. Dedupes by channel naturally; no mutex, no vector, no alloc.
 std::atomic<bool> g_muteFlushPending[16] = {};
+
+// ─── Stage 3c close-out — transport transitions are musical ─────────────────
+// Musical-release request: stop / seek / end-of-score set this; the NEXT
+// audio buffer (a) fades the synth voices over ~15ms (kReleaseMs) instead of
+// the instant kill and (b) sends REAL note-offs for every note the engine
+// knows is held in the plugin (the library's own release tail rings out).
+// Instant kill (env=0 + CC120 All Sound Off) is reserved for panic and the
+// play-time pre-panic guard (the doubled-audio finding).
+std::atomic<bool> g_releasePending{false};
+
+// Held-note ledger for the plugin path: per-channel pitch bits, OWNED BY THE
+// AUDIO THREAD (set/cleared inside dispatchTo and the buffer-boundary
+// servicing — never touched by WS threads). The count is mirrored to an
+// atomic at each buffer boundary so handlers can log an honest "at request
+// time" figure without touching audio-thread state.
+juce::BigInteger g_heldPluginNotes[16];
+std::atomic<int> g_heldPluginNoteCount{0};
+
+// Current articulation per channel (UACC CC#32 value), 0xFF = unknown. Seeded
+// at play/seek from the score's PAST events (last CC#32 before the start tick
+// per channel — the plugin retains its articulation across stops, so the
+// engine's knowledge must too); updated by the audio thread as CC#32s
+// dispatch. A CC#32 whose value equals the channel's current articulation is
+// REDUNDANT (the library re-articulates = the audible bow-scrape pluck) and
+// is suppressed — only genuine changes are sent. Reset to unknown at load.
+std::atomic<uint8_t> g_articulation[16] = {};
+constexpr uint8_t kArticulationUnknown = 0xFF;
+// Dispatch-ledger kind for SUPPRESSED (redundant) articulation sends —
+// ledger-only marker (never an event kind) so CI can assert suppression.
+constexpr uint8_t kEvCCSuppressed = 6;
 
 // Stage 3c-polish F3 — hosted output gain (bounded local level fix, NOT the
 // mix-v4 recalibration). Applied to the plugin path only, after render,
@@ -393,11 +436,8 @@ public:
             std::memset(outputChannelData[ch], 0, sizeof(float) * numSamples);
 
         // ── Stage 3c-polish (D2): this function performs NO lock and NO
-        // allocation. Voices are audio-thread-owned: kill requests from
-        // stop/seek/panic/play are self-serviced HERE at the boundary.
-        if (g_voiceKillPending.exchange(false, std::memory_order_relaxed)) {
-            for (auto& v : g_engine.voices) { v.releasing = false; v.active = false; v.env = 0; v.pitch = -1; }
-        }
+        // allocation. Voices are audio-thread-owned: kill/release requests
+        // are self-serviced HERE at the boundary.
 
         // ONE atomic load per shared object. Published objects are immutable
         // (score snapshot / prepared plugin), so plain pointer loads suffice.
@@ -410,17 +450,73 @@ public:
         const int pluginLatency = g_pluginLatencySamples.load(std::memory_order_relaxed);
         float peak = 0.0f;
 
+        // Stage 3c-polish (D2): kill requests from PANIC and the play-time
+        // pre-panic guard — instant (env=0), self-serviced at the boundary.
+        if (g_voiceKillPending.exchange(false, std::memory_order_relaxed)) {
+            for (auto& v : g_engine.voices) { v.releasing = false; v.active = false; v.env = 0; v.pitch = -1; }
+        }
+
         // Reusable per-buffer MIDI buffer (member): clear() keeps the
         // internal capacity — steady-state dispatch allocates nothing.
         midiBuf.clear();
-        // Stage 3c-2 — panic flush: stop/panic/seek set g_pendingPanic; the
-        // next buffer sends CC120 (All Sound Off) on ALL 16 channels into the
-        // plugin so hosted voices die cleanly (3b's kill discipline, extended
-        // to hosted instances). Events ride along at sample 0.
+
+        // Stage 3c close-out — MUSICAL RELEASE (stop / seek / end-of-score):
+        // (a) synth voices enter the ~15ms release fade (NOT the instant kill)
+        // and keep rendering below, so the tail rings out; (b) the plugin gets
+        // REAL note-offs for every note the held-note ledger knows about — the
+        // library's own release tail plays instead of an amputation. Serviced
+        // even when the transport is already stopped (the not-playing branch
+        // below still renders, so tails are audible and decay honestly).
+        if (g_releasePending.exchange(false, std::memory_order_relaxed)) {
+            int synthReleased = 0;
+            for (auto& v : g_engine.voices)
+                if (v.active) { v.releasing = true; v.active = false; ++synthReleased; }
+            int pluginOffs = 0;
+            const bool logDispatch = g_dispatchLog.load(std::memory_order_relaxed);
+            if (plugin != nullptr) {
+                for (int ch = 1; ch <= 16; ++ch)
+                    for (int p = 0; p < 128; ++p)
+                        if (g_heldPluginNotes[ch - 1][p]) {
+                            midiBuf.addEvent(juce::MidiMessage::noteOff(ch, p, juce::uint8(0)), 0);
+                            g_heldPluginNotes[ch - 1].clearBit(p);
+                            ++pluginOffs;
+                            if (logDispatch &&
+                                g_ledgerWrite.load(std::memory_order_relaxed) -
+                                    g_ledgerRead.load(std::memory_order_relaxed) < kLedgerSize) {
+                                const uint64_t li = g_ledgerWrite.load(std::memory_order_relaxed);
+                                DispatchEntry& e = g_ledger[li % kLedgerSize];
+                                e.s = 0;
+                                e.t = g_engine.lastTick.load();  // the stopped position
+                                e.k = kEvNoteOff; e.ch = ch; e.d1 = p; e.d2 = 0;
+                                g_ledgerWrite.store(li + 1, std::memory_order_release);
+                            }
+                        }
+            }
+            if ((synthReleased > 0 || pluginOffs > 0) && logDispatch) {
+                // Ledger marker: the release batch has CC123 (All Notes Off —
+                // MUSICAL) semantics, distinct from the ch=0 CC120 (All Sound
+                // Off) markers of panic/mute flushes.
+                const uint64_t idx = g_ledgerWrite.load(std::memory_order_relaxed);
+                if (idx - g_ledgerRead.load(std::memory_order_relaxed) < kLedgerSize) {
+                    DispatchEntry& e = g_ledger[idx % kLedgerSize];
+                    e.s = 0;
+                    e.t = g_engine.lastTick.load();
+                    e.k = kEvCC; e.ch = 0; e.d1 = 123; e.d2 = 0;
+                    g_ledgerWrite.store(idx + 1, std::memory_order_release);
+                }
+            }
+        }
+
+        // Stage 3c-2 — panic flush: PANIC (and the play-time pre-panic guard)
+        // send CC120 (All Sound Off) on ALL 16 channels into the plugin so
+        // hosted voices die instantly (amputation — deliberately NOT the stop
+        // semantics any more; the 3c close-out moved stop to musical release).
         const bool panicFlush = g_pendingPanic.exchange(false);
         if (panicFlush && plugin != nullptr) {
-            for (int ch = 1; ch <= 16; ++ch)
+            for (int ch = 1; ch <= 16; ++ch) {
                 midiBuf.addEvent(juce::MidiMessage::controllerEvent(ch, 120, 0), 0);
+                g_heldPluginNotes[ch - 1].clear();   // all sound off = nothing held
+            }
         }
         // Mute/solo lost-audibility flush: per-channel atomic flags — no
         // mutex, no vector (the test-synth voices are killed via the kill
@@ -430,18 +526,46 @@ public:
             for (int ch = 1; ch <= 16; ++ch)
                 if (g_muteFlushPending[ch - 1].exchange(false, std::memory_order_relaxed)) {
                     midiBuf.addEvent(juce::MidiMessage::controllerEvent(ch, 120, 0), 0);
+                    g_heldPluginNotes[ch - 1].clear();
                     anyMuteFlush = true;
                 }
         }
 
         if (!g_engine.playing.load()) {
-            // Not playing: the plugin still renders (drains the panic CC); the
-            // output is silence unless the plugin tails.
+            // Not playing: the plugin still renders (drains release tails and
+            // panic CCs — the MUSICAL stop tail is audible here by design),
+            // and the synth voices DRAIN too: the release fade entered at a
+            // stop must actually decay while stopped (it used to freeze —
+            // voices stuck 'releasing' forever with the count lying).
+            ensureScratch(static_cast<size_t>(numSamples));
+            std::fill(synthScratch.begin(), synthScratch.begin() + numSamples, 0.0f);
+            for (int s = 0; s < numSamples; ++s) {
+                double sample = 0;
+                for (auto& v : g_engine.voices) {
+                    if (!v.active && !v.releasing) continue;
+                    sample += std::sin(v.phase) * v.env;
+                    v.phase += v.phaseInc;
+                    if (v.phase > 2.0 * M_PI) v.phase -= 2.0 * M_PI;
+                    if (v.releasing) {
+                        double releaseRate = 1000.0 / (kReleaseMs * g_engine.sampleRate.load());
+                        v.env -= releaseRate;
+                        if (v.env <= 0) { v.env = 0; v.releasing = false; v.active = false; v.pitch = -1; }
+                    }
+                }
+                synthScratch[static_cast<size_t>(s)] = static_cast<float>(sample * 0.2);
+            }
+            for (int s = 0; s < numSamples; ++s) {
+                const float out = synthScratch[static_cast<size_t>(s)];
+                for (int ch = 0; ch < numOutputChannels; ++ch)
+                    outputChannelData[ch][s] += out;
+                peak = std::max(peak, std::abs(out));
+            }
             if (plugin != nullptr) {
                 renderPlugin(plugin, midiBuf, outputChannelData, numOutputChannels, numSamples, peak);
             }
             g_lastPeak.store(peak, std::memory_order_relaxed);
             recountVoices();
+            recountHeldNotes();
             return;
         }
 
@@ -486,13 +610,27 @@ public:
             }
         }
         size_t eventIdx = 0;
-        // Skip events before the current position (shift-aware, clamped at 0
-        // so tick-0 plugin pre-sets still fire on the first buffer).
+        // Skip events before the current position. THE CLAMP RULE (3c
+        // close-out receipt — the resume-replay bug): the F4 latency shift
+        // may pull an event BEFORE buffer start only when its grid position
+        // is at/after the transport start tick (those have not fired yet —
+        // the just-in-time pre-trigger case; clamp to 0 and fire now). An
+        // event BEFORE the start tick is PAST — it must NEVER resurrect:
+        // clamping it to 0 used to re-dispatch the ENTIRE pre-resume score
+        // at sample 0 on every resume/seek (the pluck + glitch receipt:
+        // ~630 stale events into BBCSO, every past CC#32 re-firing = the
+        // bow-scrape). Past events keep their negative sample and skip.
         for (; eventIdx < eventCount; ++eventIdx) {
             const EngineEvent& ev = events[eventIdx];
-            const int64_t eventSample = std::max<int64_t>(0,
-                static_cast<int64_t>((ev.tick - playStartTick) * spt) -
-                (isPluginRouted(ev) ? pluginLatency : 0));
+            const int64_t raw = static_cast<int64_t>((ev.tick - playStartTick) * spt) -
+                (ev.tick >= playStartTick && isPluginRouted(ev) ? pluginLatency : 0);
+            // Events AT/AFTER the start tick may be pulled before buffer start
+            // by the latency shift — they have NOT fired yet (the tick-0
+            // pre-set / just-in-time pre-trigger case): clamp to 0, fire now.
+            // Events BEFORE the start tick are PAST: keep the negative sample
+            // and skip — they must never resurrect.
+            const int64_t eventSample = ev.tick >= playStartTick
+                ? std::max<int64_t>(0, raw) : raw;
             if (eventSample >= startSample) break;
         }
 
@@ -503,9 +641,12 @@ public:
             while (eventIdx < eventCount) {
                 const EngineEvent& ev = events[eventIdx];
                 const bool toPlugin = isPluginRouted(ev);
+                // Same clamp rule as the skip walk above: only events AT/AFTER
+                // the transport start tick get the latency shift + clamp —
+                // past events never reach here (the skip walk consumed them).
                 const int64_t eventSample = std::max<int64_t>(0,
                     static_cast<int64_t>((ev.tick - playStartTick) * spt) -
-                    (toPlugin ? pluginLatency : 0));
+                    (ev.tick >= playStartTick && toPlugin ? pluginLatency : 0));
                 if (eventSample > absSample) break;
                 dispatchTo(ev, toPlugin, static_cast<int>(absSample - eventSample),
                            absSample, spt, playStartTick, midiBuf, plugin, routing, mix);
@@ -536,6 +677,11 @@ public:
             synthScratch[static_cast<size_t>(s)] = static_cast<float>(sample * 0.2); // prevent clipping
         }
 
+        // Resume re-attacks (3c close-out): straddling notes were re-published
+        // INTO the snapshot at the start tick (flags bit set) by the play/seek
+        // handler — the walk above dispatches them at sample 0 like any other
+        // event. Nothing extra to do here; the handler's receipt names them.
+
         // Pass 2 — output = hosted plugin (when active) + built-in synth.
         if (plugin != nullptr) {
             renderPlugin(plugin, midiBuf, outputChannelData, numOutputChannels, numSamples, peak);
@@ -560,6 +706,7 @@ public:
             if (peak > prev) g_playPeakMax.store(peak, std::memory_order_relaxed);
         }
         recountVoices();
+        recountHeldNotes();
 
         // Commit — but only if no play/seek invalidated this buffer meanwhile.
         if (g_engine.transportGen.load(std::memory_order_relaxed) == gen0) {
@@ -568,12 +715,16 @@ public:
             g_engine.lastTick.store(playStartTick +
                 static_cast<int64_t>(static_cast<double>(committed) / spt));
 
-            // Stop at endTick
+            // Stop at endTick — MUSICAL (3c close-out): the synth voices fade
+            // (allNotesOff = release), and the plugin path gets real note-offs
+            // via the release flag on the next buffer (score-authored offs
+            // have normally already fired; this catches anything still held).
             const int64_t nowTick = playStartTick +
                 static_cast<int64_t>(static_cast<double>(committed) / spt);
             if (endTick > 0 && nowTick >= endTick) {
                 g_engine.playing.store(false);
                 allNotesOff();
+                g_releasePending.store(true, std::memory_order_relaxed);
             }
         }
     }
@@ -635,6 +786,16 @@ private:
         g_activeVoices.store(n, std::memory_order_relaxed);
     }
 
+    // Honest held-plugin-note count (the release receipt's "m=" figure),
+    // recomputed at each buffer boundary from the audio-thread-owned ledger.
+    void recountHeldNotes() {
+        int n = 0;
+        for (int ch = 0; ch < 16; ++ch)
+            for (int p = 0; p < 128; ++p)
+                if (g_heldPluginNotes[ch][p]) ++n;
+        g_heldPluginNoteCount.store(n, std::memory_order_relaxed);
+    }
+
     // Render one buffer through the hosted plugin and copy its (up to 2)
     // output channels into the device buffer, tracking the output peak.
     // Stage 3c-polish F3: the hosted OUTPUT GAIN is applied here — plugin
@@ -683,11 +844,30 @@ private:
             switch (ev.kind) {
                 case kEvNoteOn:
                     midi.addEvent(juce::MidiMessage::noteOn(ev.channel, ev.data1, juce::uint8(ev.data2)), samplePos);
+                    g_heldPluginNotes[ev.channel - 1].setBit(ev.data1);   // held-note ledger
                     break;
                 case kEvNoteOff:
                     midi.addEvent(juce::MidiMessage::noteOff(ev.channel, ev.data1, juce::uint8(0)), samplePos);
+                    g_heldPluginNotes[ev.channel - 1].clearBit(ev.data1); // released
                     break;
                 case kEvCC:
+                    // Stage 3c close-out — EXPRESSION-MAP-AWARE SENDS: UACC
+                    // CC#32 is LATCHING inside the library. Re-sending the
+                    // value a channel is already in re-articulates the
+                    // patch (the audible bow-scrape "pluck" on resume). The
+                    // articulation state is seeded from the score's past at
+                    // play time and updated here as CC#32s dispatch — a
+                    // redundant value is suppressed (ledger kind 6), only
+                    // genuine changes are sent.
+                    if (ev.data1 == 32) {
+                        const uint8_t cur =
+                            g_articulation[ev.channel - 1].load(std::memory_order_relaxed);
+                        if (cur == ev.data2) {
+                            recordDispatch(ev, absSample, spt, playStartTick, kEvCCSuppressed);
+                            return;   // nothing dispatched, nothing held
+                        }
+                        g_articulation[ev.channel - 1].store(ev.data2, std::memory_order_relaxed);
+                    }
                     midi.addEvent(juce::MidiMessage::controllerEvent(ev.channel, ev.data1, ev.data2), samplePos);
                     break;
                 case kEvBend:
@@ -708,14 +888,18 @@ private:
 
     // CI ledger: record what was ACTUALLY dispatched (post-gating), with the
     // sample-accurate position. Dropped silently when dispatch_log is off.
-    void recordDispatch(const EngineEvent& ev, int64_t absSample, double spt, int64_t playStartTick) {
+    // kindOverride: ledger-only markers (kEvCCSuppressed=6 for redundant UACC
+    // sends) — the record shows what the send layer DECIDED, not just what
+    // left the engine.
+    void recordDispatch(const EngineEvent& ev, int64_t absSample, double spt, int64_t playStartTick,
+                        uint8_t kindOverride = 0) {
         if (!g_dispatchLog.load(std::memory_order_relaxed)) return;
         const uint64_t idx = g_ledgerWrite.load(std::memory_order_relaxed);
         if (idx - g_ledgerRead.load(std::memory_order_relaxed) >= kLedgerSize) return; // full — drop
         DispatchEntry& e = g_ledger[idx % kLedgerSize];
         e.s = absSample;
         e.t = playStartTick + static_cast<int64_t>(std::llround(static_cast<double>(absSample) / spt));
-        e.k = ev.kind; e.ch = ev.channel; e.d1 = ev.data1; e.d2 = ev.data2;
+        e.k = kindOverride != 0 ? kindOverride : ev.kind; e.ch = ev.channel; e.d1 = ev.data1; e.d2 = ev.data2;
         g_ledgerWrite.store(idx + 1, std::memory_order_release);
     }
 
@@ -1295,6 +1479,10 @@ std::shared_ptr<const MixState> buildMixState(const RoutingTable& table,
     return ms;
 }
 
+// Stage 3c close-out — forward declaration (defined with the transport
+// helpers below; handle_load resets articulation context at publish time).
+void resetArticulations();
+
 void handle_load(const juce::var& json, ix::WebSocket& ws, size_t byteSize) {
     juce::DynamicObject* obj = json.getDynamicObject();
     if (!obj) { ws.send("{\"type\":\"error\",\"code\":\"bad_load\",\"echo\":\"load\"}"); return; }
@@ -1503,6 +1691,10 @@ void handle_load(const juce::var& json, ix::WebSocket& ws, size_t byteSize) {
             std::lock_guard<std::mutex> rlock(g_retireMutex);
             g_retiredScores.push_back({old, std::chrono::steady_clock::now()});
         }
+        // Stage 3c close-out — a new score is a new articulation context: the
+        // per-channel knowledge resets to UNKNOWN so the first CC#32 always
+        // sends (play/seek then re-seed from the new score's past).
+        resetArticulations();
     }
 
     // Stage 3c-hotfix — LOAD RECEIPT (the black box opened): what the engine
@@ -1699,6 +1891,108 @@ void handle_dispatch_log(const juce::var& json, ix::WebSocket& ws) {
     std::cout << "[engine] dispatch_log " << (enable ? "on" : "off") << std::endl;
 }
 
+// ─── Stage 3c close-out — musical transport transitions (helpers) ───────────
+// Reset the per-channel articulation knowledge to UNKNOWN (0xFF): used at
+// load (new score context — the first CC#32 always sends) before play/seek
+// re-seed it from the score's past.
+void resetArticulations() {
+    for (int i = 0; i < 16; ++i)
+        g_articulation[i].store(kArticulationUnknown, std::memory_order_relaxed);
+}
+
+// Seed the per-channel articulation knowledge from the score's PAST: the
+// plugin retains its UACC state across stops, so on a resume at startTick the
+// engine must know which articulation each channel is ALREADY in (the last
+// CC#32 before startTick) — otherwise the first same-value CC#32 of the
+// resumed transport re-articulates (the bow-scrape pluck). Tick-sorted scan;
+// synthetic re-attack notes carry no CCs.
+void seedArticulationsFromPast(int64_t startTick) {
+    resetArticulations();
+    if (ScoreSnapshot* s = g_score.load(std::memory_order_acquire)) {
+        for (const auto& ev : s->events) {
+            if (ev.tick >= startTick) break;
+            if (ev.kind == kEvCC && ev.data1 == 32)
+                g_articulation[ev.channel - 1].store(ev.data2, std::memory_order_relaxed);
+        }
+    }
+}
+
+// Notes STRADDLING the start tick (note-on before it, note-off strictly after
+// it): their note-ons are in the skipped past, so a resumed transport would
+// silently MISS every sustained note. The close-out answer is a GENTLE
+// RE-ATTACK: each straddling note re-attacks AT the start tick with velocity
+// min(original, kReattackVelCap). Pairing is per (channel, pitch); a straddle
+// is only re-attacked when the score also carries a FUTURE note-off for that
+// (channel, pitch) — min(onCount, offCount) — so a re-attack always has a
+// release waiting. Pure function of the snapshot + startTick (no RNG).
+std::vector<EngineEvent> resumeReattacksFor(const ScoreSnapshot& s, int64_t startTick) {
+    struct PairState { int on = 0; int off = 0; int vel = 0; uint32_t ref = 0; };
+    std::vector<PairState> st(16 * 128);
+    auto idx = [](int ch, int p) { return (ch - 1) * 128 + p; };
+    for (const auto& ev : s.events) {
+        if (ev.flags & kEvFlagResumeReattack) continue;   // synthetic — never pairs
+        if (ev.tick < startTick) {
+            if (ev.kind == kEvNoteOn) {
+                auto& p = st[idx(ev.channel, ev.data1)];
+                ++p.on; p.vel = ev.data2; p.ref = ev.trackRef;
+            } else if (ev.kind == kEvNoteOff) {
+                if (st[idx(ev.channel, ev.data1)].on > 0) --st[idx(ev.channel, ev.data1)].on;
+            }
+        } else if (ev.kind == kEvNoteOff && ev.tick > startTick) {
+            ++st[idx(ev.channel, ev.data1)].off;
+        }
+    }
+    std::vector<EngineEvent> tails;
+    for (int ch = 1; ch <= 16; ++ch)
+        for (int p = 0; p < 128; ++p) {
+            const PairState& ps = st[idx(ch, p)];
+            const int n = std::min(ps.on, ps.off);
+            for (int i = 0; i < n; ++i)
+                tails.push_back(EngineEvent{kEvNoteOn, static_cast<uint8_t>(ch),
+                    static_cast<uint8_t>(p),
+                    static_cast<uint8_t>(std::min<int>(ps.vel, kReattackVelCap)),
+                    startTick, ps.ref, kEvFlagResumeReattack});
+        }
+    return tails;
+}
+
+// Publish the score for a NEW transport position: clone the current snapshot
+// with the straddling-note re-attacks (tick = startTick) inserted in tick
+// order. Old synthetic tails are stripped (a fresh scan must pair against the
+// authored score only). No straddles ⇒ the current snapshot is kept as-is
+// (zero-copy fast path). Returns the re-attack count. The OLD snapshot is
+// retired to the worker queue (never freed on the audio thread).
+size_t publishScoreWithReattacks(int64_t startTick) {
+    ScoreSnapshot* cur = g_score.load(std::memory_order_acquire);
+    if (!cur) return 0;
+    std::vector<EngineEvent> tails = resumeReattacksFor(*cur, startTick);
+    if (tails.empty()) return 0;
+    ScoreSnapshot* snap = new ScoreSnapshot();
+    snap->events.reserve(cur->events.size() + tails.size());
+    // Authored events (old synthetic tails dropped), then the tails inserted
+    // before the first strictly-later tick (same-sample order is irrelevant —
+    // everything at startTick dispatches at sample 0 of the first buffer).
+    bool tailsInserted = false;
+    for (const auto& ev : cur->events) {
+        if (ev.flags & kEvFlagResumeReattack) continue;
+        if (!tailsInserted && ev.tick > startTick) {
+            snap->events.insert(snap->events.end(), tails.begin(), tails.end());
+            tailsInserted = true;
+        }
+        snap->events.push_back(ev);
+    }
+    if (!tailsInserted) snap->events.insert(snap->events.end(), tails.begin(), tails.end());
+    snap->bpm = cur->bpm;
+    snap->ppqn = cur->ppqn;
+    snap->endTick = cur->endTick;
+    ScoreSnapshot* old = g_score.exchange(snap, std::memory_order_acq_rel);
+    if (old) {
+        std::lock_guard<std::mutex> rlock(g_retireMutex);
+        g_retiredScores.push_back({old, std::chrono::steady_clock::now()});
+    }
+    return tails.size();
+}
+
 void handle_transport(const juce::var& json, ix::WebSocket& ws) {
     juce::DynamicObject* obj = json.getDynamicObject();
     if (!obj) return;
@@ -1725,10 +2019,24 @@ void handle_transport(const juce::var& json, ix::WebSocket& ws) {
             ? static_cast<int64_t>(static_cast<double>(tickVar))
             : g_engine.lastTick.load();
         if (startTick < 0) startTick = 0;
+        // Stage 3c close-out — RESUME CONTEXT: (a) the per-channel articulation
+        // knowledge is seeded from the score's past (the plugin retained its
+        // UACC state across the stop — redundant CC#32s on resume must be
+        // suppressed, not re-sent); (b) straddling notes (on before startTick,
+        // off after) are published back as GENTLE re-attacks at startTick —
+        // without them every sustained note would be MISSING on resume (their
+        // note-ons are in the skipped past). Both scan the immutable snapshot
+        // on this (WS) thread — the audio thread only sees the new snapshot.
+        seedArticulationsFromPast(startTick);
+        const size_t reattacks = publishScoreWithReattacks(startTick);
         // Panic-before-play: a fresh play must never overlap a previous
         // transport's ringing voices (the doubled-audio finding). The kill is
         // SELF-SERVICED by the next audio buffer (Stage 3c-polish D2: no
-        // cross-thread voice access anymore).
+        // cross-thread voice access anymore). NOTE (3c close-out): this is
+        // the ONE remaining transport amputation besides panic — a new
+        // transport beginning while the previous one's tails still ring would
+        // double the audio; instant kill of STALE tails at play time is the
+        // standard DAW contract and stays.
         g_voiceKillPending.store(true, std::memory_order_relaxed);
         g_pendingPanic.store(true);  // hosted plugin gets the CC120 flush too
         g_engine.samplesProcessed.store(0);
@@ -1737,7 +2045,9 @@ void handle_transport(const juce::var& json, ix::WebSocket& ws) {
         g_playPeakMax.store(0.0f, std::memory_order_relaxed);  // fresh session peak
         g_engine.playing.store(true);
         std::cout << "[engine] transport play from tick " << startTick
-                  << (hasTick ? " (explicit)" : " (resume)") << std::endl;
+                  << (hasTick ? " (explicit" : " (resume")
+                  << (reattacks > 0 ? ", " + std::to_string(reattacks) + " re-attacks)" : ")")
+                  << std::endl;
         // Stage 3c-hotfix — PLAY RECEIPT: "rendering from tick X, N voices
         // scheduled". N counts NOTE_ON events from the start tick — the
         // engine's honest answer to "will this play make sound?". A play
@@ -1753,41 +2063,61 @@ void handle_transport(const juce::var& json, ix::WebSocket& ws) {
             engineLog("[play] rendering from tick " + std::to_string(startTick) + ", " +
                       withCommas(scheduled) + " voices scheduled (of " +
                       withCommas(static_cast<uint64_t>(total)) + " events)" +
-                      (hasTick ? " (explicit tick)" : " (resume)"));
+                      (hasTick ? " (explicit tick)" : " (resume)") +
+                      " | resume re-attacks: " + std::to_string(reattacks));
         }
     } else if (cmd == "stop") {
-        // Stage 3b polish — STOP IS PANIC: every voice dies NOW (no ring-out,
-        // no overlap into the next play), and lastTick keeps the stopped
-        // position so a later play-without-tick resumes exactly there.
-        // Stage 3c-polish (D2): the kill is self-serviced by the next audio
-        // buffer; the receipt reports the honest active-voice count at the
-        // moment of the request plus the session peak (F3).
+        // Stage 3c close-out — STOP IS MUSICAL RELEASE, not amputation: the
+        // transport halts at the stopped position (lastTick keeps it for the
+        // next play-without-tick), synth voices fade over ~15ms and the hosted
+        // plugin receives REAL note-offs for every held note — the library's
+        // own release tail rings out. Instant kill (env=0 + CC120 All Sound
+        // Off) is reserved for panic and the play-time pre-panic guard.
         g_engine.playing.store(false);
-        g_voiceKillPending.store(true, std::memory_order_relaxed);
-        const int killed = g_activeVoices.load(std::memory_order_relaxed);
+        // Invalidate any in-flight buffer: without this, a buffer that started
+        // before the stop would still COMMIT samplesProcessed/lastTick after
+        // the stop — the stopped position (and every release receipt) would
+        // drift by up to one buffer past the stop point. Freezing at the last
+        // committed boundary keeps the state tick, the release-marker tick and
+        // the resume start tick EXACTLY equal.
+        g_engine.transportGen.fetch_add(1);
+        g_releasePending.store(true, std::memory_order_relaxed);
+        const int releasing = g_activeVoices.load(std::memory_order_relaxed);
+        const int held = g_heldPluginNoteCount.load(std::memory_order_relaxed);
         const float sessionPeak = g_playPeakMax.load(std::memory_order_relaxed);
         char peakBuf[16];
         std::snprintf(peakBuf, sizeof(peakBuf), "%.3f", static_cast<double>(sessionPeak));
-        std::cout << "[engine] transport stop: voices killed (n=" << killed
+        std::cout << "[engine] transport stop: musical release (voices releasing n=" << releasing
+                  << ", plugin note-offs m=" << held
                   << ", tick=" << g_engine.lastTick.load() << ")" << std::endl;
-        engineLog("[stop] transport stop — voices killed n=" + std::to_string(killed) +
+        engineLog("[stop] transport stop — musical release: voices releasing n=" +
+                  std::to_string(releasing) + ", plugin note-offs m=" + std::to_string(held) +
                   ", lastTick " + std::to_string(g_engine.lastTick.load()) +
                   " | session peak " + peakBuf);
-        g_pendingPanic.store(true);  // hosted plugin: CC120 flush on the next buffer
     } else if (cmd == "seek") {
         int64_t tick = static_cast<int64_t>(static_cast<double>(obj->getProperty("tick")));
         if (tick < 0) tick = 0;
+        // Stage 3c close-out — a seek is a resume transition too: while the
+        // transport ROLLS across the jump, held notes are released MUSically
+        // (real note-offs — the tail rings into the new position, like a live
+        // player moving on) and notes straddling the NEW position re-attack
+        // gently. While STOPPED there is nothing sounding: skip the snapshot
+        // republish (the next play re-scans straddles for its own start tick;
+        // dormant synthetic tails would be dead weight).
+        const bool wasPlaying = g_engine.playing.load();
         g_engine.samplesProcessed.store(0);
         g_engine.playStartTick.store(tick);
         g_engine.lastTick.store(tick);
         g_engine.transportGen.fetch_add(1);  // pre-seek buffers must not commit
-        // Hard position jump — ringing notes from the old position must not
-        // bleed over the new one (same panic semantics as stop; self-serviced
-        // by the next audio buffer — Stage 3c-polish D2).
-        g_voiceKillPending.store(true, std::memory_order_relaxed);
-        std::cout << "[engine] transport seek to tick " << tick << std::endl;
-        engineLog("[seek] to tick " + std::to_string(tick));
-        g_pendingPanic.store(true);  // hosted plugin: no bleed across the jump
+        if (wasPlaying) {
+            seedArticulationsFromPast(tick);
+            publishScoreWithReattacks(tick);
+            g_releasePending.store(true, std::memory_order_relaxed);  // musical, not amputation
+        }
+        std::cout << "[engine] transport seek to tick " << tick
+                  << (wasPlaying ? " (rolling — musical release + re-attacks)" : " (stopped)") << std::endl;
+        engineLog("[seek] to tick " + std::to_string(tick) +
+                  (wasPlaying ? " (rolling — musical release + resume re-attacks)" : " (stopped)"));
     }
 }
 

@@ -616,3 +616,136 @@ territory. Diagnosed first (D1–D3), then the pre-authorized fixes.
 - WASAPI/DirectSound driver behavior on the user's machine (rejected buffer
   requests, hidden resampling) is exactly what the new `[audio]` receipts
   will surface on the next run.
+
+## Stage 3c close-out — transport transitions are musical (v0.4.0)
+
+By-ear verdicts on the real device named two more joints: stop/pause is an
+AMPUTATION (instant voice kill + CC120 All-Sound-Off — clicks, no release
+tails), and RESUME "plucks" (a bow-scrape as BBCSO re-articulates). The
+receipts + a dispatch-ledger probe found the pluck's true mechanism, and it
+was worse than hypothesized.
+
+### The finding: the F4 clamp resurrected the past (the resume-replay burst)
+
+The F4 latency clamp (`max(0, eventSample)`, added in v0.3.0 so tick-0 plugin
+pre-sets survive the first buffer) ALSO clamped events BEFORE the transport
+start tick. On any play/seek/resume with `playStartTick > 0`,
+`samplesProcessed == 0`, and every past event's raw sample is negative —
+clamped to 0, so the skip walk (`eventSample >= startSample`) broke at the
+FIRST event and the dispatch loop re-dispatched THE ENTIRE PRE-RESUME SCORE at
+sample 0. Probe receipt (v0.3.0 binary, 4-event fixture): resume at tick 1817
+re-dispatched all 4 events (2 stale note pairs) at s=0; on the user's
+809-event project that is ~630 stale events into BBCSO on EVERY
+resume/seek/explicit-play-past-0 — the burst is the "glitch", and every past
+CC#32 re-firing is the bow-scrape pluck. (v0.2.1 was clean event-wise: the
+clamp did not exist; the v0.3.0 by-ear report inherited this.)
+
+**Fix**: the latency shift + clamp apply ONLY to events with
+`tick >= playStartTick` (they have not fired yet — the tick-0 pre-set and
+just-in-time pre-trigger cases are preserved exactly); events BEFORE the
+start tick keep their negative sample and skip, forever. CI asserts both
+directions: pitch-48 (tick 0/300, past at play(480)) must NEVER dispatch; the
+F4 exact arithmetic (grid-480 note at s=10897) still passes.
+
+### Stop = musical release
+
+Normal transport stops now RELEASE instead of amputating:
+
+- **Plugin path**: the engine tracks held notes per (channel, pitch) in an
+  audio-thread-owned bit ledger (set/cleared inside `dispatchTo`, cleared by
+  CC120 flushes). A stop sends REAL note-offs for exactly those notes at the
+  next buffer boundary — the library's own release tail rings out (the
+  not-playing path keeps rendering, so tails are audible after stop). The
+  ledger is honest about gating: a note killed by a mute flush is no longer
+  held; a never-dispatched (gated) note is never held.
+- **Synth path**: voices enter the release fade (`kReleaseMs` = 15ms, was
+  10) and DRAIN while stopped — the not-playing branch now renders the synth
+  tail (previously release-phase voices froze forever while stopped).
+- **Receipts**: `[stop] transport stop — musical release: voices releasing
+  n=..., plugin note-offs m=..., lastTick X | session peak Y`. The stop also
+  bumps `transportGen` so an in-flight buffer cannot commit a drifted
+  position — the state tick, the release-marker tick and the resume start
+  tick are EXACTLY equal (CI pins this).
+- **Instant kill is reserved**: panic (`{"type":"panic"}`) and the play-time
+  pre-panic guard (a new transport must not overlap the previous one's tails
+  — the doubled-audio finding) stay env=0 + CC120 All-Sound-Off. Seek-while-
+  rolling also releases musically (the tail rings into the new position,
+  like a live player moving on); seek-while-stopped does nothing (nothing
+  sounds).
+- **End of score** joins the same policy (release + plugin offs).
+
+### Resume = gentle re-attack, no pluck
+
+Notes STRADDLING the resume tick (note-on before it, note-off strictly
+after) used to be silently MISSING (their note-ons are in the skipped past).
+The play/seek handler now scans the immutable snapshot for straddles and
+re-publishes the score with GENTLE RE-ATTACKS at the start tick: velocity
+`min(original, 80)` (a mid-phrase re-entry must not hit at full attack),
+pairing per (channel, pitch), only when the score carries a future note-off
+(`min(onCount, offCount)` — a re-attack always has a release waiting). Clean
+sustain resume (picking up mid-note without re-attack) was the alternative
+and needs sample-phrase context the event stream does not carry; a gentle
+re-attack is what a player does on a re-entry. The scan works on the
+authored score (synthetic tails stripped first); the CURRENT mute state
+decides audibility at dispatch — a track unmuted after its notes were gated
+hears them resume (the same unmute-restores-sound contract as mid-play
+unmute). Mid-play live-edit reloads do NOT re-attack (the transport keeps
+rolling; the new stream takes over from its grid positions). Zero-straddle
+plays keep the current snapshot (zero-copy fast path).
+
+### Expression-map-aware resume (UACC)
+
+The adapter emits CC#32 only on articulation CHANGE, so any redundant send
+must come from the engine. It did (the replay burst re-fired every past
+CC#32). Beyond the burst fix, the engine now tracks the CURRENT articulation
+per channel (`g_articulation[16]`, 0xFF = unknown): seeded at play/seek from
+the last CC#32 before the start tick (the plugin retains its UACC state
+across stops — the engine's knowledge must too), reset to unknown at load,
+updated by the audio thread as CC#32s dispatch. A CC#32 whose value equals
+the channel's current articulation is SUPPRESSED (it would re-articulate =
+the bow scrape); only genuine changes are sent. The dispatch ledger records
+suppressed sends as kind 6 so CI can assert BOTH the suppression and the
+send-on-change.
+
+### Chooser flow — verified ABSENT
+
+The user asked whether a chooser flow exists (a toast suggested not). Code
+verification: the engine has NO audio-device chooser — `ensureAudioReady`
+calls `initialiseWithDefaultDevices(0, 2)` (default device type + default
+output, no `AudioDeviceSelectorComponent` anywhere); the only device knobs
+are the CLI flags (`--buffer-size`, `--plugin-gain`). The frontend has NO
+device-picker UI either. The only chooser-adjacent surface is `VstBrowser`
+(scan-result binding for plugin + expression-map assignment — a list, not an
+OS dialog). This is deliberate for 3c: the engine plays through the OS
+default device; a device-settings UI remains future work.
+
+### CI
+
+- null-audio: dispatch ledger asserts no past-event replay (pitch 48 never
+  dispatches) and the gentle re-attack (vel 80, s=0, t = the resume tick).
+- host: `assertHostRelease` (stop 1 and stop 2) — the ch=0 CC123-semantics
+  release marker + EXACT note-offs for the notes held AT THAT STOP (the mute
+  flush legitimately killed 60/64 before stop 1; the resume re-attacked all
+  four before stop 2) and NO CC120 at/after a stop; `assertResumeLedger` —
+  re-attacks, suppressed CC#32=42@7200 (kind 6), genuine CC#32=20@7600 sent.
+  The release batch is written by the next audio buffer while state frames
+  stream at 33Hz — the test waits (bounded) for the marker before asserting
+  (observation race, not an engine defect). Two latent test bugs fixed en
+  route: the muted-window gate check read `e.d1` (a field the ledger JSON
+  never carried — a silent no-op) and the phase-8 branch matched
+  `msg.type === "state"` instead of `"plugin_state"`.
+- desktop.yml: stdout greps `musical release` + `re-attacks`; engine.log
+  receipt greps for musical-release stops and a non-zero re-attack count.
+
+### Untested claims (fire-rate honesty)
+
+- The release-tail audibility (no click, musical ring-out) and the re-attack
+  feel (gentle vs too soft) are by-ear judgments on the user's device — CI
+  proves the message-level contracts, not the musicality. The 80 velocity
+  cap and the 15ms fade are constants tuned for the close-out, not
+  calibrations.
+- BBCSO's real-world CC#32 idempotence (does it re-articulate on a
+  same-value send?) is the user's hypothesis, confirmed as the right model
+  by the adapter's change-only emission; the suppression is safe under both
+  behaviors (idempotent library → no audible difference; re-articulating
+  library → the scrape disappears).
