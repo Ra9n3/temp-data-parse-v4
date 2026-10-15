@@ -74,6 +74,7 @@
 #include <atomic>
 #include <chrono>
 #include <cmath>
+#include <condition_variable>
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
@@ -99,7 +100,7 @@
 
 namespace {
 
-constexpr const char* kEngineVersion = "0.2.0";
+constexpr const char* kEngineVersion = "0.2.1";
 constexpr int kProtocolVersion = 1;
 constexpr int kDefaultPort = 9377;
 constexpr int kMaxVoices = 64;
@@ -266,8 +267,39 @@ struct HostedPlugin {
     std::unique_ptr<juce::AudioPluginInstance> instance;
     std::string name, vendor;
     double latencySamples = 0.0;
+    // Stage 3c-regression: load identity. A mid-play load whose plugin field
+    // matches the LIVE instance takes the reuse fast path (routing-only swap,
+    // no re-instantiate); a DIFFERENT plugin on a rolling transport is
+    // REJECTED — swapping instances mid-play was the empty-score regression.
+    // Identity is read ONLY under voicesMutex (the init worker swaps g_hosted).
+    std::string uid, path;
 };
 std::unique_ptr<HostedPlugin> g_hosted;
+
+// ─── Stage 3c-regression: ASYNC plugin init ─────────────────────────────
+// loadHostedPlugin (findAllTypesForFile + createPluginInstance +
+// prepareToPlay) takes SECONDS for a full orchestra library — the receipts
+// caught the user's WS message loop frozen 5.708s behind BBCSO's
+// instantiate. The WS thread now only QUEUES the request (loadAck/state are
+// never delayed); this single worker instantiates off-thread, latest
+// request wins (a newer load supersedes an in-flight instantiate — two
+// concurrent orchestra loads must never double-allocate the sample pool).
+struct PluginInitRequest {
+    juce::var pluginVar;        // the load's plugin field (uid+path)
+    long long seq = 0;
+    std::string channelsJson;   // hosted channels captured at queue time
+};
+std::mutex g_pluginInitMutex;
+std::condition_variable g_pluginInitCv;
+PluginInitRequest g_pluginInitRequest;   // guarded by g_pluginInitMutex
+bool g_pluginInitPending = false;        // guarded by g_pluginInitMutex
+uint64_t g_pluginInitGen = 0;            // guarded; bumped per queued request
+// Real device config, captured in audioDeviceAboutToStart. A hot-swapped
+// instance is prepared with THESE numbers before it becomes visible to the
+// audio callback (create-time prepare uses nominal 44100/512 — preparing a
+// swapped-in instance only at the next device start was the mis-prepared
+// half of the empty-score regression).
+std::atomic<int> g_deviceBufferSize{512};
 
 // Dispatch ledger: what the callback ACTUALLY dispatched (post-gating), for
 // CI assertions (pre-trigger arithmetic, routing, gating). Single producer
@@ -458,6 +490,7 @@ public:
         // tick→sample scheduling math matches the running callback.
         if (device == nullptr) return;
         g_engine.sampleRate.store(device->getCurrentSampleRate());
+        g_deviceBufferSize.store(static_cast<int>(device->getCurrentBufferSizeSamples()));
         std::lock_guard<std::mutex> lock(g_engine.voicesMutex);
         ensureScratch(static_cast<size_t>(device->getCurrentBufferSizeSamples()));
         procBuf.setSize(2, device->getCurrentBufferSizeSamples(), false, true, false);
@@ -1061,6 +1094,8 @@ std::string loadHostedPlugin(const juce::var& pluginVar, std::unique_ptr<HostedP
         hosted->name = chosen->name.toStdString();
         hosted->vendor = chosen->manufacturerName.toStdString();
         hosted->latencySamples = hosted->instance->getLatencySamples();
+        hosted->uid = uid;
+        hosted->path = path;
         out = std::move(hosted);
         return "";
     } catch (const std::exception& e) {
@@ -1255,6 +1290,47 @@ void handle_load(const juce::var& json, ix::WebSocket& ws, size_t byteSize) {
         return;
     }
 
+    // ─── Stage 3c-regression — ROLLING-TRANSPORT LOAD GUARD ───
+    // The receipts caught the original empty-score regression red-handed:
+    // a duplicate load landed 5ms AFTER transport play, and the engine
+    // synchronously re-instantiated the plugin mid-playback — the live
+    // instance was released and the swapped-in one was never re-prepared
+    // for the real device. Transport kept rolling on a dead plugin graph:
+    // "playing · bar X" + silence + ~0 CPU.
+    // Rule (additive, engine-side): on a rolling transport a load whose
+    // plugin field DIFFERS from the live instance is REJECTED wholesale —
+    // score, routing, plugin and transport are all left untouched. A load
+    // with the SAME plugin (the live-edit reload) stays allowed and takes
+    // the routing-only fast path below. Non-plugin loads stay allowed (the
+    // events swap is per-buffer rescan-safe and touches no instance).
+    bool midPlayReuse = false;
+    if (pluginRequested && !channelsBad && g_engine.playing.load()) {
+        const std::string reqUid = pluginVar.getDynamicObject()->getProperty("uid").toString().toStdString();
+        const std::string reqPath = pluginVar.getDynamicObject()->getProperty("path").toString().toStdString();
+        // Snapshot the live instance's identity under voicesMutex — the init
+        // worker swaps g_hosted from its own thread.
+        bool haveLive = false;
+        std::string liveUid, livePath;
+        {
+            std::lock_guard<std::mutex> lock(g_engine.voicesMutex);
+            haveLive = g_hosted != nullptr;
+            if (haveLive) { liveUid = g_hosted->uid; livePath = g_hosted->path; }
+        }
+        if (haveLive && !reqUid.empty() && !reqPath.empty() &&
+            reqUid == liveUid && reqPath == livePath) {
+            midPlayReuse = true;
+        } else {
+            engineLog("[load] REJECTED while playing — plugin change requires stop" +
+                      std::string(reqUid.empty() ? "" : " (uid " + reqUid + ")") +
+                      " | seq " + std::to_string(seq) + " | received " +
+                      std::to_string(byteSize) + " bytes — score, routing and transport UNTOUCHED");
+            std::cout << "[engine] load rejected while playing (seq " << seq << ")" << std::endl;
+            ws.send(std::string("{\"type\":\"error\",\"code\":\"load_rejected\",\"echo\":\"load\",\"detail\":\"") +
+                    "transport is playing — stop before loading a different plugin" + "\"}");
+            return;
+        }
+    }
+
     {
         std::lock_guard<std::mutex> lock(g_engine.eventsMutex);
         g_engine.events = std::move(newEvents);
@@ -1279,7 +1355,15 @@ void handle_load(const juce::var& json, ix::WebSocket& ws, size_t byteSize) {
         if (!trStr.empty()) trStr += " ";
         const std::string& id = (slot >= 1 && slot <= table.trackNames.size())
                                     ? table.trackNames[slot - 1] : ("slot" + std::to_string(slot));
-        trStr += id + "=" + std::to_string(count);
+        // Routing disposition per track — the receipt must answer "did this
+        // track reach the plugin or the test synth" without guesswork: a
+        // track absent from the channels map rides the test synth EVEN IF
+        // its project midiChannel numerically matches a hosted channel.
+        std::string disp = "[synth]";
+        auto cit = channelOfTrack.find(id);
+        if (cit != channelOfTrack.end())
+            disp = "[ch" + std::to_string(cit->second) + "]";
+        trStr += id + "=" + std::to_string(count) + disp;
     }
     char bpmBuf[32];
     std::snprintf(bpmBuf, sizeof(bpmBuf), "%g", bpm);
@@ -1329,41 +1413,59 @@ void handle_load(const juce::var& json, ix::WebSocket& ws, size_t byteSize) {
                         channelsBadDetail + " — falling back to test synth", "");
         std::cout << "[engine] plugin hosting refused: " << channelsBadDetail << std::endl;
     } else if (pluginRequested) {
-        std::unique_ptr<HostedPlugin> loaded;
-        const std::string hostErr = loadHostedPlugin(pluginVar, loaded);
-        if (!hostErr.empty()) {
-            sendPluginState(ws, "error", "", "", -1.0, hostErr + " — falling back to test synth", "");
-            std::cout << "[engine] plugin load FAILED: " << hostErr << std::endl;
-        } else {
-            hostName = loaded->name;
-            hostVendor = loaded->vendor;
-            latencyMs = (loaded->latencySamples + 512.0) / 44100.0 * 1000.0;
-            std::vector<int> sortedChannels;
-            for (const auto& [trackId, ch] : channelOfTrack) {
-                table.pluginChannels.insert(ch);
-                table.channelOfTrack[trackId] = ch;
-                sortedChannels.push_back(ch);
-            }
-            std::sort(sortedChannels.begin(), sortedChannels.end());
-            for (const int ch : sortedChannels) {
-                if (!channelsJson.empty()) channelsJson += ",";
-                channelsJson += std::to_string(ch);
-            }
-            // Swap in under voicesMutex; the OLD instance (if any) is released
-            // and destroyed outside the lock.
-            std::unique_ptr<HostedPlugin> oldHosted;
+        // Hosted channels flow from the load's channels map in ALL accepted
+        // plugin paths (reuse fast path AND async init): the routing table
+        // below must carry them even before the worker lands the instance
+        // (the callback's toPlugin check additionally requires a live
+        // instance, so the map alone can never route into a dead plugin).
+        std::vector<int> sortedChannels;
+        for (const auto& [trackId, ch] : channelOfTrack) {
+            table.pluginChannels.insert(ch);
+            table.channelOfTrack[trackId] = ch;
+            sortedChannels.push_back(ch);
+        }
+        std::sort(sortedChannels.begin(), sortedChannels.end());
+        for (const int ch : sortedChannels) {
+            if (!channelsJson.empty()) channelsJson += ",";
+            channelsJson += std::to_string(ch);
+        }
+
+        if (midPlayReuse) {
+            // ── Fast path: SAME plugin on a rolling transport. The live
+            // instance is kept untouched (no re-instantiate, no swap, no
+            // release) — only events + routing swapped above. This is the
+            // mid-play live-edit reload, and it costs milliseconds.
             {
                 std::lock_guard<std::mutex> lock(g_engine.voicesMutex);
-                oldHosted = std::move(g_hosted);
-                g_hosted = std::move(loaded);
+                if (g_hosted) {
+                    hostName = g_hosted->name;
+                    hostVendor = g_hosted->vendor;
+                    latencyMs = (g_hosted->latencySamples + 512.0) / 44100.0 * 1000.0;
+                }
             }
-            if (oldHosted && oldHosted->instance) {
-                oldHosted->instance->releaseResources();
-                oldHosted.reset();
-            }
+            engineLog("[plugin] reuse while playing — no re-instantiate | seq " +
+                      std::to_string(seq) + " channels=[" + channelsJson + "]");
+            std::cout << "[engine] plugin reused (mid-play, seq " << seq << ")" << std::endl;
             sendPluginState(ws, "loaded", hostName, hostVendor, latencyMs, "", channelsJson);
-            std::cout << "[engine] plugin loaded: name=" << hostName << " vendor=" << hostVendor
-                      << " latency=" << latencyMs << "ms channels=[" << channelsJson << "]" << std::endl;
+        } else {
+            // ── Async init: queue for the worker. The instantiate takes
+            // seconds for a real orchestra library (receipts: 5.7s for
+            // BBCSO) — it must NEVER run on the WS thread: the frozen loop
+            // delayed queued transport commands and timed out the NEXT
+            // load's loadAck. loadAck/state above already went out in
+            // milliseconds; plugin_state arrives when the instance is real.
+            {
+                std::lock_guard<std::mutex> lock(g_pluginInitMutex);
+                g_pluginInitRequest = PluginInitRequest{pluginVar, seq, channelsJson};
+                g_pluginInitPending = true;
+                ++g_pluginInitGen;
+            }
+            g_pluginInitCv.notify_one();
+            const std::string reqUid = pluginVar.getDynamicObject()->getProperty("uid").toString().toStdString();
+            engineLog("[plugin] init started (async) uid=" + reqUid +
+                      " | seq " + std::to_string(seq) +
+                      " — loadAck not delayed, plugin_state follows on completion");
+            std::cout << "[engine] plugin init queued (async, seq " << seq << ")" << std::endl;
         }
     }
 
@@ -1590,6 +1692,24 @@ int main(int argc, char** argv) {
 
     ix::initNetSystem();
 
+    // Stage 3c-regression — JUCE MessageManager pump thread.
+    // The VST3 wrapper touches the MessageManager (lazy singleton) during
+    // instantiate/prepare. With async init, the FIRST touch used to happen on
+    // the init worker — making the WORKER the message thread — and the worker
+    // never pumps messages, so any other thread that then needed the
+    // MessageManagerLock (audioDeviceAboutToStart's prepareToPlay inside the
+    // first transport play) blocked FOREVER. The old synchronous code worked
+    // only because load and AboutToStart ran on the same thread.
+    // The pump owns the MessageManager for the process lifetime: the worker,
+    // the WS threads and the audio path all just post to it.
+    std::thread mm_pump_thread([]() {
+        juce::MessageManager::getInstance();   // created ON this thread
+        // Blocks until main() calls stopDispatchLoop() at shutdown. The loop
+        // is event-driven (no polling, no keep-alive): it wakes for every
+        // posted JUCE message and sleeps otherwise.
+        juce::MessageManager::getInstance()->runDispatchLoop();
+    });
+
     // Stage 3b-fix: NO audio initialization at startup. Audio is brought up
     // lazily on the first transport play (or simulated via --null-audio), so
     // a headless machine boots cleanly and the protocol test does not depend
@@ -1728,6 +1848,96 @@ int main(int argc, char** argv) {
         }
     });
 
+    // Stage 3c-regression — plugin init worker: instantiates VST3s OFF the WS
+    // thread (BBCSO took 5.7s and froze the loop behind it). Single worker,
+    // latest request wins; the instance is prepared for the REAL device
+    // config BEFORE it becomes visible to the audio callback; plugin_state +
+    // engine.log receipts are emitted on completion. Joined after
+    // server.stop() like the state broadcaster, so sends stay valid.
+    std::thread plugin_init_thread([&server]() {
+        uint64_t seenGen = 0;
+        while (!g_should_exit.load()) {
+            PluginInitRequest req;
+            {
+                std::unique_lock<std::mutex> lock(g_pluginInitMutex);
+                g_pluginInitCv.wait_for(lock, std::chrono::milliseconds(100), [] {
+                    return g_pluginInitPending || g_should_exit.load();
+                });
+                if (!g_pluginInitPending) continue;   // spurious wake or shutdown
+                req = std::move(g_pluginInitRequest);
+                g_pluginInitRequest = PluginInitRequest{};
+                g_pluginInitPending = false;
+                seenGen = g_pluginInitGen;
+            }
+            const auto t0 = std::chrono::steady_clock::now();
+            std::unique_ptr<HostedPlugin> loaded;
+            const std::string hostErr = loadHostedPlugin(req.pluginVar, loaded);
+            const auto initMs = std::chrono::duration_cast<std::chrono::milliseconds>(
+                std::chrono::steady_clock::now() - t0).count();
+            bool superseded = false;
+            {
+                std::lock_guard<std::mutex> lock(g_pluginInitMutex);
+                superseded = seenGen != g_pluginInitGen;
+            }
+            if (g_should_exit.load()) { loaded.reset(); continue; }
+            if (superseded) {
+                // A newer load queued behind this instantiate — discard this
+                // instance; the loop picks up the newest request next pass.
+                engineLog("[plugin] init superseded after " + std::to_string(initMs) +
+                          "ms — instance discarded | seq " + std::to_string(req.seq));
+                loaded.reset();
+                continue;
+            }
+            if (!hostErr.empty()) {
+                engineLog("[plugin] FAILED after " + std::to_string(initMs) + "ms: " + hostErr +
+                          " — previous instance retained | seq " + std::to_string(req.seq));
+                std::cout << "[engine] plugin load FAILED: " << hostErr << std::endl;
+                const std::string ps = std::string("{\"type\":\"plugin_state\",\"state\":\"error\",\"detail\":\"") +
+                    escape_json(hostErr) + " — falling back to test synth\"}";
+                for (auto& client : server.getClients())
+                    if (client) client->send(ps);
+                continue;
+            }
+            // Prepare for the REAL device (create-time used nominal
+            // 44100/512) BEFORE the swap — a mis-prepared instance under a
+            // running callback was the other half of the empty-score
+            // regression.
+            const double devRate = g_engine.sampleRate.load();
+            const int devBuf = g_deviceBufferSize.load();
+            if (devRate > 0.0 && loaded->instance) {
+                loaded->instance->setPlayConfigDetails(0, 2, devRate, devBuf);
+                loaded->instance->prepareToPlay(devRate, devBuf);
+            }
+            if (loaded->instance) loaded->latencySamples = loaded->instance->getLatencySamples();
+            // Swap in under voicesMutex; the OLD instance is released and
+            // destroyed OUTSIDE the lock (nothing can reference it then).
+            std::unique_ptr<HostedPlugin> oldHosted;
+            {
+                std::lock_guard<std::mutex> lock(g_engine.voicesMutex);
+                oldHosted = std::move(g_hosted);
+                g_hosted = std::move(loaded);
+            }
+            if (oldHosted && oldHosted->instance) {
+                oldHosted->instance->releaseResources();
+                oldHosted.reset();
+            }
+            engineLog("[plugin] loaded name=" + g_hosted->name + " vendor=" + g_hosted->vendor +
+                      " in " + std::to_string(initMs) + "ms | seq " + std::to_string(req.seq) +
+                      " channels=[" + req.channelsJson + "]");
+            std::cout << "[engine] plugin loaded: name=" << g_hosted->name
+                      << " vendor=" << g_hosted->vendor
+                      << " init=" << initMs << "ms channels=[" << req.channelsJson << "]" << std::endl;
+            const double latencyMs = (g_hosted->latencySamples + 512.0) / 44100.0 * 1000.0;
+            char latBuf[32];
+            std::snprintf(latBuf, sizeof(latBuf), "%.2f", latencyMs);
+            const std::string ps = std::string("{\"type\":\"plugin_state\",\"state\":\"loaded\",\"name\":\"") +
+                escape_json(g_hosted->name) + "\",\"vendor\":\"" + escape_json(g_hosted->vendor) +
+                "\",\"latencyMs\":" + latBuf + ",\"channels\":[" + req.channelsJson + "]}";
+            for (auto& client : server.getClients())
+                if (client) client->send(ps);
+        }
+    });
+
     std::cout << "[engine] scorch-engine " << kEngineVersion
               << " listening on 127.0.0.1:" << port << std::endl;
 
@@ -1744,6 +1954,10 @@ int main(int argc, char** argv) {
     }
     server.stop();
     state_thread.join();
+    plugin_init_thread.join();
+    // Wake the MM pump (join would otherwise block forever) and let it die.
+    juce::MessageManager::getInstance()->stopDispatchLoop();
+    mm_pump_thread.join();
     shutdownAudio();
     ix::uninitNetSystem();
     engineLog("[engine] clean exit 0");

@@ -467,3 +467,79 @@ Deterministic full-density fixture (NO RNG): 16 channels × 27 bars × 16 sixtee
 - juce::JSON::parse exposes no error position: a top-level parse failure is logged with byte size + a sanitized 80-char prefix, not a char offset. Per-event failures name exact indices; the top-level path cannot be more precise than the library allows.
 - CI proves receipt arithmetic + the scale round-trip on the null device (and the stand-in host test still proves hosting/gating separately); whether the user's specific failure reproduces on Windows with their project is exactly what the engine.log pull will show.
 - By-ear gate unchanged: CI cannot prove the user's project sounds right — only that a load that arrives is counted, and a load that doesn't is now loud about it.
+
+## Stage 3c-regression — the receipts named the joint: mid-play load re-entry (v0.2.1)
+
+The user pulled the receipt pair from the empty-score run. Verdict: the load
+joint is EXONERATED (809/809 events, 0 skipped, `firstError -1`, 86,854 bytes,
+three loads — no parse failure, no size cap, no serialization loss), and the
+receipts caught the real chain red-handed:
+
+1. `handle_load` instantiated the VST3 synchronously on the WS thread
+   (receipts: seq 1 parsed in 8 ms, then the loop froze 5.708 s inside
+   BBCSO's `createPluginInstance`). Every message queued behind it —
+   including the transport play.
+2. The frontend re-sent the SAME already-acked load twice more (seq 2 at
+   +14 ms, seq 3 after a state{playing} flip): the mid-play reload effect
+   re-fired on every `enginePlaying` transition with no
+   already-confirmed guard.
+3. Seq 2 landed 5 ms AFTER transport play → the engine re-instantiated the
+   plugin on a ROLLING transport: the live instance was released, the
+   swapped-in one kept its create-time prepare (nominal 44100/512) and was
+   never re-prepared for the real device (`audioDeviceAboutToStart` does not
+   re-run). Transport kept rolling (per-buffer event rescan survives an
+   events swap) on a dead plugin graph: "playing · bar X" + silence + ~0
+   CPU — the original regression, twice in one trace.
+
+### Engine policy (v0.2.1, additive only)
+
+- Rolling-transport guard: while `playing`, a load whose `plugin` field
+  differs from the live instance is REJECTED —
+  `{"type":"error","code":"load_rejected","echo":"load","detail":"..."}` +
+  `[load] REJECTED while playing` receipt; score, routing, plugin and
+  transport are left COMPLETELY untouched. Same-plugin loads (the live-edit
+  reload) take the reuse fast path: routing-only swap, no re-instantiate,
+  `[plugin] reuse while playing` receipt. Non-plugin loads stay allowed
+  (events swap is per-buffer rescan-safe).
+- Async plugin init: `handle_load` only QUEUES the request (single worker,
+  latest-wins generation guard — two orchestra loads can never instantiate
+  concurrently). `loadAck`/`state` go out in milliseconds; `plugin_state`
+  arrives from the worker on completion. The worker prepares the instance
+  for the REAL device config (captured in `audioDeviceAboutToStart`) BEFORE
+  the swap under `voicesMutex`; the old instance is released outside the
+  lock. Receipts: `[plugin] init started (async)`, `[plugin] loaded ... in
+  <N>ms`, `[plugin] FAILED ...`, `[plugin] init superseded`.
+- Load receipt per-track entries now carry the routing disposition
+  (`trk_horns=97[ch2] trk_violins_ii=146[synth]`): a track absent from the
+  channels map rides the test synth EVEN IF its project midiChannel
+  numerically matches a hosted channel — the receipt now says which.
+
+### Frontend (one line of behavior change)
+
+- The mid-play reload effect skips when `lastLoadedRef.current === project`
+  (only CONFIRMED loads are cached): the duplicate second/third sends are
+  gone; a genuine mid-play edit still reloads (same-plugin fast path or
+  non-plugin swap). A plugin-change load mid-play surfaces the engine's
+  `load_rejected` through the existing error path (toast + error.log) and
+  the current score keeps playing.
+
+### CI (desktop.yml + test-engine-protocol.mjs)
+
+- null-audio: mid-play NON-plugin reload while playing must be ACKED and
+  playback continues (live-edit contract, seq 2).
+- host: phases 6–10 — stopped re-host (async init), play, SAME-plugin
+  mid-play reload (reuse fast path), DIFFERENT-plugin mid-play load
+  REJECTED, transport still playing afterwards, clean stop.
+- Receipt assertions extended: `init started (async)` ≥ 2, `loaded name=` ≥ 2,
+  `reuse while playing` ≥ 1, `REJECTED while playing` ≥ 1.
+- Version bumped 0.2.0 → 0.2.1 so the user's next `engine.log` start line
+  proves they are running this fix.
+
+### Untested claims (fire-rate honesty)
+
+- CI proves the guard + async paths on the null device and the stand-in
+  VST3 (millisecond init). BBCSO-scale init (seconds) off-thread, and the
+  audible result on the user's machine, remain the by-ear gate.
+- The worker instantiate is not interruptible: a shutdown arriving during a
+  multi-second BBCSO init waits for it to return (same worst case as the
+  pre-fix behavior, which froze the WS thread for the same duration).

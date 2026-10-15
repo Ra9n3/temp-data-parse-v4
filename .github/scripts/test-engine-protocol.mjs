@@ -107,6 +107,7 @@ let step = 0;
 let helloOk = false, pongOk = false, errorOk = false;
 let loadAckOk = false, loadOk = false, play1Ok = false, adv1Ok = false, stopOk = false;
 let play2Ok = false, adv2Ok = false, panicOk = false;
+let midPlayAckOk = false;   // Stage 3c-regression: mid-play live-edit reload contract
 let first1 = 0, last1 = 0, frames1 = 0, stopTick = 0, first2 = 0, last2 = 0, frames2 = 0;
 // no-device mode flags
 let noDeviceErrOk = false, pongAfterErrOk = false, stillFunctionalOk = false;
@@ -125,13 +126,13 @@ const fail = (msg) => {
 
 const timeout = setTimeout(() => {
   if (mode === "null-audio") {
-    console.error(`TIMEOUT at step ${step} (hello=${helloOk} pong=${pongOk} error=${errorOk} loadAck=${loadAckOk} load=${loadOk} play1=${play1Ok} adv1=${adv1Ok} stop=${stopOk} play2=${play2Ok} adv2=${adv2Ok} panic=${panicOk})`);
+    console.error(`TIMEOUT at step ${step} (hello=${helloOk} pong=${pongOk} error=${errorOk} loadAck=${loadAckOk} load=${loadOk} play1=${play1Ok} adv1=${adv1Ok} midPlayAck=${midPlayAckOk} stop=${stopOk} play2=${play2Ok} adv2=${adv2Ok} panic=${panicOk})`);
   } else if (mode === "scale") {
     console.error(`TIMEOUT at step ${step} (phase=${scalePhase} scaleAck=${scaleAckOk} negArray=${negArrayOk} negEvent=${negEventOk} restore=${restoreOk} play=${scalePlayOk} ticks=${scaleTicksOk} stop=${scaleStopOk} panic=${scalePanicOk} sent=${SCALE_SENT} events/${SCALE_SENT_BYTES} bytes)`);
   } else if (mode === "scan") {
     console.error(`TIMEOUT at step ${step} (hello=${helloOk} scanSent=${scanSent} scanResult=${scanResultOk} aliveAfterCrash=${aliveAfterCrashOk} defaultScan=${defaultScanOk})`);
   } else if (mode === "host") {
-    console.error(`TIMEOUT at step ${step} phase=${hostPhase} (scan=${hostScanSent} pluginState=${hostPluginStateOk} peaks A/B/C=${hostPeakA.toFixed(3)}/${hostPeakB.toFixed(3)}/${hostPeakC.toFixed(3)} entries=${hostEntries.length})`);
+    console.error(`TIMEOUT at step ${step} phase=${hostPhase} (scan=${hostScanSent} pluginState=${hostPluginStateOk} reloadAck=${hostReloadAckOk} reject=${hostRejectOk} stillPlaying=${hostPlayingAfterReject} peaks A/B/C=${hostPeakA.toFixed(3)}/${hostPeakB.toFixed(3)}/${hostPeakC.toFixed(3)} entries=${hostEntries.length})`);
   } else {
     console.error(`TIMEOUT at step ${step} (hello=${helloOk} pong=${pongOk} load=${loadOk} noDeviceErr=${noDeviceErrOk} pongAfterErr=${pongAfterErrOk} stillFunctional=${stillFunctionalOk})`);
   }
@@ -142,6 +143,8 @@ const timeout = setTimeout(() => {
 let scanSent = false, scanResultOk = false, aliveAfterCrashOk = false, defaultScanOk = false;
 // host-mode flags + shared collection
 let hostScanSent = false, hostPluginStateOk = false, hostPhase = 0;
+let hostValidUid = "", hostValidPath = "", hostValidName = "";
+let hostReloadAckOk = false, hostRejectOk = false, hostPlayingAfterReject = false;
 const hostEntries = [];   // accumulated dispatch ledger entries
 const hostStates = [];    // {tick, peak} while playing (tick-correlated)
 let hostPeakA = 0, hostPeakB = 0, hostPeakC = 0;   // assertion results
@@ -237,11 +240,13 @@ ws.addEventListener("message", (event) => {
     } else if (msg.type === "scan_result" && hostScanSent && hostPhase === 0) {
       const valid = (msg.plugins ?? []).find((p) => p.name === "Scorch Test Synth");
       if (!valid) fail(`host mode: stand-in plugin not found in scan (${JSON.stringify(msg.plugins)})`);
+      hostValidUid = valid.uid; hostValidPath = valid.path; hostValidName = valid.name;
       console.log(`[test] stand-in host found: "${valid.name}" uid=${valid.uid} — enabling dispatch_log + loading`);
       hostPhase = 1;
       ws.send(JSON.stringify({ type: "dispatch_log", enable: true }));
       ws.send(JSON.stringify({
         type: "load",
+        seq: 1,
         events: HOST_EVENTS,
         meta: HOST_META,
         channels: { t1: 1, t2: 2 },
@@ -281,11 +286,62 @@ ws.addEventListener("message", (event) => {
     } else if (msg.type === "state" && hostPhase === 5) {
       if (msg.playing === false) {
         if ((msg.peak ?? 0) >= 0.02) fail(`after stop peak ${msg.peak} — hosted voices not killed cleanly`);
-        console.log(`[test] phase D ✓ stop → playing=false, peak=${msg.peak} (hosted voices killed) — shutdown`);
+        console.log(`[test] phase D ✓ stop → playing=false, peak=${msg.peak} (hosted voices killed) — re-hosting SAME plugin while STOPPED (async init path, seq 2)`);
         hostPhase = 6;
+        ws.send(JSON.stringify({
+          type: "load",
+          seq: 2,
+          events: HOST_EVENTS,
+          meta: HOST_META,
+          channels: { t1: 1, t2: 2 },
+          plugin: { uid: hostValidUid, path: hostValidPath, name: hostValidName },
+        }));
+      }
+    } else if (msg.type === "plugin_state" && hostPhase === 6) {
+      // Stage 3c-regression: plugin init is ASYNC — this plugin_state comes
+      // from the init worker thread after the off-thread instantiate.
+      if (msg.state !== "loaded") fail(`phase 6: plugin_state must be loaded, got ${msg.state} (${msg.detail ?? ""})`);
+      console.log(`[test] phase E ✓ async re-host while stopped ("${msg.name}") — playing again`);
+      hostPhase = 7;
+      ws.send(JSON.stringify({ type: "transport", command: "play", tick: 0 }));
+    } else if (msg.type === "state" && hostPhase === 7 && msg.playing) {
+      console.log("[test] phase F — sending SAME-plugin load mid-play (reuse fast path, seq 3)");
+      hostPhase = 8;
+      ws.send(JSON.stringify({
+        type: "load",
+        seq: 3,
+        events: HOST_EVENTS,
+        meta: HOST_META,
+        channels: { t1: 1, t2: 2 },
+        plugin: { uid: hostValidUid, path: hostValidPath, name: hostValidName },
+      }));
+    } else if (msg.type === "loadAck" && hostPhase === 8 && msg.seq === 3 && !hostReloadAckOk) {
+      hostReloadAckOk = true;
+      console.log("[test] phase F ✓ same-plugin mid-play reload ACKED (live instance reused, no re-instantiate) — sending DIFFERENT-plugin load (must be REJECTED, seq 4)");
+      hostPhase = 9;
+      ws.send(JSON.stringify({
+        type: "load",
+        seq: 4,
+        events: HOST_EVENTS,
+        meta: HOST_META,
+        channels: { t1: 1, t2: 2 },
+        plugin: { uid: hostValidUid + "0", path: hostValidPath, name: hostValidName },
+      }));
+    } else if (msg.type === "error" && hostPhase === 9 && msg.code === "load_rejected" && !hostRejectOk) {
+      hostRejectOk = true;
+      console.log(`[test] phase G ✓ plugin-change load REJECTED while playing (detail: "${msg.detail}") — waiting for proof the transport still plays`);
+    } else if (msg.type === "state" && hostPhase === 9 && hostRejectOk && msg.playing) {
+      hostPlayingAfterReject = true;
+      console.log("[test] phase G ✓ transport STILL PLAYING after rejection — stopping");
+      hostPhase = 10;
+      ws.send(JSON.stringify({ type: "transport", command: "stop" }));
+    } else if (msg.type === "state" && hostPhase === 10) {
+      if (msg.playing === false) {
+        console.log("[test] phase H ✓ clean stop after the guard sequence — shutdown");
+        hostPhase = 11;
         finishAndShutdown();
       }
-    } else if (msg.type === "error" && hostPluginStateOk) {
+    } else if (msg.type === "error" && hostPluginStateOk && !hostRejectOk) {
       fail(`host mode: unexpected error mid-test: ${msg.code} ${msg.detail ?? ""}`);
     }
     return;
@@ -341,7 +397,7 @@ ws.addEventListener("message", (event) => {
     if (msg.type === "hello" && !helloOk) {
       helloOk = true;
       if (msg.protocol !== 1) fail(`expected protocol 1, got ${msg.protocol}`);
-      if (msg.engineVersion !== "0.2.0") fail(`expected 0.2.0, got ${msg.engineVersion}`);
+      if (msg.engineVersion !== "0.2.1") fail(`expected 0.2.1, got ${msg.engineVersion}`);
       ws.send(JSON.stringify({ type: "ping" }));
     } else if (msg.type === "pong" && !pongOk) {
       pongOk = true;
@@ -386,10 +442,20 @@ ws.addEventListener("message", (event) => {
         // Ticks advance in real time (null device runs the graph).
         if (frames1 >= 3 && last1 > first1) {
           adv1Ok = true;
-          console.log(`[test] ticks ADVANCE (${first1} → ${last1} over ${frames1} frames) — sending transport stop`);
-          ws.send(JSON.stringify({ type: "transport", command: "stop" }));
+          console.log(`[test] ticks ADVANCE (${first1} → ${last1} over ${frames1} frames) — sending mid-play reload (live-edit contract, seq 2)`);
+          // Stage 3c-regression: a NON-plugin load on a rolling transport is
+          // the live-edit reload — must be ACCEPTED (events swap is
+          // per-buffer rescan-safe) and playback must continue.
+          const events2 = events.map((e, i) => i === 2 ? { ...e, data2: 88 } : e);
+          ws.send(JSON.stringify({ type: "load", seq: 2, events: events2, meta }));
         }
       }
+    } else if (msg.type === "loadAck" && loadAckOk && msg.seq === 2 && !midPlayAckOk) {
+      midPlayAckOk = true;
+      if (msg.loaded !== events.length) fail(`mid-play reload: expected ${events.length} loaded, got ${msg.loaded}`);
+      if (msg.skipped !== 0) fail(`mid-play reload: expected 0 skipped, got ${msg.skipped}`);
+      console.log(`[test] mid-play reload ACKED while playing (${msg.loaded}/${msg.received}, byteSize ${msg.byteSize}) ✓ — sending transport stop`);
+      ws.send(JSON.stringify({ type: "transport", command: "stop" }));
     } else if (msg.type === "state" && adv1Ok && !stopOk) {
       if (msg.playing === false) {
         stopOk = true;

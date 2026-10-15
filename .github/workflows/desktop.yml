@@ -107,7 +107,7 @@ jobs:
           # A compile-gated (mute) build cannot print this.
           $versionOut = & "engine/build/scorch-engine.exe" --version
           Write-Host "Version output: $versionOut"
-          if ($versionOut -notmatch "scorch-engine 0\.2\.0") { throw "Version check failed: $versionOut" }
+          if ($versionOut -notmatch "scorch-engine 0\.2\.1") { throw "Version check failed: $versionOut" }
           if ($versionOut -notmatch "audio: built-in") { throw "Audio compile gate still present — engine reports no audio support" }
 
           # Stage 3c-hotfix: start the protocol-test step with a CLEAN
@@ -306,7 +306,18 @@ jobs:
           if ($playReceipts -lt 1) { throw "engine.log missing the play receipt (rendering from tick X, N voices scheduled)" }
           $failReceipts = (Select-String -Path $engineLog -Pattern "\[load-fail\]").Count
           if ($failReceipts -lt 1) { throw "engine.log missing the negative-path receipt (load-fail)" }
-          Write-Host "engine.log receipt assertions passed (scale load, play, load-fail all present)"
+          # Stage 3c-regression: async init + rolling-transport guard receipts
+          # (Test D phase 1 stopped load + phase 6 stopped re-host = 2 each;
+          # phase 8 same-plugin mid-play reuse; phase 9 plugin-change reject).
+          $initReceipts = (Select-String -Path $engineLog -Pattern "\[plugin\] init started \(async\)").Count
+          if ($initReceipts -lt 2) { throw "engine.log missing async plugin-init receipts (got $initReceipts, need 2)" }
+          $loadedReceipts = (Select-String -Path $engineLog -Pattern "\[plugin\] loaded name=").Count
+          if ($loadedReceipts -lt 2) { throw "engine.log missing plugin-loaded receipts (got $loadedReceipts, need 2)" }
+          $reuseReceipts = (Select-String -Path $engineLog -Pattern "\[plugin\] reuse while playing").Count
+          if ($reuseReceipts -lt 1) { throw "engine.log missing the mid-play reuse receipt (same-plugin fast path)" }
+          $rejectReceipts = (Select-String -Path $engineLog -Pattern "\[load\] REJECTED while playing").Count
+          if ($rejectReceipts -lt 1) { throw "engine.log missing the rolling-transport rejection receipt" }
+          Write-Host "engine.log receipt assertions passed (scale load, play, load-fail, async init, reuse, rolling-transport reject all present)"
 
       - run: npm ci
 

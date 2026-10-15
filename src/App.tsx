@@ -530,8 +530,16 @@ export default function App() {
   // Reload engine score when project changes during engine playback. Also
   // ack-gated (Stage 3c-hotfix): a mid-play reload that silently vanished was
   // the other way to end up rendering a stale/empty score.
+  // Stage 3c-regression: SKIP when the engine already holds THIS project's
+  // score (lastLoadedRef caches CONFIRMED loads only). The effect used to
+  // re-send unconditionally on every enginePlaying transition — the receipts
+  // caught it firing 14ms after the initial load's ack (duplicate load) and
+  // AGAIN after a state{playing} flip (third load), each landing on a rolling
+  // transport and re-instantiating the plugin mid-playback. Same object
+  // identity = nothing changed = nothing to reload.
   useEffect(() => {
     if (enginePlaying && engineClientRef.current?.getStatus() === "ready") {
+      if (lastLoadedRef.current === project) return; // already confirmed by loadAck
       const client = engineClientRef.current;
       const stream = buildEngineStream(project);
       const meta: EngineLoadMeta = {
