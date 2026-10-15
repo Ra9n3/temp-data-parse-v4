@@ -265,22 +265,23 @@ public:
         // plugin so hosted voices die cleanly (3b's kill discipline, extended
         // to hosted instances). Events ride along at sample 0.
         juce::MidiBuffer midi;
-        if (g_pendingPanic.exchange(false) && plugin != nullptr) {
+        const bool panicFlush = g_pendingPanic.exchange(false);
+        if (panicFlush && plugin != nullptr) {
             for (int ch = 1; ch <= 16; ++ch)
                 midi.addEvent(juce::MidiMessage::controllerEvent(ch, 120, 0), 0);
         }
         // Mute/solo lost-audibility flush: CC120 on the affected HOSTED
         // channels only (the test-synth voices are killed directly below by
         // the handlers — they don't need a MIDI round-trip).
+        std::vector<int> muteFlush;
         {
             std::lock_guard<std::mutex> mlock(g_muteFlushMutex);
-            if (!g_pendingMuteFlush.empty() && plugin != nullptr) {
-                for (const int ch : g_pendingMuteFlush)
-                    midi.addEvent(juce::MidiMessage::controllerEvent(ch, 120, 0), 0);
-                g_pendingMuteFlush.clear();
-            } else {
-                g_pendingMuteFlush.clear();
-            }
+            muteFlush = std::move(g_pendingMuteFlush);
+            g_pendingMuteFlush.clear();
+        }
+        if (!muteFlush.empty() && plugin != nullptr) {
+            for (const int ch : muteFlush)
+                midi.addEvent(juce::MidiMessage::controllerEvent(ch, 120, 0), 0);
         }
 
         if (!g_engine.playing.load()) {
@@ -305,6 +306,19 @@ public:
         // render the synth path into scratch.
         ensureScratch(static_cast<size_t>(numSamples));
         std::fill(synthScratch.begin(), synthScratch.begin() + numSamples, 0.0f);
+        // Ledger marker for a flush batch (ch=0 synthetic): the CI test
+        // correlates mute-flush position with state peaks by ENGINE TICK, so
+        // runner-speed-dependent message latency can never skew the windows.
+        if ((panicFlush || !muteFlush.empty()) && g_dispatchLog.load(std::memory_order_relaxed)) {
+            const uint64_t idx = g_ledgerWrite.load(std::memory_order_relaxed);
+            if (idx - g_ledgerRead.load(std::memory_order_relaxed) < kLedgerSize) {
+                DispatchEntry& e = g_ledger[idx % kLedgerSize];
+                e.s = startSample;
+                e.t = playStartTick + static_cast<int64_t>(std::llround(static_cast<double>(startSample) / spt));
+                e.k = kEvCC; e.ch = 0; e.d1 = 120; e.d2 = 0;
+                g_ledgerWrite.store(idx + 1, std::memory_order_release);
+            }
+        }
         size_t eventIdx = 0;
         {
             std::lock_guard<std::mutex> elock(g_engine.eventsMutex);

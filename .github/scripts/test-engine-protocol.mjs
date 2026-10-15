@@ -96,10 +96,51 @@ const timeout = setTimeout(() => {
 let scanSent = false, scanResultOk = false, aliveAfterCrashOk = false, defaultScanOk = false;
 // host-mode flags + shared collection
 let hostScanSent = false, hostPluginStateOk = false, hostPhase = 0;
-let hostPeakA = 0, hostPeakB = 0, hostPeakC = 0;
 const hostEntries = [];   // accumulated dispatch ledger entries
-let hostPlayingFrames = 0, hostMuteSentAt = 0, hostUnmuteSentAt = 0;
+const hostStates = [];    // {tick, peak} while playing (tick-correlated)
+let hostPeakA = 0, hostPeakB = 0, hostPeakC = 0;   // assertion results
 let hostLatency = 0, hostDeltaSamples = 0;
+
+// Tick-correlated phase assertions (latency-immune): the mute flush leaves a
+// ch=0 CC120 marker in the ledger; peaks are only compared within windows
+// defined by ENGINE TICKS on either side of that marker.
+function assertHostWindows() {
+  const flush = hostEntries.find((e) => e.k === 2 && e.a === 120 && e.c === 0 && e.t > 200);
+  if (!flush) fail("no mute-flush marker in the dispatch ledger (flush not recorded or gating never applied)");
+  console.log(`[test] mute flush marker at tick ${flush.t}`);
+  const SLACK = 128;  // ~2 state frames of tick slack around the marker
+  // Phase A — UNMUTED window [200, flush−SLACK): the hosted plugin is audible.
+  const before = hostStates.filter((s) => s.tick >= 200 && s.tick < flush.t - SLACK);
+  hostPeakA = before.reduce((m, s) => Math.max(m, s.peak), 0);
+  if (hostPeakA < 0.05) fail(`phase A: peak ${hostPeakA} while unmuted (ticks 200..${flush.t - SLACK}) — hosted plugin not audible`);
+  // Phase B — MUTED window [flush+SLACK, 5200): silence + the gated note
+  // (t=3840, scheduled INSIDE the window) must NEVER dispatch.
+  const during = hostStates.filter((s) => s.tick >= flush.t + SLACK && s.tick < 5200);
+  hostPeakB = during.reduce((m, s) => Math.max(m, s.peak), 0);
+  if (hostPeakB >= 0.02) fail(`phase B: peak ${hostPeakB} while muted (ticks ${flush.t + SLACK}..5200) — mute is not audible (gating broken)`);
+  if (hostEntries.some((e) => e.k === 1 && e.c === 1 && e.t === 3840)) fail("the muted-window note (t=3840) WAS dispatched — gating does not run before the channel send");
+  console.log(`[test] phase A ✓ unmuted peak=${hostPeakA.toFixed(3)}; phase B ✓ muted peak=${hostPeakB.toFixed(3)}, muted-window note gated`);
+  // Phase C — after unmute the late note (t=6144, ch2) must dispatch + sound.
+  const lateNote = hostEntries.find((e) => e.k === 1 && e.c === 2 && e.t === 6144);
+  if (!lateNote) fail("phase C: late note (t=6144, ch2) not in dispatch ledger — unmute did not restore audibility");
+  const after = hostStates.filter((s) => s.tick >= 6144 + 192 && s.tick < 6900);
+  hostPeakC = after.reduce((m, s) => Math.max(m, s.peak), 0);
+  if (hostPeakC < 0.05) fail(`phase C: peak ${hostPeakC} after unmute — late note not audible`);
+  console.log(`[test] phase C ✓ late note dispatched + audible (peak=${hostPeakC.toFixed(3)})`);
+  // UACC pre-trigger arithmetic: CC#32 exactly 38 ticks before its note.
+  const cc32 = hostEntries.find((e) => e.k === 2 && e.a === 32 && e.c === 1);
+  const note1 = hostEntries.find((e) => e.k === 1 && e.c === 1 && e.t === 480);
+  if (!cc32) fail("dispatch ledger has no CC#32 articulation switch");
+  if (!note1) fail("dispatch ledger has no ch1 NOTE_ON at t=480");
+  if (cc32.t !== 442) fail(`CC#32 must dispatch at t=442 (480 − 38 pre-trigger ticks), got t=${cc32.t}`);
+  const spt = 44100 * 60 / (120 * 960);  // 22.96875 samples/tick
+  hostDeltaSamples = note1.s - cc32.s;
+  if (Math.abs(hostDeltaSamples - 38 * spt) > 1.5) fail(`pre-trigger sample delta ${hostDeltaSamples} ≠ 38 ticks (${38 * spt}) — scheduling not sample-accurate`);
+  // Channel routing: ch2 dispatched into the hosted plugin.
+  if (!hostEntries.some((e) => e.k === 1 && e.c === 2 && e.t === 960)) fail("dispatch ledger has no ch2 NOTE_ON at t=960 — channel routing broken");
+  console.log(`[test] pre-trigger ✓ CC#32@t=${cc32.t} (s=${cc32.s}) → note@t=${note1.t} (s=${note1.s}), delta=${hostDeltaSamples} samples (${(hostDeltaSamples / 44.1).toFixed(2)}ms ≈ 20ms profile pre-trigger)`);
+  console.log("[test] channel routing ✓ ch1 + ch2 dispatched into the hosted plugin");
+}
 const HOST_EVENTS = [
   // fader + expression pre-set (the test synth is silent until CC7/CC11 arrive)
   { eventType: "CONTROL_CHANGE", channel: 1, data1: 7, data2: 127, timestampTicks: 0, trackId: "t1" },
@@ -137,6 +178,9 @@ ws.addEventListener("message", (event) => {
 
   if (mode === "host") {
     // ── Stage 3c-2: hosting proof against the free test VST3 ──
+    // COLLECT-then-ASSERT: state peaks are correlated to dispatch-ledger
+    // markers by ENGINE TICK (never by arrival time), so runner-speed-dependent
+    // message latency cannot skew the unmuted/muted windows.
     if (msg.type === "hello" && !hostScanSent) {
       helloOk = true;
       if (msg.protocol !== 1) fail(`expected protocol 1, got ${msg.protocol}`);
@@ -169,62 +213,25 @@ ws.addEventListener("message", (event) => {
       console.log(`[test] plugin_state LOADED: "${msg.name}" vendor="${msg.vendor}" latency=${msg.latencyMs}ms channels=${JSON.stringify(msg.channels)} ✓ (<100ms)`);
       hostPhase = 2;
       ws.send(JSON.stringify({ type: "transport", command: "play", tick: 0 }));
-    } else if (msg.type === "state" && hostPhase === 2) {
-      hostPlayingFrames++;
-      hostPeakA = Math.max(hostPeakA, msg.peak ?? 0);
-      if (msg.playing && msg.tick >= 1700) {
-        // Phase A → unmuted window done. Assert audible, then MUTE.
-        if (hostPeakA < 0.05) fail(`phase A: peak ${hostPeakA} while unmuted — hosted plugin not audible`);
-        console.log(`[test] phase A ✓ unmuted peak=${hostPeakA.toFixed(3)} — muting t1+t2`);
-        hostPhase = 3;
-        hostMuteSentAt = Date.now();
-        ws.send(JSON.stringify({ type: "mix", mutedTracks: ["t1", "t2"], soloTracks: [] }));
-      }
     } else if (msg.type === "dispatch" && hostPhase >= 2) {
       for (const e of msg.entries ?? []) hostEntries.push(e);
-    } else if (msg.type === "state" && hostPhase === 3) {
-      hostPeakB = Math.max(hostPeakB, msg.peak ?? 0);
-      if (msg.playing && msg.tick >= 5200) {
-        // Phase B → muted window done. Assert silence + the gated note was
-        // never dispatched; then UNMUTE.
-        if (hostPeakB >= 0.02) fail(`phase B: peak ${hostPeakB} while muted — mute is not audible (gating broken)`);
-        const gatedNote = hostEntries.find((e) => e.k === 1 && e.c === 1 && e.t === 3840);
-        if (gatedNote) fail("phase B: the muted-window note (t=3840) WAS dispatched — gating does not run before the channel send");
-        console.log(`[test] phase B ✓ muted peak=${hostPeakB.toFixed(3)}, muted-window note gated ✓ — unmuting`);
+    } else if (msg.type === "state" && hostPhase >= 2 && hostPhase <= 4) {
+      if (msg.playing) hostStates.push({ tick: msg.tick, peak: msg.peak ?? 0 });
+      // Phase DRIVING only — all assertions run at the end.
+      if (hostPhase === 2 && msg.playing && msg.tick >= 1700) {
+        console.log(`[test] phase A reached (tick ${msg.tick}) — muting t1+t2`);
+        hostPhase = 3;
+        ws.send(JSON.stringify({ type: "mix", mutedTracks: ["t1", "t2"], soloTracks: [] }));
+      } else if (hostPhase === 3 && msg.playing && msg.tick >= 5200) {
+        console.log(`[test] phase B reached (tick ${msg.tick}) — unmuting`);
         hostPhase = 4;
-        hostUnmuteSentAt = Date.now();
         ws.send(JSON.stringify({ type: "mix", mutedTracks: [], soloTracks: [] }));
-      }
-    } else if (msg.type === "dispatch" && hostPhase === 3) {
-      for (const e of msg.entries ?? []) hostEntries.push(e);
-    } else if (msg.type === "state" && hostPhase === 4) {
-      hostPeakC = Math.max(hostPeakC, msg.peak ?? 0);
-      if (msg.playing && msg.tick >= 6700) {
-        // Phase C → unmuted again. The late note (t=6144) must be audible.
-        if (hostPeakC < 0.05) fail(`phase C: peak ${hostPeakC} after unmute — late note (t=6144) not audible`);
-        const lateNote = hostEntries.find((e) => e.k === 1 && e.c === 2 && e.t === 6144);
-        if (!lateNote) fail("phase C: late note (t=6144, ch2) not in dispatch ledger");
-        console.log(`[test] phase C ✓ unmuted peak=${hostPeakC.toFixed(3)}, late note dispatched ✓ — asserting pre-trigger + routing, then stop`);
-        // UACC pre-trigger arithmetic: CC#32 exactly 38 ticks before the note.
-        const cc32 = hostEntries.find((e) => e.k === 2 && e.a === 32 && e.c === 1);
-        const note1 = hostEntries.find((e) => e.k === 1 && e.c === 1 && e.t === 480);
-        if (!cc32) fail("dispatch ledger has no CC#32 articulation switch");
-        if (!note1) fail("dispatch ledger has no ch1 NOTE_ON at t=480");
-        if (cc32.t !== 442) fail(`CC#32 must dispatch at t=442 (480 − 38 pre-trigger ticks), got t=${cc32.t}`);
-        const spt = 44100 * 60 / (120 * 960);  // 22.96875 samples/tick
-        const delta = note1.s - cc32.s;
-        if (Math.abs(delta - 38 * spt) > 1.5) fail(`pre-trigger sample delta ${delta} ≠ 38 ticks (${38 * spt}) — scheduling not sample-accurate`);
-        // Channel routing: ch2 dispatched into the hosted plugin.
-        const note2 = hostEntries.find((e) => e.k === 1 && e.c === 2 && e.t === 960);
-        if (!note2) fail("dispatch ledger has no ch2 NOTE_ON at t=960 — channel routing broken");
-        console.log(`[test] pre-trigger ✓ CC#32@t=${cc32.t} (s=${cc32.s}) → note@t=${note1.t} (s=${note1.s}), delta=${delta} samples (${(delta / 44.1).toFixed(2)}ms ≈ 20ms profile pre-trigger)`);
-        console.log("[test] channel routing ✓ ch1 + ch2 dispatched into the hosted plugin");
-        hostDeltaSamples = delta;
+      } else if (hostPhase === 4 && msg.playing && msg.tick >= 6900) {
+        console.log("[test] phase C reached (tick " + msg.tick + ") — running assertions, then stop");
+        assertHostWindows();
         hostPhase = 5;
         ws.send(JSON.stringify({ type: "transport", command: "stop" }));
       }
-    } else if (msg.type === "dispatch" && hostPhase === 4) {
-      for (const e of msg.entries ?? []) hostEntries.push(e);
     } else if (msg.type === "state" && hostPhase === 5) {
       if (msg.playing === false) {
         if ((msg.peak ?? 0) >= 0.02) fail(`after stop peak ${msg.peak} — hosted voices not killed cleanly`);
