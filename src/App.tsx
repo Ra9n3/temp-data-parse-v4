@@ -6,7 +6,7 @@ import { TopBar } from "./components/TopBar";
 import { Arranger } from "./components/Arranger";
 import { GenerationSettingsPanel } from "./components/GenerationSettingsPanel";
 import { EngineClient, type EngineLoadMeta, type EngineStatus, type PluginStateMessage, type ScanResultMessage } from "./engine/engineClient";
-import { buildEngineStream } from "./engine/engineStream";
+import { buildEngineStream, resolveEngineChannels } from "./engine/engineStream";
 import { PPQ, projectEndTick, tickToBar } from "./shared/schema";
 import {
   AboutDialog,
@@ -529,6 +529,39 @@ export default function App() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [mixSignature, engineDrive]);
 
+  // Stage 3c-3 — channel assignment UI: the resolved map (explicit + first-come
+  // auto) drives the per-track selectors; explicit assignment validates
+  // collisions AT ASSIGNMENT TIME (the engine double-checks at load).
+  const resolvedEngineChannels = useMemo(() => resolveEngineChannels(project), [project]);
+  const handleEngineChannel = useCallback(
+    (trackId: string, ch: number | null) => {
+      if (ch === null) {
+        commit({
+          ...project,
+          tracks: project.tracks.map((t) =>
+            t.id === trackId ? { ...t, engineChannel: undefined } : t,
+          ),
+        });
+        return;
+      }
+      const owner = project.tracks.find(
+        (t) => t.id !== trackId && t.engineChannel === ch,
+      );
+      if (owner) {
+        toast(
+          "error",
+          `Engine channel ${ch} is already assigned to ${owner.name} (engine channel collision)`,
+        );
+        return;
+      }
+      commit({
+        ...project,
+        tracks: project.tracks.map((t) => (t.id === trackId ? { ...t, engineChannel: ch } : t)),
+      });
+    },
+    [project, commit, toast],
+  );
+
   const noteCount = useMemo(
     () => project.tracks.reduce((n, t) => n + t.notes.length, 0),
     [project.tracks],
@@ -670,6 +703,8 @@ export default function App() {
         pixelsPerTick={ppt}
         playheadTick={effectivePlayheadTick}
         pluginLabels={pluginLabels}
+        engineChannels={resolvedEngineChannels}
+        onEngineChannel={handleEngineChannel}
         audioBuffer={audioBuffer}
         audioName={audioName}
         selectedTrackId={selectedTrackId}

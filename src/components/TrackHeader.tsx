@@ -11,6 +11,14 @@ interface Props {
   onLock: () => void;
   onOpenVst: () => void;
   onLoadAudio?: () => void;
+  /** Stage 3c-3 — resolved engine channel (explicit or first-come auto),
+   * undefined = test synth. */
+  engineChannelResolved?: number;
+  /** True when track.engineChannel is an EXPLICIT assignment. */
+  engineChannelExplicit?: boolean;
+  /** Channel-assignment handler: null clears the explicit assignment (back to
+   * auto); 1–16 sets it. The caller owns collision validation. */
+  onEngineChannel?: (ch: number | null) => void;
 }
 
 export function TrackHeader({
@@ -21,6 +29,9 @@ export function TrackHeader({
   onLock,
   onOpenVst,
   onLoadAudio,
+  engineChannelResolved,
+  engineChannelExplicit,
+  onEngineChannel,
 }: Props) {
   // Patch 4 — the "CC" button, its popup and the expression-editor callback
   // are REMOVED from the UI. track.expressionMapping itself stays in the
@@ -71,6 +82,33 @@ export function TrackHeader({
           )}
         </div>
         <div className="relative flex shrink-0 items-center gap-0.5">
+          {/* Stage 3c-3 — per-track engine-channel selector (compact, per the
+              brief). "·" = auto/unrouted (test synth); numbers are hosted
+              channels. The caller validates collisions at assignment time. */}
+          {!isAudio && !isStructure && onEngineChannel && (
+            <select
+              value={engineChannelExplicit && engineChannelResolved ? engineChannelResolved : ""}
+              onChange={(e) => onEngineChannel(e.target.value === "" ? null : Number(e.target.value))}
+              title={
+                engineChannelResolved
+                  ? `Engine channel ${engineChannelResolved}${engineChannelExplicit ? " (explicit)" : " (auto)"} — hosted VST3`
+                  : "Engine channel: auto (test synth) — pick 1–16 to host on the plugin"
+              }
+              className={cn(
+                "h-7 w-[38px] rounded-md text-[11px] outline-none ring-1",
+                engineChannelResolved
+                  ? engineChannelExplicit
+                    ? "bg-sky-500/20 text-sky-200 ring-sky-400/40"
+                    : "bg-sky-500/10 text-sky-300/90 ring-sky-400/20"
+                  : "bg-white/5 text-stone-500 ring-white/10",
+              )}
+            >
+              <option value="" title="Auto (test synth unless plugin-routed)">·</option>
+              {Array.from({ length: 16 }, (_, i) => i + 1).map((ch) => (
+                <option key={ch} value={ch}>{ch}</option>
+              ))}
+            </select>
+          )}
           <IconBtn
             label={track.locked ? "Unlock track" : "Lock track"}
             active={track.locked}

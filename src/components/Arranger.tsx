@@ -62,6 +62,9 @@ interface Props {
   onAddTrack: (family: Family) => void;
   onSelectTrack: (id: string | null) => void;
   onOpenPianoRoll: (id: string) => void;
+  // Stage 3c-3 — engine-channel assignment (per-track compact selector).
+  engineChannels: Record<string, number>;
+  onEngineChannel: (id: string, ch: number | null) => void;
   // Chord v2 — editing chord id is owned by App (top-bar panel needs it).
   editingChord: string | null;
   onEditChord: (id: string | null) => void;
@@ -192,6 +195,8 @@ export function Arranger(props: Props) {
     pixelsPerTick: ppt,
     playheadTick,
     pluginLabels,
+    engineChannels,
+    onEngineChannel,
     audioBuffer,
     audioName,
     selectedTrackId,
@@ -400,6 +405,9 @@ export function Arranger(props: Props) {
             onToggleLock={() => onToggleLock(track.id)}
             onOpenVst={() => onOpenVst(track.id)}
             onLoadAudio={onLoadAudio}
+            engineChannelResolved={engineChannels[track.id]}
+            engineChannelExplicit={track.engineChannel !== undefined}
+            onEngineChannel={(ch) => onEngineChannel(track.id, ch)}
             onSelectTrack={() => onSelectTrack(track.id)}
             onOpenPianoRoll={() => onOpenPianoRoll(track.id)}
             onSelectSection={(id) => {
@@ -494,6 +502,10 @@ function TrackRow(props: {
   onEditSection: (id: string | null) => void;
   onPatchProject: (patch: Partial<Project>) => void;
   onStartDrag: (d: Drag) => void;
+  // Stage 3c-3 — engine-channel assignment (per-track compact selector).
+  engineChannelResolved?: number;
+  engineChannelExplicit: boolean;
+  onEngineChannel: (ch: number | null) => void;
 }) {
   const { track, project, ppt, timelineWidth, tpBar, tpb } = props;
   return (
@@ -511,7 +523,9 @@ function TrackRow(props: {
           onLock={props.onToggleLock}
           onOpenVst={props.onOpenVst}
           onLoadAudio={props.onLoadAudio}
-
+          engineChannelResolved={props.engineChannelResolved}
+          engineChannelExplicit={props.engineChannelExplicit}
+          onEngineChannel={props.onEngineChannel}
         />
       </div>
       <div
