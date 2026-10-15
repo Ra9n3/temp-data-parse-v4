@@ -344,7 +344,17 @@ jobs:
           if ($releaseReceipts -lt 3) { throw "engine.log missing musical-release stop receipts (got $releaseReceipts, need 3)" }
           $reattackReceipts = (Select-String -Path $engineLog -Pattern "resume re-attacks: [1-9]").Count
           if ($reattackReceipts -lt 1) { throw "engine.log missing a resume re-attack receipt (straddle handling regressed)" }
-          Write-Host "engine.log receipt assertions passed (scale load, play, load-fail, async init, reuse, rolling-transport reject, audio config, prepare config, session peak, musical release, resume re-attacks all present)"
+          # Stage 3d-1: editor-window receipts — unavailable (negative), ONE
+          # real open (single editor per instance), one focus echo, one close.
+          $editorNegReceipts = (Select-String -Path $engineLog -Pattern "\[editor\] open refused — no live instance").Count
+          if ($editorNegReceipts -lt 1) { throw "engine.log missing the editor_unavailable negative-path receipt" }
+          $editorOpenReceipts = (Select-String -Path $engineLog -Pattern "\[editor\] opened instance=").Count
+          if ($editorOpenReceipts -ne 1) { throw "engine.log must show EXACTLY ONE editor open (repeat request focuses, got $editorOpenReceipts)" }
+          $editorFocusReceipts = (Select-String -Path $engineLog -Pattern "\[editor\] focus existing instance=").Count
+          if ($editorFocusReceipts -lt 1) { throw "engine.log missing the repeat-open focus receipt" }
+          $editorCloseReceipts = (Select-String -Path $engineLog -Pattern "\[editor\] closed instance=").Count
+          if ($editorCloseReceipts -lt 1) { throw "engine.log missing the editor close receipt" }
+          Write-Host "engine.log receipt assertions passed (scale load, play, load-fail, async init, reuse, rolling-transport reject, audio config, prepare config, session peak, musical release, resume re-attacks, editor unavailable/open=x1/focus/close all present)"
 
       - run: npm ci
 

@@ -62,6 +62,12 @@ interface Props {
   onAddTrack: (family: Family) => void;
   onSelectTrack: (id: string | null) => void;
   onOpenPianoRoll: (id: string) => void;
+  // Stage 3d-1 — request the hosted plugin's editor window. Present ONLY when
+  // a plugin is actually hosted (plugin_state loaded); the track button then
+  // opens the editor instead of the VST browser. editorOpen: the hosted
+  // editor is currently open (one hosted instance ⇒ one shared flag).
+  onOpenEditor?: (id: string) => void;
+  editorOpen?: boolean;
   // Stage 3c-3 — engine-channel assignment (per-track compact selector).
   engineChannels: Record<string, number>;
   onEngineChannel: (id: string, ch: number | null) => void;
@@ -212,6 +218,8 @@ export function Arranger(props: Props) {
     onAddTrack,
     onSelectTrack,
     onOpenPianoRoll,
+    onOpenEditor,
+    editorOpen,
     editingChord,
     onEditChord,
   } = props;
@@ -404,6 +412,8 @@ export function Arranger(props: Props) {
             onToggleSolo={() => onToggleSolo(track.id)}
             onToggleLock={() => onToggleLock(track.id)}
             onOpenVst={() => onOpenVst(track.id)}
+            onOpenEditor={onOpenEditor ? () => onOpenEditor(track.id) : undefined}
+            editorOpen={editorOpen}
             onLoadAudio={onLoadAudio}
             engineChannelResolved={engineChannels[track.id]}
             engineChannelExplicit={track.engineChannel !== undefined}
@@ -493,6 +503,9 @@ function TrackRow(props: {
   onToggleSolo: () => void;
   onToggleLock: () => void;
   onOpenVst: () => void;
+  // Stage 3d-1 — editor-window request (present only when a plugin is hosted).
+  onOpenEditor?: () => void;
+  editorOpen?: boolean;
   onLoadAudio: () => void;
   onSelectTrack: () => void;
   onOpenPianoRoll: () => void;
@@ -522,6 +535,8 @@ function TrackRow(props: {
           onSolo={props.onToggleSolo}
           onLock={props.onToggleLock}
           onOpenVst={props.onOpenVst}
+          onOpenEditor={props.onOpenEditor}
+          editorOpen={props.editorOpen}
           onLoadAudio={props.onLoadAudio}
           engineChannelResolved={props.engineChannelResolved}
           engineChannelExplicit={props.engineChannelExplicit}

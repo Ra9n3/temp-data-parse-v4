@@ -10,6 +10,12 @@ interface Props {
   onSolo: () => void;
   onLock: () => void;
   onOpenVst: () => void;
+  /** Stage 3d-1 — present only when a plugin is actually hosted: the plugin
+   * button then opens the engine-owned editor window (the hosted library's
+   * own UI) instead of the VST browser. Absent → browser (assignment). */
+  onOpenEditor?: () => void;
+  /** Stage 3d-1 — the hosted editor window is currently open. */
+  editorOpen?: boolean;
   onLoadAudio?: () => void;
   /** Stage 3c-3 — resolved engine channel (explicit or first-come auto),
    * undefined = test synth. */
@@ -28,6 +34,8 @@ export function TrackHeader({
   onSolo,
   onLock,
   onOpenVst,
+  onOpenEditor,
+  editorOpen,
   onLoadAudio,
   engineChannelResolved,
   engineChannelExplicit,
@@ -60,24 +68,30 @@ export function TrackHeader({
           ) : (
             <button
               type="button"
-              onClick={vstDisabled ? undefined : onOpenVst}
+              onClick={vstDisabled ? undefined : (onOpenEditor ?? onOpenVst)}
               disabled={vstDisabled}
               title={
                 vstDisabled
                   ? "VST hosting is for instrument tracks"
-                  : pluginLabel === "No plugin"
-                    ? "Assign a VST3 (preview browser)"
-                    : pluginLabel
+                  : onOpenEditor
+                    ? editorOpen
+                      ? `${pluginLabel} editor is open — click to focus it`
+                      : `Open the ${pluginLabel} editor (choose sounds, tweak settings)`
+                    : pluginLabel === "No plugin"
+                      ? "Assign a VST3 (preview browser)"
+                      : pluginLabel
               }
               className={cn(
                 "mt-1 inline-flex max-w-full items-center gap-1.5 rounded-md px-1.5 py-0.5 text-[11px] font-medium ring-1",
                 vstDisabled
                   ? "cursor-not-allowed bg-white/5 text-stone-500 ring-white/10"
-                  : "bg-orange-500/20 text-orange-200 ring-orange-400/30 hover:bg-orange-500/30",
+                  : editorOpen && onOpenEditor
+                    ? "bg-orange-500/35 text-orange-100 ring-orange-300/50 hover:bg-orange-500/45"
+                    : "bg-orange-500/20 text-orange-200 ring-orange-400/30 hover:bg-orange-500/30",
               )}
             >
               <Ph name="plug" className="h-3 w-3 shrink-0" />
-              <span className="truncate">{vstDisabled ? "—" : pluginLabel}</span>
+              <span className="truncate">{vstDisabled ? "—" : onOpenEditor ? `${pluginLabel} · editor` : pluginLabel}</span>
             </button>
           )}
         </div>

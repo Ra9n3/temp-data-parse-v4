@@ -15,7 +15,9 @@
 //     logged to stdout as "[testvst] s=<abs sample> ch=<n> k=<kind> d1=.. d2=.."
 //     — the end-to-end proof that the ENGINE routed events to the plugin on
 //     the expected channels.
-// No editor, no state, no RNG: same input ⇒ same output.
+// Stage 3d-1: the fixture SHIPS an editor (deterministic 360x120) so CI can
+// prove the openEditor/closeEditor contract on a free plugin. No state yet
+// (3d-3), no RNG: same input ⇒ same output.
 
 #pragma once
 
@@ -81,7 +83,7 @@ public:
         }
     }
 
-    // ── Boilerplate (no editor, no state, no tail) ─────────────────────────
+    // ── Boilerplate (editor since 3d-1; state arrives in 3d-3; no tail) ────
     const juce::String getName() const override { return "Scorch Test Synth"; }
     bool acceptsMidi() const override { return true; }
     bool producesMidi() const override { return false; }
@@ -94,8 +96,27 @@ public:
     void changeProgramName(int, const juce::String&) override {}
     void getStateInformation(juce::MemoryBlock& dest) override { dest.setSize(0, true); }
     void setStateInformation(const void*, int) override {}
-    juce::AudioProcessorEditor* createEditor() override { return nullptr; }
-    bool hasEditor() const override { return false; }
+
+    // Stage 3d-1: the fixture SHIPS an editor. The 3d-1 acceptance proves
+    // editors are UNIVERSAL — the CI contract (openEditor → editorOpened with
+    // real geometry → closeEditor → editorClosed) needs a free, in-repo,
+    // editor-carrying plugin, because CI cannot host commercial libraries.
+    // Deterministic fixed size (no layout logic, no RNG).
+    class TinyEditor : public juce::AudioProcessorEditor {
+    public:
+        explicit TinyEditor(ScorchTestSynthProcessor& p) : juce::AudioProcessorEditor(p) {
+            setSize(360, 120);
+        }
+        void paint(juce::Graphics& g) override {
+            g.fillAll(juce::Colour(0xff14161f));
+            g.setColour(juce::Colour(0xfff5f5f4));
+            g.setFont(14.0f);
+            g.drawText("Scorch Test Synth — editor", getLocalBounds(),
+                       juce::Justification::centred);
+        }
+    };
+    juce::AudioProcessorEditor* createEditor() override { return new TinyEditor(*this); }
+    bool hasEditor() const override { return true; }
 
 private:
     static constexpr int kMaxVoices = 32;

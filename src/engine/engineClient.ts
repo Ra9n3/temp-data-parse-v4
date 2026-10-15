@@ -115,7 +115,28 @@ export interface PluginStateMessage {
   detail?: string;
 }
 
-type EngineMessage = HelloMessage | PongMessage | ErrorMessage | StateMessage | ScanResultMessage | PluginStateMessage | LoadAckMessage;
+/** Stage 3d-1 — the hosted plugin's editor window is up. A repeat openEditor
+ * request RAISES the existing window (one editor per instance) and re-echoes
+ * this message with focused=true instead of opening a second one. */
+export interface EditorOpenedMessage {
+  type: "editorOpened";
+  instanceId: string;
+  name?: string;
+  width?: number;
+  height?: number;
+  focused?: boolean;
+}
+
+/** Stage 3d-1 — the editor window is gone (protocol close, the window's own
+ * X button, or the plugin instance was replaced/unloaded). */
+export interface EditorClosedMessage {
+  type: "editorClosed";
+  instanceId: string;
+}
+
+export type EditorEventMessage = EditorOpenedMessage | EditorClosedMessage;
+
+type EngineMessage = HelloMessage | PongMessage | ErrorMessage | StateMessage | ScanResultMessage | PluginStateMessage | LoadAckMessage | EditorEventMessage;
 
 // Deterministic backoff sequence (seconds): 1, 2, 4, 8, 16 — no jitter.
 const BACKOFF_SEQUENCE = [1, 2, 4, 8, 16] as const;
@@ -180,6 +201,8 @@ export class EngineClient {
   private onAudioErrorChange: ((code: string | null, detail: string) => void) | null = null;
   private onScanResultChange: ((result: ScanResultMessage) => void) | null = null;
   private onPluginStateChange: ((result: PluginStateMessage) => void) | null = null;
+  // Stage 3d-1: editor window open/close events (engine-owned popups).
+  private onEditorChange: ((msg: EditorEventMessage) => void) | null = null;
   private onErrorChange: ((code: string, echo: string, detail: string) => void) | null = null;
   // Stage 3c-hotfix: the in-flight load awaiting its loadAck (single slot —
   // a newer load supersedes an older one; see load()).
@@ -224,6 +247,11 @@ export class EngineClient {
   /** Stage 3c-2: register a callback for plugin hosting outcomes. */
   onPluginState(cb: (result: PluginStateMessage) => void): void {
     this.onPluginStateChange = cb;
+  }
+
+  /** Stage 3d-1: register a callback for editor window open/close events. */
+  onEditor(cb: (msg: EditorEventMessage) => void): void {
+    this.onEditorChange = cb;
   }
 
   /**
@@ -281,6 +309,9 @@ export class EngineClient {
           this.onScanResultChange?.(msg);
         } else if (msg.type === "plugin_state") {
           this.onPluginStateChange?.(msg);
+        } else if (msg.type === "editorOpened" || msg.type === "editorClosed") {
+          // Stage 3d-1: engine-owned editor window lifecycle.
+          this.onEditorChange?.(msg);
         } else if (msg.type === "loadAck") {
           // Stage 3c-hotfix: the engine's load receipt. Resolve the pending load.
           if (this.pendingLoad && (msg.seq === this.pendingLoad.seq || msg.seq === 0)) {
@@ -448,6 +479,25 @@ export class EngineClient {
       const msg: Record<string, unknown> = { type: "scan" };
       if (dirs && dirs.length) msg.dirs = dirs;
       this.ws.send(JSON.stringify(msg));
+    }
+  }
+
+  /**
+   * Stage 3d-1: request the hosted plugin's editor window (an engine-owned
+   * popup — see ASSUMPTIONS.md 3d-1). One editor per instance: a repeat
+   * request raises the existing window. Failure arrives as an
+   * editor_unavailable error (plugins MAY ship no editor).
+   */
+  openEditor(instanceId = "hosted"): void {
+    if (this.ws && this.ws.readyState === WebSocket.OPEN) {
+      this.ws.send(JSON.stringify({ type: "openEditor", instanceId }));
+    }
+  }
+
+  /** Stage 3d-1: close the editor window (idempotent engine-side). */
+  closeEditor(instanceId = "hosted"): void {
+    if (this.ws && this.ws.readyState === WebSocket.OPEN) {
+      this.ws.send(JSON.stringify({ type: "closeEditor", instanceId }));
     }
   }
 

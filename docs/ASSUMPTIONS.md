@@ -749,3 +749,104 @@ default device; a device-settings UI remains future work.
   by the adapter's change-only emission; the suppression is safe under both
   behaviors (idempotent library → no audible difference; re-articulating
   library → the scrape disappears).
+
+## Stage 3d-1 — Plugin editor windows (mechanism investigation + decision)
+
+### The question
+
+The engine hosts VST3s in a separate process. Editor windows must open for
+hosted plugins, close cleanly on unload/engine death, and reopen — with no
+orphan windows. Two mechanisms were investigated before building:
+
+### Option A (CHOSEN) — engine-owned popup windows
+
+The engine's MessageManager pump thread (Stage 3c-regression) IS the
+process's JUCE message thread — the one thread where Component work is
+legal. `openEditor` → the WS thread validates the live instance and
+SCHEDULES via `juce::MessageManager::callAsync`; the pump thread creates a
+`juce::DocumentWindow` owning `AudioPluginInstance::createEditor()`
+(`setContentOwned(editor, true)` — the window frees the editor). A
+mutex-guarded map (`instanceId → window*`) is the single source of truth;
+every close path (protocol `closeEditor`, the window's X button, plugin
+replacement, shutdown) converges on one message-thread destroy function.
+Size is clamped to 85% of the desktop work area (a 4K-native editor stays
+usable on 1080p — DPI "enough to be usable", not perfect; JUCE handles
+per-monitor scaling for the rest).
+
+Why it wins:
+- ZERO shell (Rust) changes — the thin-shell budget is untouched.
+- Lifecycle correct by construction: windows belong to the engine process —
+  engine death (graceful shutdown or kill) closes them with it; no orphans
+  are possible. Plugin replacement closes editors BEFORE the outgoing
+  instance is retired (scheduled close lands on the pump thread well inside
+  the 250ms retire grace period).
+- One editor per instance: a repeat `openEditor` RAISES the existing window
+  and re-echoes `editorOpened` with `focused:true` — never a second window.
+- This is the standard pattern for out-of-process hosts (pluginval et al).
+
+Costs (accepted): editors are OS top-level windows (separate taskbar
+entries), not docked inside the Tauri window.
+
+### Option B (REJECTED) — shell-assisted window (Tauri HWND parent)
+
+Rust creates a child window, ships its HWND over the protocol, the engine
+reparents the JUCE peer into it. JUCE has NO first-class "attach editor to
+a foreign HWND" API — this is per-OS glue (Win32 SetParent + caption strip
++ bidirectional WM_SIZE/focus plumbing; macOS NSView parenting is a
+separate rewrite), plus WebView2 keyboard-focus stealing, DPI scaling
+context mismatches, and an orphan-child-window hazard when the engine dies
+under the shell's window. Moderate Rust + new protocol surface spent for a
+cosmetic gain. Revisit only if docking is ever explicitly requested.
+
+### Protocol diff (additive)
+
+- client→server: `{"type":"openEditor","instanceId"?}` /
+  `{"type":"closeEditor","instanceId"?}` — instanceId is an opaque echo
+  (default `"hosted"`; Scorch hosts ONE instance — the registry map already
+  supports several for future multi-plugin hosting).
+- server→client: `{"type":"editorOpened","instanceId","name","width",
+  "height"[,"focused":true]}` and `{"type":"editorClosed","instanceId"}`.
+- error `{"code":"editor_unavailable"}` — no live instance, or the plugin
+  ships no editor (`createEditor() == nullptr`). Plugins MAY be headless;
+  that is a normal named reply, not a fault. Frontend toast:
+  "editor unavailable for this plugin".
+- Frontend: the track header's plugin button opens the EDITOR while a
+  plugin is hosted (`plugin_state` loaded); otherwise it keeps opening the
+  VST browser (assignment). The chooser flow remains ABSENT (no
+  AudioDeviceSelectorComponent anywhere — verified in 3c close-out).
+
+### Fixture
+
+`ScorchTestSynth` ships a deterministic 360x120 editor since this stage —
+CI proves the full contract (open → real geometry → repeat-raises → close)
+on a free plugin. CI also asserts the negative path BEFORE any hosting and
+exactly ONE `[editor] opened` receipt in engine.log.
+
+### CI evidence + fire-rate honesty
+
+- host mode phases N (negative), J (open), K (focus), L (close), plus
+  engine.log receipt greps (unavailable / opened×1 / focus / closed).
+- EMPIRICAL FINDING (local, display-less Linux container): without a guard,
+  the engine DIED SILENTLY at window creation (getPrimaryDisplay()/peer
+  creation with no X server). Fixed in this stage: a display-less host now
+  answers `editor_unavailable` ("no display available for an editor
+  window") and stays protocol-functional — the same protection covers a
+  Windows machine with a disconnected RDP session. Proven locally.
+- The container's JUCE X11 runtime init never enumerates the Xvfb display
+  (XOpenDisplay works; JUCE's XWindowSystem dlopen chain still fails in
+  this environment — time-boxed, environment-specific), so the FULL
+  open/focus/close path is proven by WINDOWS CI (native desktop, native
+  backend) rather than locally. The Linux-local proof ends at the graceful
+  unavailable reply.
+- CI proves: window creation works headless on the runner, the one-editor
+  invariant, clean close, and the unavailable paths (no-instance +
+  headless).
+- CI CANNOT prove: the hosted library's editor opens from the track with
+  patches selectable (BBCSO by-ear), DPI feel on the user's monitor, and
+  that every vendor's editor survives open/close cycles. That is the
+  gauntlet's user-machine half (3d-2).
+- Known limitation (documented, not special-cased): `createEditor()` runs
+  plugin UI code on the engine's message thread — a plugin whose editor
+  CRASHES takes the engine process down (the shell restarts it; the
+  reconnect flow exists). Isolating plugin UI into a subprocess is a
+  future-stage decision, not a name-based workaround.

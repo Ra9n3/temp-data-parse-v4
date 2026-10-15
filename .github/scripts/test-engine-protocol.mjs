@@ -56,6 +56,12 @@
 //         resume tick, sample 0); the redundant CC#32 (same value the channel
 //         is already in) is SUPPRESSED (ledger kind 6) while a genuine change
 //         is SENT; dispatch_log/dispatch protocol shape.
+//       Stage 3d-1: editor windows — openEditor with NO live instance answers
+//         editor_unavailable (normal reply, no crash); after the transport
+//         phases, openEditor OPENS (real geometry), a repeat openEditor
+//         RAISES the existing window (focused=true — ONE editor per
+//         instance), closeEditor closes cleanly. The fixture ships a
+//         deterministic 360x120 editor so a free plugin proves universality.
 //   scale — Stage 3c-hotfix: REAL-PROJECT-SIZED load. The CI gap was scale;
 //     this closes it. A deterministic full-density fixture (16 channels × 27
 //     bars, 13,824 events ≈ 1.1 MB serialized) is sent as ONE load message
@@ -148,7 +154,7 @@ const timeout = setTimeout(() => {
   } else if (mode === "scan") {
     console.error(`TIMEOUT at step ${step} (hello=${helloOk} scanSent=${scanSent} scanResult=${scanResultOk} aliveAfterCrash=${aliveAfterCrashOk} defaultScan=${defaultScanOk})`);
   } else if (mode === "host") {
-    console.error(`TIMEOUT at step ${step} phase=${hostPhase} (scan=${hostScanSent} pluginState=${hostPluginStateOk} reloadAck=${hostReloadAckOk} reject=${hostRejectOk} stillPlaying=${hostPlayingAfterReject} stops=${hostStopTick1}/${hostStopTick2} peaks A/B/C=${hostPeakA.toFixed(3)}/${hostPeakB.toFixed(3)}/${hostPeakC.toFixed(3)} entries=${hostEntries.length})`);
+    console.error(`TIMEOUT at step ${step} phase=${hostPhase} (scan=${hostScanSent} pluginState=${hostPluginStateOk} editorNeg=${hostEditorNegOk} editorOpen=${hostEditorOpenOk} editorFocus=${hostEditorFocusOk} editorClose=${hostEditorCloseOk} reloadAck=${hostReloadAckOk} reject=${hostRejectOk} stillPlaying=${hostPlayingAfterReject} stops=${hostStopTick1}/${hostStopTick2} peaks A/B/C=${hostPeakA.toFixed(3)}/${hostPeakB.toFixed(3)}/${hostPeakC.toFixed(3)} entries=${hostEntries.length})`);
   } else {
     console.error(`TIMEOUT at step ${step} (hello=${helloOk} pong=${pongOk} load=${loadOk} noDeviceErr=${noDeviceErrOk} pongAfterErr=${pongAfterErrOk} stillFunctional=${stillFunctionalOk})`);
   }
@@ -159,6 +165,8 @@ const timeout = setTimeout(() => {
 let scanSent = false, scanResultOk = false, aliveAfterCrashOk = false, defaultScanOk = false;
 // host-mode flags + shared collection
 let hostScanSent = false, hostPluginStateOk = false, hostPhase = 0;
+// Stage 3d-1: editor-window contract flags.
+let hostEditorNegOk = false, hostEditorOpenOk = false, hostEditorFocusOk = false, hostEditorCloseOk = false;
 let hostValidUid = "", hostValidPath = "", hostValidName = "";
 let hostReloadAckOk = false, hostRejectOk = false, hostPlayingAfterReject = false;
 const hostEntries = [];   // accumulated dispatch ledger entries
@@ -336,8 +344,14 @@ ws.addEventListener("message", (event) => {
       helloOk = true;
       if (msg.protocol !== 1) fail(`expected protocol 1, got ${msg.protocol}`);
       if (!fixtureDir) fail("host mode requires a fixture dir argument");
+      // Stage 3d-1 NEGATIVE path FIRST: nothing is hosted yet — openEditor
+      // must answer editor_unavailable (a NORMAL reply), not crash, not hang.
+      console.log("[test] hello OK — editor negative path first (no live instance)...");
+      ws.send(JSON.stringify({ type: "openEditor", instanceId: "hosted" }));
+    } else if (msg.type === "error" && msg.code === "editor_unavailable" && hostPhase === 0 && !hostScanSent) {
+      hostEditorNegOk = true;
+      console.log(`[test] phase N ✓ openEditor with no live instance → editor_unavailable (detail: "${msg.detail}") — scanning for the stand-in host plugin...`);
       hostScanSent = true;
-      console.log("[test] hello OK — scanning for the stand-in host plugin...");
       ws.send(JSON.stringify({ type: "scan", dirs: [fixtureDir] }));
     } else if (msg.type === "scan_result" && hostScanSent && hostPhase === 0) {
       const valid = (msg.plugins ?? []).find((p) => p.name === "Scorch Test Synth");
@@ -468,10 +482,27 @@ ws.addEventListener("message", (event) => {
       ws.send(JSON.stringify({ type: "transport", command: "stop" }));
     } else if (msg.type === "state" && hostPhase === 12) {
       if (msg.playing === false) {
-        console.log("[test] phase I ✓ clean stop after the guard sequence — shutdown");
+        console.log("[test] phase I ✓ clean stop after the guard sequence — editor phases (3d-1: the instance survives stops)");
         hostPhase = 13;
-        finishAndShutdown();
+        ws.send(JSON.stringify({ type: "openEditor", instanceId: "hosted" }));
       }
+    } else if (msg.type === "editorOpened" && hostPhase === 13) {
+      if (msg.focused === true) fail(`first openEditor must OPEN (not focus): ${JSON.stringify(msg)}`);
+      if (!msg.width || msg.width <= 0 || !msg.height || msg.height <= 0) fail(`editorOpened lacks real geometry: ${JSON.stringify(msg)}`);
+      hostEditorOpenOk = true;
+      console.log(`[test] phase J ✓ editor OPENED "${msg.name}" ${msg.width}x${msg.height} — repeat request must RAISE, not double-open`);
+      hostPhase = 14;
+      ws.send(JSON.stringify({ type: "openEditor", instanceId: "hosted" }));
+    } else if (msg.type === "editorOpened" && hostPhase === 14) {
+      if (msg.focused !== true) fail(`repeat openEditor must re-echo editorOpened with focused=true (one editor per instance), got ${JSON.stringify(msg)}`);
+      hostEditorFocusOk = true;
+      console.log("[test] phase K ✓ repeat openEditor focused the existing window (ONE editor per instance) — closing");
+      hostPhase = 15;
+      ws.send(JSON.stringify({ type: "closeEditor", instanceId: "hosted" }));
+    } else if (msg.type === "editorClosed" && hostPhase === 15) {
+      hostEditorCloseOk = true;
+      console.log("[test] phase L ✓ editor CLOSED cleanly (protocol close; the X button and plugin unload converge on the same path) — shutdown");
+      finishAndShutdown();
     } else if (msg.type === "error" && hostPluginStateOk && !hostRejectOk) {
       fail(`host mode: unexpected error mid-test: ${msg.code} ${msg.detail ?? ""}`);
     }
@@ -528,7 +559,7 @@ ws.addEventListener("message", (event) => {
     if (msg.type === "hello" && !helloOk) {
       helloOk = true;
       if (msg.protocol !== 1) fail(`expected protocol 1, got ${msg.protocol}`);
-      if (msg.engineVersion !== "0.4.0") fail(`expected 0.4.0, got ${msg.engineVersion}`);
+      if (msg.engineVersion !== "0.5.0") fail(`expected 0.5.0, got ${msg.engineVersion}`);
       // Stage 3c close-out: the dispatch ledger streams what the engine
       // ACTUALLY dispatched — the replay-burst and re-attack asserts read it.
       ws.send(JSON.stringify({ type: "dispatch_log", enable: true }));

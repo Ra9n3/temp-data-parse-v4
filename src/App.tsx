@@ -5,7 +5,7 @@ import dorianFixture from "./fixtures/dorian-16bars.json";
 import { TopBar } from "./components/TopBar";
 import { Arranger } from "./components/Arranger";
 import { GenerationSettingsPanel } from "./components/GenerationSettingsPanel";
-import { EngineClient, type EngineLoadMeta, type EngineStatus, type LoadFailure, type PluginStateMessage, type ScanResultMessage } from "./engine/engineClient";
+import { EngineClient, type EngineLoadMeta, type EngineStatus, type EditorEventMessage, type LoadFailure, type PluginStateMessage, type ScanResultMessage } from "./engine/engineClient";
 import { buildEngineStream, resolveEngineChannels } from "./engine/engineStream";
 import { PPQ, projectEndTick, tickToBar } from "./shared/schema";
 import {
@@ -197,6 +197,9 @@ export default function App() {
   // Stage 3c-2: hosting outcome. Loaded → footer shows the hosted plugin;
   // error → toast + every track stays on the built-in test synth (no dead-end).
   const [pluginState, setPluginState] = useState<PluginStateMessage | null>(null);
+  // Stage 3d-1: the hosted plugin's editor window is open (engine-owned popup;
+  // one hosted instance ⇒ one shared flag for all plugin-routed tracks).
+  const [hostedEditorOpen, setHostedEditorOpen] = useState(false);
   // Chord v2 — the editing chord id is LIFTED here (was local to the Arranger
   // lane) so the top-bar panel and the in-lane editor share one source of
   // truth: creation/retarget/Esc/delete all stay in sync. No schema change.
@@ -283,10 +286,29 @@ export default function App() {
         toast("error", `${result.name ?? "Plugin"} failed to load — falling back to test synth: ${result.detail ?? "unknown"}`);
       }
     });
+    // Stage 3d-1: editor window lifecycle (engine-owned popups). The open
+    // flag flips the track-header button into its focus affordance; close
+    // arrives from the protocol OR the window's own X button.
+    client.onEditor((msg: EditorEventMessage) => {
+      if (disposed) return;
+      if (msg.type === "editorOpened") {
+        setHostedEditorOpen(true);
+        writeErrorLog("engine", `editor opened: ${msg.name ?? msg.instanceId} (${msg.width ?? "?"}x${msg.height ?? "?"})${msg.focused ? " focused" : ""}`);
+      } else {
+        setHostedEditorOpen(false);
+        writeErrorLog("engine", `editor closed: ${msg.instanceId}`);
+      }
+    });
     // Stage 3c-hotfix: every engine error is user-visible (toast) in addition
     // to error.log — a rejected/failed load can no longer look like success.
     client.onError((code, _echo, detail) => {
       if (disposed) return;
+      // Stage 3d-1: plugins MAY ship no editor (createEditor() == nullptr) —
+      // that is a normal, named reply, not a generic engine fault.
+      if (code === "editor_unavailable") {
+        toast("error", `editor unavailable for this plugin${detail ? ` — ${detail}` : ""}`);
+        return;
+      }
       toast("error", `engine: ${code}${detail ? ` — ${detail}` : ""}`);
     });
     engineClientRef.current = client;
@@ -395,6 +417,14 @@ export default function App() {
       },
     };
   }, [engineStatus, desktopScan]);
+
+  // Stage 3d-1: request the hosted plugin's editor window. The Arranger gets
+  // this ONLY while a plugin is actually hosted (plugin_state loaded) —
+  // otherwise the track button keeps opening the VST browser. The engine
+  // answers editor_unavailable for headless plugins → toast (handled above).
+  const openHostedEditor = useCallback(() => {
+    engineClientRef.current?.openEditor("hosted");
+  }, []);
 
   const enginePlay = useCallback(() => {
     const client = engineClientRef.current;
@@ -788,6 +818,8 @@ export default function App() {
           setVstTrackId(id);
           setVstOpen(true);
         }}
+        onOpenEditor={pluginState?.state === "loaded" ? openHostedEditor : undefined}
+        editorOpen={hostedEditorOpen}
         onLoadAudio={() => audioInputRef.current?.click()}
         onAddTrack={(family: Family) => {
           const t = createAddedTrack(family);

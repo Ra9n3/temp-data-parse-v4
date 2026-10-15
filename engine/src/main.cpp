@@ -41,6 +41,24 @@
 //         "latencyMs"|"detail"} — hosting outcome; on error ALL tracks fall
 //         back to the built-in test synth (app never dead-ends).
 //
+// Stage 3d-1 protocol additions (additive):
+//   {"type":"openEditor","instanceId"?:string} — request the hosted plugin's
+//         editor window (engine-OWNED popup: a JUCE DocumentWindow created on
+//         the MessageManager pump thread — see ASSUMPTIONS.md 3d-1 for the
+//         engine-popup vs Tauri-HWND investigation). instanceId is an opaque
+//         echo (default "hosted" — Scorch hosts ONE instance; the registry
+//         map already supports several for future multi-plugin hosting).
+//   {"type":"closeEditor","instanceId"?:string} — close it (window's own X
+//         button converges on the same path).
+//   server -> client: {"type":"editorOpened","instanceId","name","width",
+//         "height"[,"focused":true]} — window is up (or focused if it was
+//         already open: one editor per instance, a repeat request RAISES).
+//   server -> client: {"type":"editorClosed","instanceId"} — gone (explicit
+//         close, X button, or the plugin instance was replaced/unloaded).
+//   error {"code":"editor_unavailable"} — no live instance, or the plugin
+//         ships no editor (createEditor() == nullptr). Plugins MAY be
+//         headless; that is a normal reply, not a crash.
+//
 // Test synth: sine oscillator per note, voice allocation (steal oldest),
 // gain envelope (attack/release ~10ms). Every NoteOn must sound, every NoteOff
 // must stop. No VST3, no samples, no CC rendering. Loopback ONLY (127.0.0.1).
@@ -97,6 +115,10 @@
 #include <juce_audio_basics/juce_audio_basics.h>
 #include <juce_audio_devices/juce_audio_devices.h>
 #include <juce_audio_processors/juce_audio_processors.h>
+// Stage 3d-1: editor windows are juce::DocumentWindows. gui_basics is already
+// linked (audio_processors requires it — AudioProcessorEditor is a Component);
+// the explicit include documents that the engine now CREATES windows.
+#include <juce_gui_basics/juce_gui_basics.h>
 
 #include <ixwebsocket/IXNetSystem.h>
 #include <ixwebsocket/IXWebSocket.h>
@@ -104,7 +126,7 @@
 
 namespace {
 
-constexpr const char* kEngineVersion = "0.4.0";
+constexpr const char* kEngineVersion = "0.5.0";
 constexpr int kProtocolVersion = 1;
 constexpr int kDefaultPort = 9377;
 constexpr int kMaxVoices = 64;
@@ -381,6 +403,163 @@ std::atomic<HostedPlugin*> g_hostedLive{nullptr};
 // touching the instance: updated at publish and after every real-device
 // prepare (latency can change with rate/buffer). Drives F4 compensation.
 std::atomic<int> g_pluginLatencySamples{0};
+
+// ─── Stage 3d-1: plugin editor windows (engine-owned popup) ────────────────
+// Mechanism (investigated, ASSUMPTIONS.md "Stage 3d-1"): editors are JUCE
+// DocumentWindows created ON the MessageManager pump thread — the process's
+// message thread, and the ONLY thread where Component work is legal. WS
+// threads and the init worker only VALIDATE and SCHEDULE via
+// MessageManager::callAsync. One editor per instance (a repeat request
+// RAISES the existing window); the registry map supports multiple instances
+// for future multi-plugin hosting. Editors belong to this process: engine
+// death closes them with it — no orphan windows are possible by
+// construction. Plugin retirement closes editors BEFORE the instance is
+// retired (scheduled close lands on the message thread within the retire
+// grace period, never racing the free).
+class PluginEditorWindow;
+std::mutex g_editorMutex;                                        // guards the map only
+std::unordered_map<std::string, PluginEditorWindow*> g_editors;  // instanceId → window
+// Defined further down (JSON helpers + close converge point); forward-declared
+// so the window class and open path can reference them.
+std::string escape_json(const std::string& s);
+void destroyEditorWindow(const std::string& iid);
+// Broadcast surface for message-thread-initiated events (editorClosed from
+// the X button, editor_unavailable from createEditor failure): set once in
+// main() before any thread can open an editor; the server outlives them all.
+ix::WebSocketServer* g_wsServer = nullptr;
+void broadcastJson(const std::string& msg) {
+    if (g_wsServer == nullptr) return;
+    for (auto& client : g_wsServer->getClients())
+        if (client) client->send(msg);
+}
+
+class PluginEditorWindow : public juce::DocumentWindow {
+public:
+    PluginEditorWindow(std::string instanceId, const juce::String& title)
+        : juce::DocumentWindow(title, juce::Colour(0xff14161f),
+                               juce::DocumentWindow::closeButton, true),
+          iid(std::move(instanceId)) {}
+
+    void closeButtonPressed() override {
+        // Runs on the message thread. Destroying self synchronously inside
+        // the window's own callback is unsafe — schedule the deletion.
+        juce::MessageManager::callAsync([iid = this->iid] { destroyEditorWindow(iid); });
+    }
+
+    std::string iid;
+};
+
+// Message-thread side of open. A plugin may ship no editor — createEditor()
+// returning null is the editor_unavailable path, a NORMAL reply.
+void openEditorWindow(const std::string& iid, HostedPlugin* owner) {
+    if (owner == nullptr || !owner->instance) return;
+    // Re-check on the message thread: two queued openEditor requests must
+    // yield ONE window (second request raises).
+    {
+        std::lock_guard<std::mutex> lock(g_editorMutex);
+        if (g_editors.count(iid) != 0) {
+            if (auto* win = g_editors[iid]) win->toFront(true);
+            broadcastJson(std::string("{\"type\":\"editorOpened\",\"instanceId\":\"") +
+                          escape_json(iid) + "\",\"name\":\"" + escape_json(owner->name) +
+                          "\",\"focused\":true}");
+            engineLog("[editor] focus existing instance=" + iid + " (race re-check)");
+            return;
+        }
+    }
+    auto* ed = owner->instance->createEditor();
+    if (ed == nullptr) {
+        broadcastJson(std::string("{\"type\":\"error\",\"code\":\"editor_unavailable\",\"echo\":\"openEditor\",\"detail\":\"") +
+                      escape_json(owner->name) + " ships no editor window\"}");
+        engineLog("[editor] unavailable — createEditor() returned null (" + owner->name + ")");
+        return;
+    }
+    // A window needs a display: on a headless host (CI box, disconnected
+    // RDP session) editor creation is IMPOSSIBLE — answer editor_unavailable
+    // instead of crashing the engine. (Empirical: without this guard the
+    // engine died silently at getPrimaryDisplay()/peer creation on a
+    // display-less Linux box.)
+    const juce::Displays::Display* disp = juce::Desktop::getInstance().getDisplays().getPrimaryDisplay();
+    if (disp == nullptr) {
+        delete ed;   // we own the orphan editor component — release it
+        broadcastJson(std::string("{\"type\":\"error\",\"code\":\"editor_unavailable\",\"echo\":\"openEditor\",\"detail\":\"no display available for an editor window\"}"));
+        engineLog("[editor] unavailable — no display (headless host)");
+        return;
+    }
+    const int w = ed->getWidth() > 0 ? ed->getWidth() : 640;
+    const int h = ed->getHeight() > 0 ? ed->getHeight() : 480;
+    // DPI/usability clamp (perfection not required, usable always): a
+    // 4K-native editor must still fit a 1080p work area.
+    juce::Rectangle<int> work = disp->userArea;
+    const int cw = juce::jmin(w, static_cast<int>(work.getWidth() * 0.85));
+    const int ch = juce::jmin(h, static_cast<int>(work.getHeight() * 0.85));
+    auto* win = new PluginEditorWindow(iid, owner->name);
+    win->setUsingNativeTitleBar(true);
+    win->setContentOwned(ed, true);   // the window owns the editor's lifetime
+    win->setResizable(false, false);
+    win->setBounds(juce::jmax(work.getX(), work.getCentreX() - cw / 2),
+                   juce::jmax(work.getY(), work.getCentreY() - ch / 2), cw, ch);
+    win->setVisible(true);
+    {
+        std::lock_guard<std::mutex> lock(g_editorMutex);
+        g_editors[iid] = win;
+    }
+    broadcastJson(std::string("{\"type\":\"editorOpened\",\"instanceId\":\"") + escape_json(iid) +
+                  "\",\"name\":\"" + escape_json(owner->name) +
+                  "\",\"width\":" + std::to_string(cw) + ",\"height\":" + std::to_string(ch) + "}");
+    engineLog("[editor] opened instance=" + iid + " plugin=" + owner->name +
+              " " + std::to_string(cw) + "x" + std::to_string(ch));
+}
+
+// Message-thread side of close. Every path (protocol close, X button,
+// retirement) converges here; the map is the single source of truth.
+void destroyEditorWindow(const std::string& iid) {
+    PluginEditorWindow* win = nullptr;
+    {
+        std::lock_guard<std::mutex> lock(g_editorMutex);
+        auto it = g_editors.find(iid);
+        if (it == g_editors.end()) return;   // already gone — idempotent
+        win = it->second;
+        g_editors.erase(it);
+    }
+    if (win != nullptr) {
+        win->setVisible(false);
+        delete win;   // setContentOwned(ed, true) frees the editor with the window
+    }
+    broadcastJson(std::string("{\"type\":\"editorClosed\",\"instanceId\":\"") + escape_json(iid) + "\"}");
+    engineLog("[editor] closed instance=" + iid);
+}
+
+// Schedule-close helpers (callable from ANY thread; execution on the pump).
+void closeEditorAsync(const std::string& iid) {
+    juce::MessageManager::callAsync([iid] { destroyEditorWindow(iid); });
+}
+void closeAllEditorsAsync() {
+    juce::MessageManager::callAsync([] {
+        std::vector<std::string> ids;
+        {
+            std::lock_guard<std::mutex> lock(g_editorMutex);
+            for (auto& kv : g_editors) ids.push_back(kv.first);
+        }
+        for (const auto& id : ids) destroyEditorWindow(id);
+    });
+}
+// Shutdown path: schedule close-all and WAIT (bounded) so the pump actually
+// runs it before stopDispatchLoop — clean window teardown on graceful exit.
+// A hard kill needs nothing: the OS reaps the process's windows.
+void closeAllEditorsAtShutdown() {
+    std::atomic<bool> done{false};
+    juce::MessageManager::callAsync([&done] {
+        std::vector<std::string> ids;
+        {
+            std::lock_guard<std::mutex> lock(g_editorMutex);
+            for (auto& kv : g_editors) ids.push_back(kv.first);
+        }
+        for (const auto& id : ids) destroyEditorWindow(id);
+        done.store(true);
+    });
+    for (int i = 0; i < 50 && !done.load(); ++i)
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+}
 
 // ─── Stage 3c-regression: ASYNC plugin init ─────────────────────────────
 // loadHostedPlugin (findAllTypesForFile + createPluginInstance +
@@ -2132,6 +2311,54 @@ void handle_panic() {
     std::cout << "[engine] panic — all notes off (n=" << killed << ")" << std::endl;
 }
 
+// ─── Stage 3d-1: editor window protocol handlers ───────────────────────────
+// {"type":"openEditor","instanceId"?} — validate on the WS thread, create on
+// the message thread (window work is illegal anywhere else). No live
+// instance is the editor_unavailable negative path (CI asserts it).
+void handle_open_editor(const juce::var& json, ix::WebSocket& ws) {
+    HostedPlugin* live = g_hostedLive.load(std::memory_order_acquire);
+    if (live == nullptr || !live->instance) {
+        ws.send(std::string("{\"type\":\"error\",\"code\":\"editor_unavailable\",\"echo\":\"openEditor\",\"detail\":\"no hosted plugin instance\"}"));
+        engineLog("[editor] open refused — no live instance");
+        return;
+    }
+    juce::DynamicObject* obj = json.getDynamicObject();
+    std::string iid = obj ? obj->getProperty("instanceId").toString().toStdString() : "";
+    if (iid.empty()) iid = "hosted";
+    bool alreadyOpen = false;
+    {
+        std::lock_guard<std::mutex> lock(g_editorMutex);
+        alreadyOpen = g_editors.count(iid) != 0;
+    }
+    if (alreadyOpen) {
+        // One editor per instance: a repeat request RAISES the existing
+        // window and re-echoes editorOpened (focused) — never a second one.
+        juce::MessageManager::callAsync([iid] {
+            PluginEditorWindow* win = nullptr;
+            {
+                std::lock_guard<std::mutex> lock(g_editorMutex);
+                auto it = g_editors.find(iid);
+                if (it != g_editors.end()) win = it->second;
+            }
+            if (win != nullptr) win->toFront(true);
+        });
+        ws.send(std::string("{\"type\":\"editorOpened\",\"instanceId\":\"") + escape_json(iid) +
+                "\",\"name\":\"" + escape_json(live->name) + "\",\"focused\":true}");
+        engineLog("[editor] focus existing instance=" + iid);
+        return;
+    }
+    juce::MessageManager::callAsync([iid, live] { openEditorWindow(iid, live); });
+    engineLog("[editor] open requested instance=" + iid + " plugin=" + live->name);
+}
+
+// {"type":"closeEditor","instanceId"?} — idempotent (unknown id = no-op).
+void handle_close_editor(const juce::var& json) {
+    juce::DynamicObject* obj = json.getDynamicObject();
+    std::string iid = obj ? obj->getProperty("instanceId").toString().toStdString() : "";
+    if (iid.empty()) iid = "hosted";
+    closeEditorAsync(iid);
+}
+
 // ─── Main ───────────────────────────────────────────────────────────────────
 } // namespace
 
@@ -2215,6 +2442,9 @@ int main(int argc, char** argv) {
               (g_forcedNoAudio ? " --no-audio" : ""));
 
     ix::WebSocketServer server(port, "127.0.0.1");
+    // Stage 3d-1: message-thread-initiated editor events broadcast through
+    // the server; it outlives every thread that can schedule an editor op.
+    g_wsServer = &server;
 
     server.setOnClientMessageCallback(
         [](std::shared_ptr<ix::ConnectionState> /*state*/,
@@ -2276,6 +2506,10 @@ int main(int argc, char** argv) {
                     handle_mix(parsed);
                 } else if (type == "dispatch_log") {
                     handle_dispatch_log(parsed, ws);
+                } else if (type == "openEditor") {
+                    handle_open_editor(parsed, ws);
+                } else if (type == "closeEditor") {
+                    handle_close_editor(parsed);
                 } else {
                     ws.send("{\"type\":\"error\",\"code\":\"unknown\",\"echo\":\"" + escape_json(message) + "\"}");
                 }
@@ -2439,6 +2673,11 @@ int main(int argc, char** argv) {
             // grace period (an in-flight buffer may still hold the pointer);
             // the audio thread NEVER locks or frees.
             HostedPlugin* raw = loaded.release();   // g_hostedLive owns it from here
+            // Stage 3d-1: the outgoing instance's editors must not outlive it.
+            // Close ALL editors BEFORE the swap (scheduled — runs on the pump
+            // thread well inside the retire grace period; the audio callback
+            // never touches editors).
+            closeAllEditorsAsync();
             HostedPlugin* oldRaw = g_hostedLive.exchange(raw, std::memory_order_acq_rel);
             if (oldRaw) {
                 std::lock_guard<std::mutex> rlock(g_retireMutex);
@@ -2479,6 +2718,10 @@ int main(int argc, char** argv) {
     server.stop();
     state_thread.join();
     plugin_init_thread.join();
+    // Stage 3d-1: graceful exit closes editor windows FIRST (bounded wait —
+    // the pump is still running). A hard kill needs nothing: the OS reaps
+    // the process's windows, so orphans are impossible either way.
+    closeAllEditorsAtShutdown();
     // Wake the MM pump (join would otherwise block forever) and let it die.
     juce::MessageManager::getInstance()->stopDispatchLoop();
     mm_pump_thread.join();
