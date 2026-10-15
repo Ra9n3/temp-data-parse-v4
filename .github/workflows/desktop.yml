@@ -63,9 +63,42 @@ jobs:
           if (-not (Test-Path "engine/build/scorch-engine.exe")) {
             throw "scorch-engine.exe not found after build"
           }
+          # Stage 3c-1: also build the free stand-in host target ("Scorch Test
+          # Synth") — the CI fixture for scan + hosting tests (commercial
+          # libraries like BBCSO cannot run in CI).
+          cmake --build engine/build --target scorch-test-synth_VST3 --parallel
           New-Item -ItemType Directory -Path src-tauri/binaries -Force | Out-Null
           Copy-Item engine/build/scorch-engine.exe src-tauri/binaries/scorch-engine.exe -Force
           Write-Host "Engine exe copied to src-tauri/binaries/"
+
+      - name: Build scan fixtures (test VST3 + crash dummy + corrupt dummy)
+        shell: pwsh
+        run: |
+          # Fixture dir for the 3c-1 scan-protocol test.
+          $fx = Join-Path $env:RUNNER_TEMP "scan-fixtures"
+          New-Item -ItemType Directory -Path $fx -Force | Out-Null
+
+          # 1. Valid: the built Scorch Test Synth VST3 bundle.
+          $vst3 = Get-ChildItem -Path "engine/build/testvst" -Recurse -Filter "*.vst3" |
+            Where-Object { $_.PSIsContainer } | Select-Object -First 1
+          if (-not $vst3) { throw "Scorch Test Synth .vst3 bundle not found under engine/build/testvst" }
+          Copy-Item -Recurse $vst3.FullName (Join-Path $fx $vst3.Name)
+          Write-Host "Valid fixture: $($vst3.Name)"
+
+          # 2. Crash dummy: a VALID shared library whose GetPluginFactory
+          #    aborts — kills its scan-worker child (crash isolation proof).
+          $crashDir = Join-Path $fx "CrashDummy.vst3\Contents\x86_64-win"
+          New-Item -ItemType Directory -Path $crashDir -Force | Out-Null
+          cl /nologo /LD engine\testvst\crashvst.c /Fe:"$crashDir\CrashDummy.vst3"
+          if (-not (Test-Path "$crashDir\CrashDummy.vst3")) { throw "crash dummy build failed" }
+          Write-Host "Crash fixture built"
+
+          # 3. Corrupt dummy: garbage bytes (graceful zero-type load failure).
+          $corruptDir = Join-Path $fx "CorruptDummy.vst3\Contents\x86_64-win"
+          New-Item -ItemType Directory -Path $corruptDir -Force | Out-Null
+          [System.IO.File]::WriteAllBytes("$corruptDir\CorruptDummy.vst3", [System.Text.Encoding]::ASCII.GetBytes("this is not a PE module — garbage"))
+          Write-Host "Corrupt fixture written"
+          "SCAN_FIXTURES=$fx" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
 
       - name: Engine standalone protocol test (null-audio + graceful no-device paths)
         shell: pwsh
@@ -74,7 +107,7 @@ jobs:
           # A compile-gated (mute) build cannot print this.
           $versionOut = & "engine/build/scorch-engine.exe" --version
           Write-Host "Version output: $versionOut"
-          if ($versionOut -notmatch "scorch-engine 0\.1\.0") { throw "Version check failed: $versionOut" }
+          if ($versionOut -notmatch "scorch-engine 0\.2\.0") { throw "Version check failed: $versionOut" }
           if ($versionOut -notmatch "audio: built-in") { throw "Audio compile gate still present — engine reports no audio support" }
 
           # Test A — --null-audio: JUCE null device, no hardware. The graph runs
@@ -149,6 +182,37 @@ jobs:
           }
 
           Write-Host "All engine protocol tests passed (audio-capable build, graceful headless behavior)"
+
+          # Test C — Stage 3c-1 VST3 scan protocol: valid plugin found (real
+          # name + vendor), CRASH-ISOLATION (worker dies → failed entry, scan
+          # + engine survive), corrupt .vst3 graceful, default-dir scan clean.
+          Write-Host "=== Test C: VST3 scan protocol + crash isolation ==="
+          $procC = Start-Process -FilePath "engine/build/scorch-engine.exe" -ArgumentList "--port","9380" -PassThru -NoNewWindow -RedirectStandardOutput "engine-c-stdout.txt" -RedirectStandardError "engine-c-stderr.txt"
+          Start-Sleep -Seconds 3
+          try {
+            if ($procC.HasExited) {
+              Write-Host "Engine C exited early (code=$($procC.ExitCode)). stdout:"
+              if (Test-Path engine-c-stdout.txt) { Get-Content engine-c-stdout.txt }
+              throw "Engine C process exited before test could connect"
+            }
+            node .github/scripts/test-engine-protocol.mjs 9380 scan "$env:SCAN_FIXTURES"
+            if ($LASTEXITCODE -ne 0) {
+              Write-Host "Engine C stdout:"
+              if (Test-Path engine-c-stdout.txt) { Get-Content engine-c-stdout.txt }
+              Write-Host "Engine C stderr:"
+              if (Test-Path engine-c-stderr.txt) { Get-Content engine-c-stderr.txt }
+              throw "Engine C scan-protocol test failed"
+            }
+            # The scan summary must be in the engine's own stdout.
+            $scanProof = Select-String -Path "engine-c-stdout.txt" -Pattern "\[engine\] scan: "
+            if (-not $scanProof) { throw "scan proof missing: no '[engine] scan:' lines in engine stdout" }
+            foreach ($l in $scanProof.Line) { Write-Host "Scan proof: $l" }
+            $procC.WaitForExit(10000) | Out-Null
+            if (-not $procC.HasExited -or $procC.ExitCode -ne 0) { throw "Engine C did not exit cleanly (code=$($procC.ExitCode))" }
+            Write-Host "Engine C clean exit 0 (scan + crash isolation verified)"
+          } finally {
+            Stop-Process -Id $procC.Id -Force -ErrorAction SilentlyContinue
+          }
 
       - run: npm ci
 

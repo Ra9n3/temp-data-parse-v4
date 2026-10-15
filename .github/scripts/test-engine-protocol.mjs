@@ -1,4 +1,4 @@
-// Stage 3a/3b/3b-fix/3b-polish: engine protocol test client. Connects to
+// Stage 3a/3b/3b-fix/3b-polish/3c-1: engine protocol test client. Connects to
 // scorch-engine on the given port. Node 22+ (global WebSocket). Throwaway
 // test — not part of the app's runtime.
 //
@@ -17,9 +17,22 @@
 //     error (the historical 0xC0000005 headless crash is now a clean reply) and
 //     the engine stays protocol-functional afterwards (ping/pong, stop, seek,
 //     panic, shutdown → clean exit).
+//   scan (argv[4] = fixture dir) — Stage 3c-1: VST3 scan-protocol proof. Sends
+//     {"type":"scan","dirs":[fixtureDir]} where the fixture dir contains
+//       * the VALID free test VST3 ("Scorch Test Synth", must be found with
+//         its real name + vendor + isInstrument),
+//       * CrashDummy.vst3 (a VALID shared library that aborts inside
+//         GetPluginFactory — kills its scan-worker child),
+//       * CorruptDummy.vst3 (garbage bytes — graceful zero-type load failure).
+//     Asserts: the valid plugin is found; the crash dummy appears as a failed
+//     entry AND does not kill the scan or the engine (ping→pong after); the
+//     corrupt dummy is isolated silently (zero types, no failed entry); a
+//     default-dir scan returns a clean (possibly empty) result; shutdown →
+//     clean exit.
 
 const port = parseInt(process.argv[2] ?? "9378", 10);
 const mode = process.argv[3] ?? "null-audio";
+const fixtureDir = process.argv[4] ?? "";
 const url = `ws://127.0.0.1:${port}`;
 
 // Events chosen so a note IS sounding when the test stops (tick ~600): the
@@ -55,11 +68,16 @@ const fail = (msg) => {
 const timeout = setTimeout(() => {
   if (mode === "null-audio") {
     console.error(`TIMEOUT at step ${step} (hello=${helloOk} pong=${pongOk} error=${errorOk} load=${loadOk} play1=${play1Ok} adv1=${adv1Ok} stop=${stopOk} play2=${play2Ok} adv2=${adv2Ok} panic=${panicOk})`);
+  } else if (mode === "scan") {
+    console.error(`TIMEOUT at step ${step} (hello=${helloOk} scanSent=${scanSent} scanResult=${scanResultOk} aliveAfterCrash=${aliveAfterCrashOk} defaultScan=${defaultScanOk})`);
   } else {
     console.error(`TIMEOUT at step ${step} (hello=${helloOk} pong=${pongOk} load=${loadOk} noDeviceErr=${noDeviceErrOk} pongAfterErr=${pongAfterErrOk} stillFunctional=${stillFunctionalOk})`);
   }
   process.exit(1);
 }, 20000);
+
+// scan-mode flags
+let scanSent = false, scanResultOk = false, aliveAfterCrashOk = false, defaultScanOk = false;
 
 function finishAndShutdown() {
   console.log("[test] sending shutdown");
@@ -75,12 +93,57 @@ ws.addEventListener("message", (event) => {
   console.log("[test] RX:", JSON.stringify(msg).slice(0, 140));
   step++;
 
+  if (mode === "scan") {
+    // ── Stage 3c-1: VST3 scan protocol + crash isolation ──
+    if (msg.type === "hello" && !helloOk) {
+      helloOk = true;
+      if (msg.protocol !== 1) fail(`expected protocol 1, got ${msg.protocol}`);
+      if (!fixtureDir) fail("scan mode requires a fixture dir argument");
+      console.log("[test] hello OK — sending scan of fixture dir:", fixtureDir);
+      scanSent = true;
+      ws.send(JSON.stringify({ type: "scan", dirs: [fixtureDir] }));
+    } else if (msg.type === "scan_result" && scanSent && !scanResultOk) {
+      scanResultOk = true;
+      const plugins = Array.isArray(msg.plugins) ? msg.plugins : [];
+      const failed = Array.isArray(msg.failed) ? msg.failed : [];
+      const dirs = Array.isArray(msg.scannedDirs) ? msg.scannedDirs : [];
+      // 1. The valid free test VST3 must be found with its real identity.
+      const valid = plugins.find((p) => p.name === "Scorch Test Synth");
+      if (!valid) fail(`scan_result did not include "Scorch Test Synth" (plugins: ${JSON.stringify(plugins)})`);
+      if (valid.vendor !== "Scorch Audio") fail(`vendor mismatch: ${valid.vendor}`);
+      if (valid.isInstrument !== true) fail("test synth must report isInstrument=true");
+      if (!valid.uid) fail("scan_result entries must carry a uid");
+      console.log(`[test] valid plugin found: "${valid.name}" vendor="${valid.vendor}" uid=${valid.uid} ✓`);
+      // 2. The crash dummy must appear as a failed entry (its worker died).
+      const crashFail = failed.find((f) => f.path.includes("CrashDummy"));
+      if (!crashFail) fail(`crash dummy not recorded as failed — crash isolation broken (failed: ${JSON.stringify(failed)})`);
+      if (!/crash|exit/i.test(crashFail.error ?? "")) fail(`crash dummy failure lacks crash evidence: ${crashFail.error}`);
+      console.log(`[test] crash dummy isolated: "${crashFail.error}" ✓`);
+      // 3. The corrupt dummy fails GRACEFULLY (zero types — neither plugin nor failed).
+      if (failed.some((f) => f.path.includes("CorruptDummy"))) fail("corrupt dummy must fail gracefully (zero types), not as a scan failure");
+      if (plugins.some((p) => p.path.includes("CorruptDummy"))) fail("corrupt dummy must not yield plugin types");
+      console.log("[test] corrupt dummy isolated silently (graceful zero-type load) ✓");
+      // 4. The engine is ALIVE after the crash: ping must answer.
+      ws.send(JSON.stringify({ type: "ping" }));
+    } else if (msg.type === "pong" && scanResultOk && !aliveAfterCrashOk) {
+      aliveAfterCrashOk = true;
+      console.log("[test] engine alive after crash isolation (ping→pong) ✓ — default-dir scan");
+      ws.send(JSON.stringify({ type: "scan" }));  // no dirs → engine defaults (may be empty — must not error/hang)
+    } else if (msg.type === "scan_result" && aliveAfterCrashOk && !defaultScanOk) {
+      defaultScanOk = true;
+      if (!Array.isArray(msg.plugins) || !Array.isArray(msg.failed)) fail("default scan_result shape invalid");
+      console.log(`[test] default-dir scan clean (plugins=${msg.plugins.length}, failed=${msg.failed.length}) ✓ — shutdown`);
+      finishAndShutdown();
+    }
+    return;
+  }
+
   if (mode === "null-audio") {
     // ── Full protocol suite + RESUME contract (null device) ──
     if (msg.type === "hello" && !helloOk) {
       helloOk = true;
       if (msg.protocol !== 1) fail(`expected protocol 1, got ${msg.protocol}`);
-      if (msg.engineVersion !== "0.1.0") fail(`expected 0.1.0, got ${msg.engineVersion}`);
+      if (msg.engineVersion !== "0.2.0") fail(`expected 0.2.0, got ${msg.engineVersion}`);
       ws.send(JSON.stringify({ type: "ping" }));
     } else if (msg.type === "pong" && !pongOk) {
       pongOk = true;
@@ -191,7 +254,24 @@ ws.addEventListener("close", () => {
   clearTimeout(timeout);
   console.log("[test] connection closed");
   let allOk;
-  if (mode === "null-audio") {
+  if (mode === "scan") {
+    allOk = helloOk && scanSent && scanResultOk && aliveAfterCrashOk && defaultScanOk;
+    if (allOk) {
+      console.log("");
+      console.log("========================================");
+      console.log("ALL SCAN TESTS PASSED (3c-1):");
+      console.log('  scan protocol: scan → scan_result (plugins/failed/scannedDirs)');
+      console.log('  valid test VST3 found with real name + vendor + uid');
+      console.log('  CRASH ISOLATION: worker crash → failed entry, scan + engine survive');
+      console.log('  corrupt .vst3 → graceful zero types (no failed entry)');
+      console.log('  default-dir scan → clean (possibly empty) result');
+      console.log("========================================");
+      process.exit(0);
+    } else {
+      console.error(`FAILED: hello=${helloOk} scanSent=${scanSent} scanResult=${scanResultOk} aliveAfterCrash=${aliveAfterCrashOk} defaultScan=${defaultScanOk}`);
+      process.exit(1);
+    }
+  } else if (mode === "null-audio") {
     allOk = helloOk && pongOk && errorOk && loadOk && play1Ok && adv1Ok && stopOk && play2Ok && adv2Ok && panicOk;
     if (allOk) {
       console.log("");

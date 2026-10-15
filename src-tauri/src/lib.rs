@@ -65,6 +65,23 @@ fn open_devtools(window: tauri::WebviewWindow) {
     window.open_devtools();
 }
 
+/// Stage 3c-1 — standard VST3 directories for the desktop user. The frontend
+/// passes these to the engine's scan message (the engine also has its own
+/// defaults for headless/CI use). Windows: %COMMONPROGRAMFILES%\VST3 (per-
+/// machine) + %APPDATA%\VST3 (per-user). Non-Windows shells return the POSIX
+/// conventions — dev convenience only (the shipped shell is Windows).
+#[tauri::command]
+fn vst3_paths() -> Vec<String> {
+    let mut dirs = Vec::new();
+    if let Some(cf) = std::env::var_os("COMMONPROGRAMFILES") {
+        dirs.push(std::path::PathBuf::from(cf).join("VST3").to_string_lossy().into_owned());
+    }
+    if let Some(ad) = std::env::var_os("APPDATA") {
+        dirs.push(std::path::PathBuf::from(ad).join("VST3").to_string_lossy().into_owned());
+    }
+    dirs
+}
+
 fn web_root() -> Option<PathBuf> {
     Some(std::env::current_exe().ok()?.parent()?.join("web"))
 }
@@ -126,7 +143,7 @@ pub fn run() {
 
             resp(StatusCode::NOT_FOUND, b"not found".to_vec(), None)
         })
-        .invoke_handler(tauri::generate_handler![engine::get_engine_info, append_error_log, open_devtools])
+        .invoke_handler(tauri::generate_handler![engine::get_engine_info, append_error_log, open_devtools, vst3_paths])
         .setup(|app| {
             if let Some(version) = current_version() {
                 if let Some(root) = web_root() {

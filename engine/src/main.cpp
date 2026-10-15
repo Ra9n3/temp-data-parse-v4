@@ -1,4 +1,4 @@
-// scorch-engine — Stage 3b: note stream over the wire + engine audio rendering.
+// scorch-engine — Stage 3c: VST3 hosting (BBCSO standalone) + scan.
 // Protocol v1 EXTENSION (additive — v1 handshake messages unchanged):
 //   client -> server: {"type":"load","events":[...],"meta":{bpm,ppqn,timeSignature,endTick}}
 //   client -> server: {"type":"transport","command":"play"|"stop"|"seek","tick":<n?>}
@@ -6,6 +6,15 @@
 //                     or RESUME from the stopped position when omitted.
 //                     stop: PANIC — kills all voices immediately.
 //   client -> server: {"type":"panic"}
+//   client -> server: {"type":"scan","dirs":[...]?}   (3c-1, OPTIONAL dirs;
+//                     default: %COMMONPROGRAMFILES%\VST3 + %APPDATA%\VST3 on
+//                     Windows, /usr/lib/vst3 + ~/.vst3 elsewhere)
+//   server -> client: {"type":"scan_result","plugins":[{name,vendor,version,
+//                     uid,isInstrument,path}],"failed":[{path,error}],
+//                     "scannedDirs":[{dir,status}]}
+//                     Crash isolation: each .vst3 is scanned by a CHILD copy
+//                     of this exe (--scan-worker); a plugin that crashes or
+//                     hangs kills only its worker — the scan survives.
 //   server -> client: {"type":"state","playing":bool,"tick":<n>}  (~30Hz always;
 //                     while stopped, tick = the remembered stop position)
 // Existing v1 messages unchanged: hello, ping->pong, shutdown, unknown->error.
@@ -43,6 +52,7 @@
 #define _USE_MATH_DEFINES
 #define NOMINMAX
 #endif
+#include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <cmath>
@@ -58,6 +68,7 @@
 #include <juce_core/juce_core.h>
 #include <juce_audio_basics/juce_audio_basics.h>
 #include <juce_audio_devices/juce_audio_devices.h>
+#include <juce_audio_processors/juce_audio_processors.h>
 
 #include <ixwebsocket/IXNetSystem.h>
 #include <ixwebsocket/IXWebSocket.h>
@@ -65,7 +76,7 @@
 
 namespace {
 
-constexpr const char* kEngineVersion = "0.1.0";
+constexpr const char* kEngineVersion = "0.2.0";
 constexpr int kProtocolVersion = 1;
 constexpr int kDefaultPort = 9377;
 constexpr int kMaxVoices = 64;
@@ -521,8 +532,166 @@ std::string escape_json(const std::string& s) {
     return out;
 }
 
+// ─── VST3 scan (Stage 3c-1) ─────────────────────────────────────────────────
+// Default directories per the brief: %COMMONPROGRAMFILES%\VST3 and
+// %APPDATA%\VST3 on Windows (the two standard per-machine / per-user VST3
+// locations); the POSIX conventions elsewhere for dev/CI convenience.
+std::vector<std::string> defaultVst3Dirs() {
+    std::vector<std::string> dirs;
+#ifdef _WIN32
+    const char* cf = std::getenv("COMMONPROGRAMFILES");
+    const char* ad = std::getenv("APPDATA");
+    if (cf != nullptr) dirs.push_back(std::string(cf) + "\\VST3");
+    if (ad != nullptr) dirs.push_back(std::string(ad) + "\\VST3");
+#else
+    dirs.push_back("/usr/lib/vst3");
+    const char* home = std::getenv("HOME");
+    if (home != nullptr) dirs.push_back(std::string(home) + "/.vst3");
+#endif
+    return dirs;
+}
+
+// Scan ONE path and print its plugin descriptions between markers.
+// Runs as a CHILD process (scorch-engine --scan-worker <path>): a plugin whose
+// module crashes or hangs during load kills only this child — the parent scan
+// records the failure and continues. Deliberately NO catch(...): a crashing
+// plugin must actually take this process down (that is the crash-isolation
+// contract the CI test proves); graceful load failures return zero types.
+int runScanWorker(const std::string& path) {
+    juce::VST3PluginFormat format;
+    juce::OwnedArray<juce::PluginDescription> types;
+    format.findAllTypesForFile(types, juce::String(path));
+    std::cout << "SCORCH_SCAN_BEGIN\n";
+    for (const auto* t : types) {
+        const juce::String displayName =
+            t->descriptiveName.isNotEmpty() ? t->descriptiveName : t->name;
+        std::cout << "{\"name\":\"" << escape_json(displayName.toStdString())
+                  << "\",\"vendor\":\"" << escape_json(t->manufacturerName.toStdString())
+                  << "\",\"version\":\"" << escape_json(t->version.toStdString())
+                  << "\",\"uid\":\"" << escape_json(juce::String(t->uniqueId).toStdString())
+                  << "\",\"isInstrument\":" << (t->isInstrument ? "true" : "false")
+                  << ",\"path\":\"" << escape_json(path) << "\"}\n";
+    }
+    std::cout << "SCORCH_SCAN_END" << std::endl;
+    return 0;
+}
+
+// Out-of-process directory scan. Each *.vst3 entry (bundle dir or file) is
+// scanned by a child copy of this exe with a hard 15s timeout; crashes and
+// hangs become per-file "failed" entries — the engine and the scan survive.
+void handle_scan(const juce::var& json, ix::WebSocket& ws) {
+    juce::DynamicObject* obj = json.getDynamicObject();
+    std::vector<std::string> dirs;
+    if (obj != nullptr) {
+        const auto& dirsVar = obj->getProperty("dirs");
+        if (dirsVar.isArray()) {
+            for (auto& d : *dirsVar.getArray()) {
+                std::string s = d.toString().toStdString();
+                if (!s.empty()) dirs.push_back(s);
+            }
+        }
+    }
+    if (dirs.empty()) dirs = defaultVst3Dirs();
+
+    const juce::String exePath =
+        juce::File::getSpecialLocation(juce::File::currentExecutableFile).getFullPathName();
+
+    std::string pluginsJson, failedJson, scannedJson;
+    int pluginCount = 0, failedCount = 0;
+
+    for (const auto& dir : dirs) {
+        const juce::File dirFile(dir);
+        if (!scannedJson.empty()) scannedJson += ",";
+        if (!dirFile.isDirectory()) {
+            scannedJson += std::string("{\"dir\":\"") + escape_json(dir) + "\",\"status\":\"missing\"}";
+            continue;
+        }
+        scannedJson += std::string("{\"dir\":\"") + escape_json(dir) + "\",\"status\":\"scanned\"}";
+
+        // Deterministic scan order — no RNG: collect top-level *.vst3 entries
+        // (bundle dirs or files) and sort case-insensitively by path.
+        juce::Array<juce::File> entries;
+        dirFile.findChildFiles(entries, juce::File::findFilesAndDirectories, false, "*.vst3");
+        std::vector<std::string> paths;
+        paths.reserve(static_cast<size_t>(entries.size()));
+        for (const auto& entry : entries) paths.push_back(entry.getFullPathName().toStdString());
+        std::sort(paths.begin(), paths.end(), [](const std::string& a, const std::string& b) {
+            const auto n = std::min(a.size(), b.size());
+            for (size_t i = 0; i < n; ++i) {
+                const int ca = std::tolower(static_cast<unsigned char>(a[i]));
+                const int cb = std::tolower(static_cast<unsigned char>(b[i]));
+                if (ca != cb) return ca < cb;
+            }
+            return a.size() < b.size();
+        });
+
+        for (const auto& path : paths) {
+            juce::ChildProcess child;
+            if (!child.start(juce::StringArray{ exePath, "--scan-worker", juce::String(path) })) {
+                if (!failedJson.empty()) failedJson += ",";
+                failedJson += std::string("{\"path\":\"") + escape_json(path) + "\",\"error\":\"scanner child failed to start\"}";
+                ++failedCount;
+                continue;
+            }
+            if (!child.waitForProcessToFinish(15000)) {
+                child.kill();
+                if (!failedJson.empty()) failedJson += ",";
+                failedJson += std::string("{\"path\":\"") + escape_json(path) + "\",\"error\":\"scanner timeout after 15s\"}";
+                ++failedCount;
+                continue;
+            }
+            const int exitCode = child.getExitCode();
+            const std::string out = child.readAllProcessOutput().toStdString();
+            if (exitCode != 0) {
+                if (!failedJson.empty()) failedJson += ",";
+                failedJson += std::string("{\"path\":\"") + escape_json(path) + "\",\"error\":\"scanner worker crashed (exit " + std::to_string(exitCode) + ")\"}";
+                ++failedCount;
+                continue;
+            }
+            const std::string begin = "SCORCH_SCAN_BEGIN";
+            const std::string end = "SCORCH_SCAN_END";
+            const auto b = out.find(begin);
+            const auto e = out.find(end);
+            if (b == std::string::npos || e == std::string::npos || e < b) {
+                if (!failedJson.empty()) failedJson += ",";
+                // Exit 0 but NO markers = the worker died mid-scan (SIGABRT /
+                // hard kill before printing — JUCE reports signal death as
+                // exit 0 on POSIX). Windows abort() surfaces as a real exit
+                // code above; here we still classify it as a crash.
+                failedJson += std::string("{\"path\":\"") + escape_json(path) + "\",\"error\":\"scanner produced no result (worker crashed or was killed)\"}";
+                ++failedCount;
+                continue;
+            }
+            // One compact JSON object per line between the markers.
+            const std::string body = out.substr(b + begin.size(), e - (b + begin.size()));
+            size_t pos = 0;
+            while (pos < body.size()) {
+                size_t nl = body.find('\n', pos);
+                if (nl == std::string::npos) nl = body.size();
+                std::string line = body.substr(pos, nl - pos);
+                pos = nl + 1;
+                // trim
+                const auto first = line.find_first_not_of(" \t\r\n");
+                if (first == std::string::npos) continue;
+                line = line.substr(first, line.find_last_not_of(" \t\r\n") - first + 1);
+                if (line.empty()) continue;
+                auto parsed = juce::JSON::parse(juce::String(line));
+                if (parsed.getDynamicObject() == nullptr) continue;
+                if (!pluginsJson.empty()) pluginsJson += ",";
+                pluginsJson += line;
+                ++pluginCount;
+            }
+        }
+    }
+
+    std::cout << "[engine] scan: " << pluginCount << " plugin(s), " << failedCount
+              << " failed, dirs=" << dirs.size() << std::endl;
+    ws.send(std::string("{\"type\":\"scan_result\",\"plugins\":[") + pluginsJson +
+            "],\"failed\":[" + failedJson + "],\"scannedDirs\":[" + scannedJson + "]}");
+}
+
 // ─── Message handlers ───────────────────────────────────────────────────────
-// Protocol v1 EXTENSION (additive, Stage 3b polish):
+// Protocol v1 EXTENSION (additive, Stage 3b polish + 3c-1 scan):
 //   transport play MAY carry "tick": <n>. Without it, play RESUMES from the
 //   engine's lastTick (position at stop) — it never auto-resets to 0.
 //   transport stop is PANIC: all voices die immediately.
@@ -666,6 +835,15 @@ void handle_panic() {
 } // namespace
 
 int main(int argc, char** argv) {
+    // --scan-worker mode (Stage 3c-1): scan ONE .vst3 path, print JSON between
+    // markers, exit. Spawned by handle_scan() for crash isolation — never used
+    // by the app itself.
+    for (int i = 1; i < argc; ++i) {
+        if (std::string(argv[i]) == "--scan-worker" && i + 1 < argc) {
+            return runScanWorker(argv[i + 1]);
+        }
+    }
+
     int port = kDefaultPort;
     for (int i = 1; i < argc; ++i) {
         std::string arg = argv[i];
@@ -739,6 +917,8 @@ int main(int argc, char** argv) {
                     handle_transport(parsed, ws);
                 } else if (type == "panic") {
                     handle_panic();
+                } else if (type == "scan") {
+                    handle_scan(parsed, ws);
                 } else {
                     ws.send("{\"type\":\"error\",\"code\":\"unknown\",\"echo\":\"" + escape_json(message) + "\"}");
                 }

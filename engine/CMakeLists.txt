@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.22)
-project(scorch-engine VERSION 0.1.0 LANGUAGES CXX)
+project(scorch-engine VERSION 0.1.0 LANGUAGES C CXX)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -39,12 +39,28 @@ target_link_libraries(scorch-engine PRIVATE
     juce_core
     juce_audio_basics
     juce_audio_devices
+    juce_audio_processors
     ixwebsocket
 )
+# Stage 3c: VST3 HOSTING + SCAN. JUCE_PLUGINHOST_VST3 compiles in the VST3
+# hosting format (AudioPluginInstance / VST3PluginFormat); the VST3 SDK ships
+# inside juce_audio_processors — no external SDK download. juce_gui_basics is
+# pulled in transitively (AudioProcessorEditor is a Component) — the engine
+# never creates editors, and JUCE_WEB_BROWSER=0 keeps the webview stack out.
+target_compile_definitions(scorch-engine PRIVATE
+    JUCE_PLUGINHOST_VST3=1
+    JUCE_WEB_BROWSER=0
+    JUCE_USE_CURL=0
+)
+# Stage 3c-1: the free stand-in host target (CI fixture for scan + hosting
+# tests — commercial libraries like BBCSO cannot run in CI).
+add_subdirectory(testvst)
 # MSVC /EHa: audio init failures on device-less machines can surface as SEH
 # access violations (0xC0000005). /EHa makes catch(...) catch them, so the
 # lazy init in ensureAudioReady() converts every failure into a clean
 # no_audio_device protocol error instead of crashing the process.
+# (The --scan-worker path deliberately has NO catch(...) around module loads:
+# a crashing plugin must actually kill its worker child — crash isolation.)
 if(MSVC)
     target_compile_options(scorch-engine PRIVATE /EHa)
     set_target_properties(scorch-engine PROPERTIES LINK_FLAGS "/SUBSYSTEM:CONSOLE")

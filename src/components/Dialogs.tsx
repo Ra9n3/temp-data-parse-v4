@@ -8,6 +8,7 @@ import {
   pluginDisplayName,
   type PluginScanState,
 } from "../plugins/mockService";
+import type { ScanFailedEntry, ScannedPlugin } from "../engine/engineClient";
 import { BUILT_IN_PROFILES } from "../plugins/expressionMaps";
 import type { ExportTrackMode } from "../export/midi";
 import { exportMergedMidi, exportPerTrackMidi } from "../export/midi";
@@ -57,6 +58,7 @@ export function VstBrowser({
   onPick,
   onPickProfile,
   onState,
+  desktop,
 }: {
   open: boolean;
   state: PluginScanState;
@@ -66,13 +68,23 @@ export function VstBrowser({
    * profileId set (instead of a scanned pluginId) and assigns the track. */
   onPickProfile: (profileId: string, name: string) => void;
   onState: (s: PluginScanState) => void;
+  /**
+   * Stage 3c-1 — desktop REAL scan mode (engine present). When null (browser
+   * preview), the browser-only MOCK scan stays exactly as it was. In desktop
+   * mode the listing comes from the engine's crash-isolated VST3 scan (real
+   * name + vendor), and failed entries come from the scan's isolation report.
+   */
+  desktop?: { result: { plugins: ScannedPlugin[]; failed: ScanFailedEntry[] } | null; onScan: () => void } | null;
 }) {
   const [query, setQuery] = useState("");
   const [loaded, setLoaded] = useState(0);
   const total = MOCK_PLUGINS.length;
+  const isDesktop = desktop !== null;
 
+  // Mock scan animation — BROWSER ONLY. Desktop mode is driven by the engine's
+  // real scan_result (the caller flips the state when it arrives).
   useEffect(() => {
-    if (!open || state !== "scanning") return;
+    if (!open || isDesktop || state !== "scanning") return;
     setLoaded(0);
     let n = 0;
     const id = window.setInterval(() => {
@@ -84,14 +96,20 @@ export function VstBrowser({
       }
     }, 180);
     return () => window.clearInterval(id);
-  }, [open, state, total, onState]);
+  }, [open, isDesktop, state, total, onState]);
+
+  const realPlugins = isDesktop ? (desktop?.result?.plugins ?? []) : [];
+  const realFailed = isDesktop ? (desktop?.result?.failed ?? []) : [];
 
   const plugins = useMemo(() => {
     const q = query.trim().toLowerCase();
+    if (isDesktop) {
+      return realPlugins.filter((p) => p.name.toLowerCase().includes(q));
+    }
     return MOCK_PLUGINS.filter((p) => !p.failed).filter((p) =>
       pluginDisplayName(p.rawName).toLowerCase().includes(q),
     );
-  }, [query]);
+  }, [query, isDesktop, realPlugins]);
 
   if (!open) return null;
 
@@ -108,26 +126,28 @@ export function VstBrowser({
             className="w-full bg-transparent text-sm outline-none"
           />
         </div>
-        <select
-          value={state}
-          onChange={(e) => onState(e.target.value as PluginScanState)}
-          className="rounded-md bg-black/40 px-2 py-1.5 text-xs ring-1 ring-white/10"
-          title="Dev: mock scan state"
-        >
-          <option value="not_scanned">Not scanned</option>
-          <option value="scanning">Scanning</option>
-          <option value="empty">Empty</option>
-          <option value="loaded">Loaded</option>
-        </select>
+        {!isDesktop && (
+          <select
+            value={state}
+            onChange={(e) => onState(e.target.value as PluginScanState)}
+            className="rounded-md bg-black/40 px-2 py-1.5 text-xs ring-1 ring-white/10"
+            title="Dev: mock scan state"
+          >
+            <option value="not_scanned">Not scanned</option>
+            <option value="scanning">Scanning</option>
+            <option value="empty">Empty</option>
+            <option value="loaded">Loaded</option>
+          </select>
+        )}
       </div>
-      <div className="text-[11px] text-stone-500">Scan directory: {DEFAULT_SCAN_DIR}</div>
+      <div className="text-[11px] text-stone-500">
+        {isDesktop ? "Scan: standard VST3 directories (per-machine + per-user)" : `Scan directory: ${DEFAULT_SCAN_DIR}`}
+      </div>
       <div className="mt-3 min-h-[220px] rounded-lg border border-white/10 bg-black/30 p-3">
         {state === "scanning" && (
           <div className="flex h-[200px] flex-col items-center justify-center gap-3 text-stone-300">
             <div className="h-8 w-8 animate-spin rounded-full border-2 border-orange-400 border-t-transparent" />
-            <div>
-              Scanning... {loaded} of {total} plugins loaded
-            </div>
+            <div>{isDesktop ? "Scanning VST3 directories…" : `Scanning... ${loaded} of ${total} plugins loaded`}</div>
           </div>
         )}
         {state === "empty" && (
@@ -148,7 +168,13 @@ export function VstBrowser({
             <button
               type="button"
               className="rounded-md bg-orange-500 px-3 py-1.5 text-sm font-medium text-black"
-              onClick={() => onState("scanning")}
+              onClick={() => {
+                if (isDesktop) {
+                  desktop?.onScan();
+                  return;
+                }
+                onState("scanning");
+              }}
             >
               Scan Plugins
             </button>
@@ -156,25 +182,35 @@ export function VstBrowser({
         )}
         {state === "loaded" && (
           <ul className="max-h-[280px] space-y-1 overflow-auto">
-            {plugins.map((p) => (
-              <li key={p.id}>
-                <button
-                  type="button"
-                  onClick={() => {
-                    onPick(p.id, pluginDisplayName(p.rawName));
-                    onClose();
-                  }}
-                  className="flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-left text-sm hover:bg-white/5"
-                >
-                  <Ph name="plug" className="h-4 w-4 text-orange-300" />
-                  {pluginDisplayName(p.rawName)}
-                </button>
-              </li>
-            ))}
-            {MOCK_PLUGINS.filter((p) => p.failed).map((p) => (
-              <li key={p.id} className="flex items-center gap-2 px-2 py-1 text-xs text-red-400">
+            {plugins.map((p) => {
+              const isReal = "vendor" in p;
+              return (
+                <li key={isReal ? (p as ScannedPlugin).uid : (p as { id: string }).id}>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      if (isReal) {
+                        const r = p as ScannedPlugin;
+                        onPick(r.uid, r.name);
+                      } else {
+                        const m = p as { id: string; rawName: string };
+                        onPick(m.id, pluginDisplayName(m.rawName));
+                      }
+                      onClose();
+                    }}
+                    className="flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-left text-sm hover:bg-white/5"
+                  >
+                    <Ph name="plug" className="h-4 w-4 text-orange-300" />
+                    <span className="flex-1">{isReal ? (p as ScannedPlugin).name : pluginDisplayName((p as { rawName: string }).rawName)}</span>
+                    {isReal && <span className="text-[11px] text-stone-500">{(p as ScannedPlugin).vendor}</span>}
+                  </button>
+                </li>
+              );
+            })}
+            {(isDesktop ? realFailed : MOCK_PLUGINS.filter((p) => p.failed)).map((p) => (
+              <li key={"error" in p ? p.path : p.id} className="flex items-center gap-2 px-2 py-1 text-xs text-red-400">
                 <Ph name="warning" className="h-3.5 w-3.5" />
-                Failed: {pluginDisplayName(p.rawName)}
+                Failed: {"error" in p ? p.path.split(/[\\/]/).pop()?.replace(/\.vst3$/i, "") ?? p.path : pluginDisplayName(p.rawName)}
               </li>
             ))}
             <li className="pt-2 text-[11px] uppercase tracking-wide text-stone-500">Built-in expression maps</li>

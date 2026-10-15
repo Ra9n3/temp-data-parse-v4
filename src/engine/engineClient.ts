@@ -39,7 +39,31 @@ export interface StateMessage {
   tick: number;
 }
 
-type EngineMessage = HelloMessage | PongMessage | ErrorMessage | StateMessage;
+/** Stage 3c-1 — one plugin description from the engine's VST3 scan. */
+export interface ScannedPlugin {
+  name: string;
+  vendor: string;
+  version?: string;
+  /** Plugin identity string (JUCE uniqueId). Stable per plugin. */
+  uid: string;
+  isInstrument?: boolean;
+  path: string;
+}
+
+/** Stage 3c-1 — a .vst3 whose scan-worker child crashed or timed out. */
+export interface ScanFailedEntry {
+  path: string;
+  error: string;
+}
+
+export interface ScanResultMessage {
+  type: "scan_result";
+  plugins: ScannedPlugin[];
+  failed: ScanFailedEntry[];
+  scannedDirs: { dir: string; status: string }[];
+}
+
+type EngineMessage = HelloMessage | PongMessage | ErrorMessage | StateMessage | ScanResultMessage;
 
 // Deterministic backoff sequence (seconds): 1, 2, 4, 8, 16 — no jitter.
 const BACKOFF_SEQUENCE = [1, 2, 4, 8, 16] as const;
@@ -102,6 +126,7 @@ export class EngineClient {
   private onStatusChange: (status: EngineStatus, rtt: number | null) => void;
   private onStateChange: ((playing: boolean, tick: number) => void) | null = null;
   private onAudioErrorChange: ((code: string | null, detail: string) => void) | null = null;
+  private onScanResultChange: ((result: ScanResultMessage) => void) | null = null;
 
   constructor(onStatusChange: (status: EngineStatus, rtt: number | null) => void) {
     this.onStatusChange = onStatusChange;
@@ -123,6 +148,11 @@ export class EngineClient {
    */
   onAudioError(cb: (code: string | null, detail: string) => void): void {
     this.onAudioErrorChange = cb;
+  }
+
+  /** Stage 3c-1: register a callback for VST3 scan results. */
+  onScanResult(cb: (result: ScanResultMessage) => void): void {
+    this.onScanResultChange = cb;
   }
 
   connect(port: number): void {
@@ -166,6 +196,8 @@ export class EngineClient {
           if (this.onStateChange) {
             this.onStateChange(msg.playing, msg.tick);
           }
+        } else if (msg.type === "scan_result") {
+          this.onScanResultChange?.(msg);
         } else if (msg.type === "error") {
           console.warn("[engine] error:", msg.code, msg.echo, msg.detail ?? "");
           // Stage 3b-fix: surface audio-init failure to the UI (footer shows
@@ -227,6 +259,20 @@ export class EngineClient {
   panic(): void {
     if (this.ws && this.ws.readyState === WebSocket.OPEN) {
       this.ws.send(JSON.stringify({ type: "panic" }));
+    }
+  }
+
+  /**
+   * Stage 3c-1: request a VST3 scan. Without dirs the engine scans its own
+   * defaults (%COMMONPROGRAMFILES%\VST3 + %APPDATA%\VST3 on Windows); the
+   * desktop frontend passes the shell's vst3_paths() so per-user dirs resolve
+   * for the logged-in user. Reply arrives via onScanResult.
+   */
+  scan(dirs?: string[]): void {
+    if (this.ws && this.ws.readyState === WebSocket.OPEN) {
+      const msg: Record<string, unknown> = { type: "scan" };
+      if (dirs && dirs.length) msg.dirs = dirs;
+      this.ws.send(JSON.stringify(msg));
     }
   }
 

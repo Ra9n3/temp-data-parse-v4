@@ -5,7 +5,7 @@ import dorianFixture from "./fixtures/dorian-16bars.json";
 import { TopBar } from "./components/TopBar";
 import { Arranger } from "./components/Arranger";
 import { GenerationSettingsPanel } from "./components/GenerationSettingsPanel";
-import { EngineClient, notesToEngineEvents, type EngineLoadMeta, type EngineStatus } from "./engine/engineClient";
+import { EngineClient, notesToEngineEvents, type EngineLoadMeta, type EngineStatus, type ScanResultMessage } from "./engine/engineClient";
 import { PPQ, projectEndTick, tickToBar } from "./shared/schema";
 import {
   AboutDialog,
@@ -176,6 +176,8 @@ export default function App() {
   // by a rejected transport play. Footer shows the failure state; cleared on
   // reconnect or on a subsequent successful play.
   const [engineAudioError, setEngineAudioError] = useState<string | null>(null);
+  // Stage 3c-1: the engine's real VST3 scan result (desktop VstBrowser mode).
+  const [desktopScan, setDesktopScan] = useState<ScanResultMessage | null>(null);
   // Chord v2 — the editing chord id is LIFTED here (was local to the Arranger
   // lane) so the top-bar panel and the in-lane editor share one source of
   // truth: creation/retarget/Esc/delete all stay in sync. No schema change.
@@ -245,6 +247,12 @@ export default function App() {
       if (disposed) return;
       setEngineAudioError(code);
       if (code === "no_audio_device") setEnginePlaying(false);
+    });
+    // Stage 3c-1: real VST3 scan results drive the desktop VstBrowser.
+    client.onScanResult((result) => {
+      if (disposed) return;
+      setDesktopScan(result);
+      setVstState(result.plugins.length > 0 ? "loaded" : "empty");
     });
     engineClientRef.current = client;
 
@@ -334,6 +342,24 @@ export default function App() {
   // NO half-states: either the engine drives or the webview synth drives.
   const effectivePlaying = enginePlaying || playback.playing;
   const effectivePlayheadTick = engineDrive ? enginePlayheadTick : playback.playheadTick;
+
+  // Stage 3c-1: desktop VstBrowser real-scan handler (engine present only).
+  // The shell's vst3_paths() resolves the logged-in user's per-machine and
+  // per-user VST3 directories; the browser keeps the mock (no engine there).
+  const desktopVst = useMemo(() => {
+    if (engineStatus !== "ready") return null;
+    return {
+      result: desktopScan ? { plugins: desktopScan.plugins, failed: desktopScan.failed } : null,
+      onScan: () => {
+        setDesktopScan(null);
+        setVstState("scanning");
+        void (async () => {
+          const dirs = await invoke<string[]>("vst3_paths").catch(() => undefined);
+          engineClientRef.current?.scan(dirs && dirs.length ? dirs : undefined);
+        })();
+      },
+    };
+  }, [engineStatus, desktopScan]);
 
   const enginePlay = useCallback(() => {
     const client = engineClientRef.current;
@@ -701,6 +727,7 @@ export default function App() {
         state={vstState}
         onClose={() => setVstOpen(false)}
         onState={setVstState}
+        desktop={desktopVst}
         onPick={(pluginId, name) => {
           if (!vstTrackId) return;
           const g = { id: makeId("lg"), name, pluginId, pluginState: null };
