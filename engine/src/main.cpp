@@ -100,7 +100,7 @@
 
 namespace {
 
-constexpr const char* kEngineVersion = "0.2.1";
+constexpr const char* kEngineVersion = "0.3.0";
 constexpr int kProtocolVersion = 1;
 constexpr int kDefaultPort = 9377;
 constexpr int kMaxVoices = 64;
@@ -110,6 +110,11 @@ constexpr double kReleaseMs = 10.0;
 std::atomic<bool> g_should_exit{false};
 bool g_nullAudio = false;      // --null-audio: JUCE null device (CI / device-less)
 bool g_forcedNoAudio = false;  // --no-audio: forced device-less (play → no_audio_device)
+// Stage 3c-polish F2 — conservative device buffer: stability before latency
+// at this stage. Small driver defaults (128/256) glitch with a full orchestra
+// streaming samples; 512 is the floor for BBCSO-class libraries. The ACTUAL
+// opened values are logged (D1) — the driver may refuse the request.
+int g_wantedBufferSize = 512;
 
 // ─── Engine event (parsed from JSON load message) ───────────────────────────
 enum : uint8_t {
@@ -136,6 +141,52 @@ struct Voice {
     int64_t age = 0;         // for steal-oldest
 };
 
+// ─── Stage 3c-polish (realtime audit D2): lock-free handoffs ────────────────
+// The score is an IMMUTABLE snapshot published behind ONE atomic pointer.
+// The audio callback loads it once per buffer — no mutex, no per-sample
+// lock, no copy. Retired snapshots are freed by the init worker after a
+// grace period (never on the audio thread).
+struct ScoreSnapshot {
+    std::vector<EngineEvent> events;   // tick-sorted at publish time
+    double bpm = 120.0;
+    int ppqn = 960;
+    int64_t endTick = 0;
+};
+std::atomic<ScoreSnapshot*> g_score{nullptr};
+
+// Retirement queue (worker-thread-only): published objects that may still be
+// referenced by one in-flight audio buffer. Drained after a grace period far
+// exceeding any buffer duration (250ms >> 1024 samples @ 44.1kHz = 23ms), so
+// the audio thread NEVER frees anything. Deliberately NOT drained at exit
+// (process exit reclaims — same policy as the hosted plugin teardown).
+struct HostedPlugin;   // defined below (lock-free published instance)
+std::mutex g_retireMutex;
+std::vector<std::pair<ScoreSnapshot*, std::chrono::steady_clock::time_point>> g_retiredScores;
+std::vector<std::pair<HostedPlugin*, std::chrono::steady_clock::time_point>> g_retiredPlugins;
+
+// Voice kill requests: stop/seek/panic/play set the flag; the NEXT audio
+// buffer performs the kill itself (voices are audio-thread-owned). The
+// active-voice count is recomputed by the callback each buffer so handlers
+// can report an honest n= in their receipts without touching voices.
+std::atomic<bool> g_voiceKillPending{false};
+std::atomic<int> g_activeVoices{0};
+
+// Mute-flush requests: per-channel flags (index 0 = channel 1). Handlers
+// store true; the next buffer CC120-flushes the flagged channels and clears
+// the flags. Dedupes by channel naturally; no mutex, no vector, no alloc.
+std::atomic<bool> g_muteFlushPending[16] = {};
+
+// Stage 3c-polish F3 — hosted output gain (bounded local level fix, NOT the
+// mix-v4 recalibration). Applied to the plugin path only, after render,
+// before the master bus. Default 2.0 (+6dB): BBCSO's conservative output
+// (~-18..-12 dBFS peaks) lands at a sane ~-6 dBFS with clipping headroom.
+// --plugin-gain tunes it; peaks are reported so the user can iterate.
+std::atomic<float> g_hostedOutputGain{2.0f};
+
+// Session peak for the receipt pair: reset at play, maxed by the callback,
+// logged at stop ("[stop] ... | session peak X").
+std::atomic<float> g_playPeakMax{0.0f};
+
 // ─── Engine state (shared between WS thread, audio thread, state thread) ────
 // Stage 3b polish — position contract: lastTick is the SINGLE source of truth
 // for "where the playhead is" whenever the transport is stopped (and the seed
@@ -143,12 +194,14 @@ struct Voice {
 // buffer; stop/seek set it directly. currentTick() never reports a stale
 // playStartTick again (the resume-from-0 desync bug).
 struct EngineState {
-    std::mutex eventsMutex;
-    std::vector<EngineEvent> events;
-    double bpm = 120.0;
-    int ppqn = 960;
-    int64_t endTick = 0;
-
+    // Stage 3c-polish (realtime audit D2): the score, the voices and the
+    // hosted plugin are NO LONGER shared under mutexes with the audio
+    // callback. The score is published as an immutable snapshot behind ONE
+    // atomic pointer (g_score); voices are OWNED by the audio thread with
+    // kill requests self-serviced at buffer boundaries (g_voiceKillPending);
+    // the hosted plugin is published behind ONE atomic pointer (g_hostedLive)
+    // with worker-side retirement. The callback takes NO lock and performs
+    // NO allocation.
     std::atomic<bool> playing{false};
     std::atomic<int64_t> playStartTick{0};   // tick at which playback started
     std::atomic<double> sampleRate{44100.0};
@@ -160,18 +213,19 @@ struct EngineState {
     // buffer would otherwise clobber the new transport position.
     std::atomic<uint64_t> transportGen{0};
 
+    // Audio-thread-owned. External code NEVER touches these: stop/seek/panic
+    // set g_voiceKillPending and the next buffer performs the kill.
     Voice voices[kMaxVoices];
-    std::mutex voicesMutex;
     int64_t voiceAge = 0;
-
-    double samplesPerTick() const {
-        return sampleRate.load() * 60.0 / (bpm * ppqn);
-    }
 
     int64_t currentTick() const {
         if (!playing.load()) return lastTick.load();
+        ScoreSnapshot* s = g_score.load(std::memory_order_acquire);
+        const double b = s ? s->bpm : 120.0;
+        const int q = s ? s->ppqn : 960;
         return playStartTick.load() +
-               static_cast<int64_t>(samplesProcessed.load() / samplesPerTick());
+               static_cast<int64_t>(samplesProcessed.load() /
+                   (sampleRate.load() * 60.0 / (b * q)));
     }
 };
 
@@ -250,19 +304,24 @@ std::atomic<bool> g_pendingPanic{false};  // stop/panic/seek → CC120 flush to 
 
 // Mute/solo became AUDIBLE: tracks that just lost audibility get their hosted
 // channels flushed (CC120) so already-sounding notes stop immediately — mute
-// must be HEARD, not just gate future dispatches. Drained by the callback.
-std::mutex g_muteFlushMutex;
-std::vector<int> g_pendingMuteFlush;
+// must be HEARD, not just gate future dispatches. Handoff is a fixed array of
+// per-channel atomic flags (g_muteFlushPending, index 0 = channel 1): handlers
+// store true, the next buffer flushes and clears. No mutex, no vector, no
+// allocation on either side (Stage 3c-polish D2).
 
 // WS-thread-only: the last mix request (trackId lists), re-resolved after
 // every load (slots change with each new routing table).
 struct LastMix { std::vector<std::string> muted, solo; };
-LastMix g_lastMix;  // guarded by g_engine.eventsMutex
+std::mutex g_lastMixMutex;          // WS threads only — NEVER the audio thread
+LastMix g_lastMix;                  // guarded by g_lastMixMutex
 
 // Hosted plugin: ONE VST3 instance for the whole orchestra (BBCSO standalone
 // multi-timbral — tracks are routed by MIDI channel within the instance).
-// Swap/destroy under voicesMutex (serializes against the audio callback);
-// the instance itself is DELETED outside the lock (nothing can touch it then).
+// Stage 3c-polish (D2): published behind ONE atomic pointer (g_hostedLive).
+// An instance is IMMUTABLE after publication — the worker fully constructs
+// and prepares it BEFORE the exchange, so the audio callback's plain atomic
+// load needs no lock. The instance replaced by a swap is RETIRED (freed by
+// the worker after a grace period — never on the audio thread).
 struct HostedPlugin {
     std::unique_ptr<juce::AudioPluginInstance> instance;
     std::string name, vendor;
@@ -271,10 +330,14 @@ struct HostedPlugin {
     // matches the LIVE instance takes the reuse fast path (routing-only swap,
     // no re-instantiate); a DIFFERENT plugin on a rolling transport is
     // REJECTED — swapping instances mid-play was the empty-score regression.
-    // Identity is read ONLY under voicesMutex (the init worker swaps g_hosted).
+    // Identity is immutable after publication (safe to read lock-free).
     std::string uid, path;
 };
-std::unique_ptr<HostedPlugin> g_hosted;
+std::atomic<HostedPlugin*> g_hostedLive{nullptr};
+// Plugin-reported latency in samples, readable by the audio thread without
+// touching the instance: updated at publish and after every real-device
+// prepare (latency can change with rate/buffer). Drives F4 compensation.
+std::atomic<int> g_pluginLatencySamples{0};
 
 // ─── Stage 3c-regression: ASYNC plugin init ─────────────────────────────
 // loadHostedPlugin (findAllTypesForFile + createPluginInstance +
@@ -329,46 +392,56 @@ public:
         for (int ch = 0; ch < numOutputChannels; ++ch)
             std::memset(outputChannelData[ch], 0, sizeof(float) * numSamples);
 
-        // The voicesMutex spans the whole buffer: WS-thread lifecycle ops
-        // (plugin load/unload, panic voice kills) serialize against it.
-        std::lock_guard<std::mutex> lock(g_engine.voicesMutex);
+        // ── Stage 3c-polish (D2): this function performs NO lock and NO
+        // allocation. Voices are audio-thread-owned: kill requests from
+        // stop/seek/panic/play are self-serviced HERE at the boundary.
+        if (g_voiceKillPending.exchange(false, std::memory_order_relaxed)) {
+            for (auto& v : g_engine.voices) { v.releasing = false; v.active = false; v.env = 0; v.pitch = -1; }
+        }
+
+        // ONE atomic load per shared object. Published objects are immutable
+        // (score snapshot / prepared plugin), so plain pointer loads suffice.
+        HostedPlugin* hosted = g_hostedLive.load(std::memory_order_acquire);
         juce::AudioPluginInstance* plugin =
-            (g_hosted && g_hosted->instance) ? g_hosted->instance.get() : nullptr;
+            (hosted && hosted->instance) ? hosted->instance.get() : nullptr;
         const auto routing = g_routing.load(std::memory_order_acquire);
         const auto mix = g_mix.load(std::memory_order_acquire);
+        ScoreSnapshot* score = g_score.load(std::memory_order_acquire);
+        const int pluginLatency = g_pluginLatencySamples.load(std::memory_order_relaxed);
         float peak = 0.0f;
 
+        // Reusable per-buffer MIDI buffer (member): clear() keeps the
+        // internal capacity — steady-state dispatch allocates nothing.
+        midiBuf.clear();
         // Stage 3c-2 — panic flush: stop/panic/seek set g_pendingPanic; the
         // next buffer sends CC120 (All Sound Off) on ALL 16 channels into the
         // plugin so hosted voices die cleanly (3b's kill discipline, extended
         // to hosted instances). Events ride along at sample 0.
-        juce::MidiBuffer midi;
         const bool panicFlush = g_pendingPanic.exchange(false);
         if (panicFlush && plugin != nullptr) {
             for (int ch = 1; ch <= 16; ++ch)
-                midi.addEvent(juce::MidiMessage::controllerEvent(ch, 120, 0), 0);
+                midiBuf.addEvent(juce::MidiMessage::controllerEvent(ch, 120, 0), 0);
         }
-        // Mute/solo lost-audibility flush: CC120 on the affected HOSTED
-        // channels only (the test-synth voices are killed directly below by
-        // the handlers — they don't need a MIDI round-trip).
-        std::vector<int> muteFlush;
-        {
-            std::lock_guard<std::mutex> mlock(g_muteFlushMutex);
-            muteFlush = std::move(g_pendingMuteFlush);
-            g_pendingMuteFlush.clear();
-        }
-        if (!muteFlush.empty() && plugin != nullptr) {
-            for (const int ch : muteFlush)
-                midi.addEvent(juce::MidiMessage::controllerEvent(ch, 120, 0), 0);
+        // Mute/solo lost-audibility flush: per-channel atomic flags — no
+        // mutex, no vector (the test-synth voices are killed via the kill
+        // flag above; they don't need a MIDI round-trip).
+        bool anyMuteFlush = false;
+        if (plugin != nullptr) {
+            for (int ch = 1; ch <= 16; ++ch)
+                if (g_muteFlushPending[ch - 1].exchange(false, std::memory_order_relaxed)) {
+                    midiBuf.addEvent(juce::MidiMessage::controllerEvent(ch, 120, 0), 0);
+                    anyMuteFlush = true;
+                }
         }
 
         if (!g_engine.playing.load()) {
             // Not playing: the plugin still renders (drains the panic CC); the
             // output is silence unless the plugin tails.
             if (plugin != nullptr) {
-                renderPlugin(plugin, midi, outputChannelData, numOutputChannels, numSamples, peak);
+                renderPlugin(plugin, midiBuf, outputChannelData, numOutputChannels, numSamples, peak);
             }
             g_lastPeak.store(peak, std::memory_order_relaxed);
+            recountVoices();
             return;
         }
 
@@ -376,9 +449,24 @@ public:
         // play/seek that lands after this point invalidates this buffer's
         // commit (gen mismatch at the end), never half-updated state.
         const uint64_t gen0 = g_engine.transportGen.load(std::memory_order_relaxed);
-        double spt = g_engine.samplesPerTick();
+        const double spt = score
+            ? g_engine.sampleRate.load() * 60.0 / (score->bpm * score->ppqn)
+            : (44100.0 * 60.0 / (120.0 * 960));
+        const int64_t endTick = score ? score->endTick : 0;
+        const EngineEvent* const events = score ? score->events.data() : nullptr;
+        const size_t eventCount = score ? score->events.size() : 0;
         int64_t startSample = g_engine.samplesProcessed.load();
         int64_t playStartTick = g_engine.playStartTick.load();
+
+        // Routing-only plugin test (shared by the skip and dispatch walks and
+        // by dispatchTo). F4: plugin-routed events dispatch EARLIER by the
+        // plugin's reported latency so the audible attack lands on the grid.
+        auto isPluginRouted = [&](const EngineEvent& ev) -> bool {
+            if (plugin == nullptr || routing == nullptr || ev.trackRef == 0) return false;
+            if (ev.trackRef >= routing->slotChannel.size()) return false;
+            return routing->slotChannel[ev.trackRef] > 0 &&
+                   routing->pluginChannels.count(ev.channel) > 0;
+        };
 
         // Pass 1 — dispatch events (plugin → MidiBuffer, synth → voices) and
         // render the synth path into scratch.
@@ -387,7 +475,7 @@ public:
         // Ledger marker for a flush batch (ch=0 synthetic): the CI test
         // correlates mute-flush position with state peaks by ENGINE TICK, so
         // runner-speed-dependent message latency can never skew the windows.
-        if ((panicFlush || !muteFlush.empty()) && g_dispatchLog.load(std::memory_order_relaxed)) {
+        if ((panicFlush || anyMuteFlush) && g_dispatchLog.load(std::memory_order_relaxed)) {
             const uint64_t idx = g_ledgerWrite.load(std::memory_order_relaxed);
             if (idx - g_ledgerRead.load(std::memory_order_relaxed) < kLedgerSize) {
                 DispatchEntry& e = g_ledger[idx % kLedgerSize];
@@ -398,31 +486,30 @@ public:
             }
         }
         size_t eventIdx = 0;
-        {
-            std::lock_guard<std::mutex> elock(g_engine.eventsMutex);
-            // Skip events before the current position
-            for (; eventIdx < g_engine.events.size(); ++eventIdx) {
-                int64_t eventSample = static_cast<int64_t>(
-                    (g_engine.events[eventIdx].tick - playStartTick) * spt);
-                if (eventSample >= startSample) break;
-            }
+        // Skip events before the current position (shift-aware, clamped at 0
+        // so tick-0 plugin pre-sets still fire on the first buffer).
+        for (; eventIdx < eventCount; ++eventIdx) {
+            const EngineEvent& ev = events[eventIdx];
+            const int64_t eventSample = std::max<int64_t>(0,
+                static_cast<int64_t>((ev.tick - playStartTick) * spt) -
+                (isPluginRouted(ev) ? pluginLatency : 0));
+            if (eventSample >= startSample) break;
         }
 
         for (int s = 0; s < numSamples; ++s) {
             int64_t absSample = startSample + s;
 
-            // Dispatch events at this sample
-            {
-                std::lock_guard<std::mutex> elock(g_engine.eventsMutex);
-                while (eventIdx < g_engine.events.size()) {
-                    const EngineEvent& ev = g_engine.events[eventIdx];
-                    int64_t eventSample = static_cast<int64_t>(
-                        (ev.tick - playStartTick) * spt);
-                    if (eventSample > absSample) break;
-                    dispatchTo(ev, static_cast<int>(absSample - eventSample),
-                               absSample, spt, playStartTick, midi, plugin, routing, mix);
-                    ++eventIdx;
-                }
+            // Dispatch events at this sample (no lock — immutable snapshot).
+            while (eventIdx < eventCount) {
+                const EngineEvent& ev = events[eventIdx];
+                const bool toPlugin = isPluginRouted(ev);
+                const int64_t eventSample = std::max<int64_t>(0,
+                    static_cast<int64_t>((ev.tick - playStartTick) * spt) -
+                    (toPlugin ? pluginLatency : 0));
+                if (eventSample > absSample) break;
+                dispatchTo(ev, toPlugin, static_cast<int>(absSample - eventSample),
+                           absSample, spt, playStartTick, midiBuf, plugin, routing, mix);
+                ++eventIdx;
             }
 
             // Render all active voices (the built-in test synth path)
@@ -451,7 +538,7 @@ public:
 
         // Pass 2 — output = hosted plugin (when active) + built-in synth.
         if (plugin != nullptr) {
-            renderPlugin(plugin, midi, outputChannelData, numOutputChannels, numSamples, peak);
+            renderPlugin(plugin, midiBuf, outputChannelData, numOutputChannels, numSamples, peak);
             for (int s = 0; s < numSamples; ++s) {
                 const float out = synthScratch[static_cast<size_t>(s)];
                 for (int ch = 0; ch < numOutputChannels; ++ch)
@@ -467,6 +554,12 @@ public:
             }
         }
         g_lastPeak.store(peak, std::memory_order_relaxed);
+        // Session peak (F3 receipt) + honest active-voice count for handlers.
+        {
+            const float prev = g_playPeakMax.load(std::memory_order_relaxed);
+            if (peak > prev) g_playPeakMax.store(peak, std::memory_order_relaxed);
+        }
+        recountVoices();
 
         // Commit — but only if no play/seek invalidated this buffer meanwhile.
         if (g_engine.transportGen.load(std::memory_order_relaxed) == gen0) {
@@ -478,7 +571,7 @@ public:
             // Stop at endTick
             const int64_t nowTick = playStartTick +
                 static_cast<int64_t>(static_cast<double>(committed) / spt);
-            if (g_engine.endTick > 0 && nowTick >= g_engine.endTick) {
+            if (endTick > 0 && nowTick >= endTick) {
                 g_engine.playing.store(false);
                 allNotesOff();
             }
@@ -491,23 +584,34 @@ public:
         if (device == nullptr) return;
         g_engine.sampleRate.store(device->getCurrentSampleRate());
         g_deviceBufferSize.store(static_cast<int>(device->getCurrentBufferSizeSamples()));
-        std::lock_guard<std::mutex> lock(g_engine.voicesMutex);
+        // No lock: callbacks are not running during device start, and the
+        // published plugin instance is immutable except for this prepare.
         ensureScratch(static_cast<size_t>(device->getCurrentBufferSizeSamples()));
         procBuf.setSize(2, device->getCurrentBufferSizeSamples(), false, true, false);
-        // Stage 3c-2 — (re)prepare the hosted plugin for the REAL device
-        // (create-time used nominal 44100/512): activate the stereo output bus
-        // into the device graph and report the REAL latency numbers.
-        if (g_hosted && g_hosted->instance) {
-            auto* p = g_hosted->instance.get();
+        // Stage 3c-2/3c-polish (D1) — (re)prepare the hosted plugin for the
+        // REAL device (create-time used nominal 44100/512) and LOG the actual
+        // config pair so a prepare/config mismatch can never hide again.
+        HostedPlugin* h = g_hostedLive.load(std::memory_order_acquire);
+        if (h && h->instance) {
+            auto* p = h->instance.get();
             p->setPlayConfigDetails(0, 2, device->getCurrentSampleRate(),
                                     device->getCurrentBufferSizeSamples());
             p->prepareToPlay(device->getCurrentSampleRate(),
                              device->getCurrentBufferSizeSamples());
+            const int lat = static_cast<int>(p->getLatencySamples());
+            h->latencySamples = static_cast<double>(lat);
+            g_pluginLatencySamples.store(lat, std::memory_order_release);
             const double devMs = static_cast<double>(device->getCurrentBufferSizeSamples()) /
                                  device->getCurrentSampleRate() * 1000.0;
             const double plugMs = p->getLatencySamples() / device->getCurrentSampleRate() * 1000.0;
             std::cout << "[engine] latency: device=" << devMs << "ms plugin=" << plugMs
                       << "ms total=" << (devMs + plugMs) << "ms" << std::endl;
+            engineLog("[plugin] prepared rate=" +
+                      std::to_string(static_cast<int>(device->getCurrentSampleRate())) +
+                      " buffer=" + std::to_string(device->getCurrentBufferSizeSamples()) +
+                      " latencySamples=" + std::to_string(lat) +
+                      " (device actual: \"" + device->getName().toStdString() + "\" type=" +
+                      device->getTypeName().toStdString() + ")");
         }
     }
 
@@ -516,13 +620,26 @@ public:
 private:
     std::vector<float> synthScratch;              // synth contribution per buffer
     juce::AudioBuffer<float> procBuf;             // hosted plugin render target
+    juce::MidiBuffer midiBuf;                     // reusable per-buffer MIDI (clear() keeps capacity)
 
     void ensureScratch(size_t numSamples) {
         if (synthScratch.size() < numSamples) synthScratch.resize(numSamples, 0.0f);
     }
 
+    // Honest active-voice count for handler receipts, recomputed by the
+    // audio thread (which owns the voices) at each buffer boundary.
+    void recountVoices() {
+        int n = 0;
+        for (const auto& v : g_engine.voices)
+            if (v.active || v.releasing) ++n;
+        g_activeVoices.store(n, std::memory_order_relaxed);
+    }
+
     // Render one buffer through the hosted plugin and copy its (up to 2)
     // output channels into the device buffer, tracking the output peak.
+    // Stage 3c-polish F3: the hosted OUTPUT GAIN is applied here — plugin
+    // path only, after render, before the master bus. NOT a per-track mix
+    // recalibration (that is mix-v4); CC7/CC11 remain the per-track levels.
     void renderPlugin(juce::AudioPluginInstance* plugin, juce::MidiBuffer& midi,
                       float* const* outputChannelData, int numOutputChannels,
                       int numSamples, float& peak) {
@@ -531,10 +648,11 @@ private:
         for (int ch = 0; ch < procBuf.getNumChannels(); ++ch)
             procBuf.clear(ch, 0, numSamples);
         plugin->processBlock(procBuf, midi);
+        const float gain = g_hostedOutputGain.load(std::memory_order_relaxed);
         const int chans = juce::jmin(numOutputChannels, procBuf.getNumChannels());
         for (int s = 0; s < numSamples; ++s) {
             float out = 0.0f;
-            if (chans > 0) out = procBuf.getSample(0, s);  // mono fold to all device channels
+            if (chans > 0) out = procBuf.getSample(0, s) * gain;  // mono fold to all device channels
             for (int ch = 0; ch < numOutputChannels; ++ch)
                 outputChannelData[ch][s] = out;
             peak = std::max(peak, std::abs(out));
@@ -543,7 +661,9 @@ private:
 
     // Stage 3c-2 dispatch: mute/solo gate FIRST (before any send — the carried
     // debt, now audible), then plugin channel routing, then the test synth.
-    void dispatchTo(const EngineEvent& ev, int samplePos, int64_t absSample, double spt,
+    // Stage 3c-polish (F4/D2): the routing decision is computed by the caller
+    // (the dispatch walk needs it for the latency shift) and passed in.
+    void dispatchTo(const EngineEvent& ev, bool toPlugin, int samplePos, int64_t absSample, double spt,
                     int64_t playStartTick, juce::MidiBuffer& midi,
                     juce::AudioPluginInstance* plugin,
                     const std::shared_ptr<const RoutingTable>& routing,
@@ -559,11 +679,6 @@ private:
         // channel map) send into the plugin — a synth-track event whose
         // midiChannel numerically collides with a hosted channel can never
         // leak into BBCSO. Everything else falls to the built-in test synth.
-        const bool toPlugin =
-            plugin != nullptr && routing != nullptr && ev.trackRef != 0 &&
-            ev.trackRef < routing->slotChannel.size() &&
-            routing->slotChannel[ev.trackRef] > 0 &&
-            routing->pluginChannels.count(ev.channel) > 0;
         if (toPlugin) {
             switch (ev.kind) {
                 case kEvNoteOn:
@@ -788,7 +903,7 @@ std::string ensureAudioReady() {
             juce::BigInteger outCh;
             outCh.setBit(0);
             outCh.setBit(1);
-            auto err = dev->open(juce::BigInteger(), outCh, 44100.0, 512);
+            auto err = dev->open(juce::BigInteger(), outCh, 44100.0, g_wantedBufferSize);
             if (err.isNotEmpty())
                 return "null audio device open failed: " + err.toStdString();
             g_engine.sampleRate.store(dev->getCurrentSampleRate());
@@ -797,6 +912,20 @@ std::string ensureAudioReady() {
             g_audio.ready = true;
             std::cout << "[engine] audio: null device (no hardware) @ "
                       << g_audio.nullDevice->getCurrentSampleRate() << " Hz" << std::endl;
+            // D1 receipt: the ACTUAL opened config, never the assumed one.
+            {
+                char gainBuf[16];
+                std::snprintf(gainBuf, sizeof(gainBuf), "%.2f",
+                              static_cast<double>(g_hostedOutputGain.load(std::memory_order_relaxed)));
+                engineLog("[audio] opened device=\"scorch-null\" type=Null rate=" +
+                          std::to_string(static_cast<int>(g_engine.sampleRate.load())) +
+                          " buffer=" + std::to_string(g_audio.nullDevice->getCurrentBufferSizeSamples()) +
+                          " (requested buffer=" + std::to_string(g_wantedBufferSize) + ")");
+                engineLog(std::string("[audio] hosted output gain x") + gainBuf +
+                          " (--plugin-gain) | latency compensation " +
+                          std::to_string(g_pluginLatencySamples.load(std::memory_order_relaxed)) +
+                          " samples (plugin-reported)");
+            }
             return "";
         }
 
@@ -806,6 +935,20 @@ std::string ensureAudioReady() {
             std::string detail = result.toStdString();
             g_audio.manager.reset();  // release; the next play retries
             return detail.empty() ? "no default audio device" : detail;
+        }
+        // Stage 3c-polish F2 — request the CONSERVATIVE buffer size. The
+        // device's driver default is often 128/256 (glitchy with a full
+        // orchestra). If the driver refuses, keep its default and SAY SO.
+        {
+            auto setup = g_audio.manager->getAudioDeviceSetup();
+            if (setup.bufferSize != g_wantedBufferSize) {
+                setup.bufferSize = g_wantedBufferSize;
+                auto setupErr = g_audio.manager->setAudioDeviceSetup(setup, true);
+                if (setupErr.isNotEmpty())
+                    engineLog("[audio] buffer-size request " + std::to_string(g_wantedBufferSize) +
+                              " REJECTED by driver: " + setupErr.toStdString() +
+                              " — keeping the device default");
+            }
         }
         auto* device = g_audio.manager->getCurrentAudioDevice();
         if (device == nullptr) {
@@ -818,6 +961,22 @@ std::string ensureAudioReady() {
         std::cout << "[engine] audio: " << device->getName().toStdString()
                   << " @ " << device->getCurrentSampleRate() << " Hz"
                   << " buffer=" << device->getCurrentBufferSizeSamples() << std::endl;
+        // D1 receipt: the ACTUAL opened device config (name/type/rate/buffer),
+        // never the assumed one — a prepare/config mismatch can now hide NOWHERE.
+        {
+            char gainBuf[16];
+            std::snprintf(gainBuf, sizeof(gainBuf), "%.2f",
+                          static_cast<double>(g_hostedOutputGain.load(std::memory_order_relaxed)));
+            engineLog("[audio] opened device=\"" + device->getName().toStdString() +
+                      "\" type=" + device->getTypeName().toStdString() +
+                      " rate=" + std::to_string(static_cast<int>(device->getCurrentSampleRate())) +
+                      " buffer=" + std::to_string(device->getCurrentBufferSizeSamples()) +
+                      " (requested buffer=" + std::to_string(g_wantedBufferSize) + ")");
+            engineLog(std::string("[audio] hosted output gain x") + gainBuf +
+                      " (--plugin-gain) | latency compensation " +
+                      std::to_string(g_pluginLatencySamples.load(std::memory_order_relaxed)) +
+                      " samples (plugin-reported)");
+        }
         return "";
     } catch (const std::exception& e) {
         g_audio.manager.reset();
@@ -848,13 +1007,9 @@ void shutdownAudio() {
         // known hosting-deadlock hazard (module terminate/editor teardown can
         // block forever) and buys nothing: the audio callback above is already
         // stopped, no further processBlock can run, and process exit reclaims
-        // every resource. The instance's lifetime IS the process lifetime.
-        std::unique_ptr<HostedPlugin> hosted;
-        {
-            std::lock_guard<std::mutex> lock(g_engine.voicesMutex);
-            hosted = std::move(g_hosted);
-        }
-        hosted.release();  // leak-by-design at shutdown (see above)
+        // every resource. The instance's lifetime IS the process lifetime —
+        // the g_hostedLive pointer and any retired instances are intentionally
+        // leaked at exit (Stage 3c-polish: same policy, no lock needed).
     } catch (...) {
         // Swallow — shutdown must be robust.
     }
@@ -1307,15 +1462,13 @@ void handle_load(const juce::var& json, ix::WebSocket& ws, size_t byteSize) {
     if (pluginRequested && !channelsBad && g_engine.playing.load()) {
         const std::string reqUid = pluginVar.getDynamicObject()->getProperty("uid").toString().toStdString();
         const std::string reqPath = pluginVar.getDynamicObject()->getProperty("path").toString().toStdString();
-        // Snapshot the live instance's identity under voicesMutex — the init
-        // worker swaps g_hosted from its own thread.
-        bool haveLive = false;
-        std::string liveUid, livePath;
-        {
-            std::lock_guard<std::mutex> lock(g_engine.voicesMutex);
-            haveLive = g_hosted != nullptr;
-            if (haveLive) { liveUid = g_hosted->uid; livePath = g_hosted->path; }
-        }
+        // Identity is immutable after publication — a plain atomic load
+        // snapshot is safe without any lock (the init worker publishes fully
+        // constructed instances only).
+        HostedPlugin* live = g_hostedLive.load(std::memory_order_acquire);
+        const bool haveLive = live != nullptr;
+        const std::string liveUid = live ? live->uid : "";
+        const std::string livePath = live ? live->path : "";
         if (haveLive && !reqUid.empty() && !reqPath.empty() &&
             reqUid == liveUid && reqPath == livePath) {
             midPlayReuse = true;
@@ -1331,18 +1484,25 @@ void handle_load(const juce::var& json, ix::WebSocket& ws, size_t byteSize) {
         }
     }
 
+    // ─── Stage 3c-polish (D2): publish the score as an immutable snapshot ───
+    // The dispatch walk is sequential in tick order (3b contract: the
+    // frontend sorts). Sort here anyway — stable — so an unsorted client
+    // can never silently drop out-of-order events. The OLD snapshot is
+    // retired (freed by the init worker after a grace period — never on
+    // the audio thread, which may still be reading it this buffer).
     {
-        std::lock_guard<std::mutex> lock(g_engine.eventsMutex);
-        g_engine.events = std::move(newEvents);
-        // The dispatch walk is sequential in tick order (3b contract: the
-        // frontend sorts). Sort here anyway — stable — so an unsorted client
-        // can never silently drop out-of-order events (a later-tick event
-        // stranded behind an earlier NOTE_OFF would never dispatch).
-        std::stable_sort(g_engine.events.begin(), g_engine.events.end(),
+        ScoreSnapshot* snap = new ScoreSnapshot();
+        snap->events = std::move(newEvents);
+        std::stable_sort(snap->events.begin(), snap->events.end(),
                          [](const EngineEvent& a, const EngineEvent& b) { return a.tick < b.tick; });
-        g_engine.bpm = bpm;
-        g_engine.ppqn = ppqn;
-        g_engine.endTick = endTick;
+        snap->bpm = bpm;
+        snap->ppqn = ppqn;
+        snap->endTick = endTick;
+        ScoreSnapshot* old = g_score.exchange(snap, std::memory_order_acq_rel);
+        if (old) {
+            std::lock_guard<std::mutex> rlock(g_retireMutex);
+            g_retiredScores.push_back({old, std::chrono::steady_clock::now()});
+        }
     }
 
     // Stage 3c-hotfix — LOAD RECEIPT (the black box opened): what the engine
@@ -1367,8 +1527,12 @@ void handle_load(const juce::var& json, ix::WebSocket& ws, size_t byteSize) {
     }
     char bpmBuf[32];
     std::snprintf(bpmBuf, sizeof(bpmBuf), "%g", bpm);
+    const size_t publishedCount = [&] {
+        ScoreSnapshot* s = g_score.load(std::memory_order_acquire);
+        return s ? s->events.size() : size_t(0);
+    }();
     engineLog("[load] received " + std::to_string(byteSize) + " bytes | loaded " +
-              withCommas(static_cast<uint64_t>(g_engine.events.size())) + " events (array had " +
+              withCommas(static_cast<uint64_t>(publishedCount)) + " events (array had " +
               withCommas(static_cast<uint64_t>(receivedCount)) + ", skipped " +
               std::to_string(skipped) + ")" +
               (firstErrorIndex >= 0 ? " | firstError " + std::to_string(firstErrorIndex) +
@@ -1378,7 +1542,7 @@ void handle_load(const juce::var& json, ix::WebSocket& ws, size_t byteSize) {
               " | bpm=" + bpmBuf + " ppqn=" + std::to_string(ppqn) +
               " endTick=" + std::to_string(endTick) + " | seq " + std::to_string(seq) +
               (pluginRequested ? " | plugin requested" : ""));
-    std::cout << "[engine] loaded " << g_engine.events.size() << " events (bpm=" << bpm
+    std::cout << "[engine] loaded " << publishedCount << " events (bpm=" << bpm
               << " ppqn=" << ppqn << " endTick=" << endTick << ")" << std::endl;
 
     // Stage 3c-hotfix — loadAck (ADDITIVE): the receipt the frontend's source
@@ -1387,7 +1551,7 @@ void handle_load(const juce::var& json, ix::WebSocket& ws, size_t byteSize) {
     // exact byte size received. The legacy `state` reply below still follows.
     ws.send(std::string("{\"type\":\"loadAck\",\"seq\":") + std::to_string(seq) +
             ",\"received\":" + std::to_string(receivedCount) +
-            ",\"loaded\":" + std::to_string(g_engine.events.size()) +
+            ",\"loaded\":" + std::to_string(publishedCount) +
             ",\"skipped\":" + std::to_string(skipped) +
             ",\"firstErrorIndex\":" + std::to_string(firstErrorIndex) +
             ",\"firstErrorReason\":\"" + escape_json(firstErrorReason) + "\"" +
@@ -1435,13 +1599,10 @@ void handle_load(const juce::var& json, ix::WebSocket& ws, size_t byteSize) {
             // instance is kept untouched (no re-instantiate, no swap, no
             // release) — only events + routing swapped above. This is the
             // mid-play live-edit reload, and it costs milliseconds.
-            {
-                std::lock_guard<std::mutex> lock(g_engine.voicesMutex);
-                if (g_hosted) {
-                    hostName = g_hosted->name;
-                    hostVendor = g_hosted->vendor;
-                    latencyMs = (g_hosted->latencySamples + 512.0) / 44100.0 * 1000.0;
-                }
+            if (HostedPlugin* live = g_hostedLive.load(std::memory_order_acquire)) {
+                hostName = live->name;
+                hostVendor = live->vendor;
+                latencyMs = (live->latencySamples + 512.0) / 44100.0 * 1000.0;
             }
             engineLog("[plugin] reuse while playing — no re-instantiate | seq " +
                       std::to_string(seq) + " channels=[" + channelsJson + "]");
@@ -1472,7 +1633,6 @@ void handle_load(const juce::var& json, ix::WebSocket& ws, size_t byteSize) {
     // Swap the routing table (pluginChannels empty unless hosted) and rebuild
     // the mix snapshot for the new slots.
     {
-        std::lock_guard<std::mutex> lock(g_engine.eventsMutex);
         // slot → channel for precise routing (0 = not plugin-routed).
         table.slotChannel.assign(table.trackNames.size() + 1, 0);
         for (size_t i = 0; i < table.trackNames.size(); ++i) {
@@ -1480,6 +1640,7 @@ void handle_load(const juce::var& json, ix::WebSocket& ws, size_t byteSize) {
             if (it != table.channelOfTrack.end()) table.slotChannel[i + 1] = it->second;
         }
         g_routing.store(std::make_shared<const RoutingTable>(std::move(table)), std::memory_order_release);
+        std::lock_guard<std::mutex> mlock(g_lastMixMutex);
         g_mix.store(buildMixState(*g_routing.load(std::memory_order_acquire), g_lastMix), std::memory_order_release);
     }
 }
@@ -1503,7 +1664,7 @@ void handle_mix(const juce::var& json) {
             if (std::find(list.begin(), list.end(), id) == list.end()) list.push_back(id);
         }
     }
-    std::lock_guard<std::mutex> lock(g_engine.eventsMutex);
+    std::lock_guard<std::mutex> lock(g_lastMixMutex);
     const auto table = g_routing.load(std::memory_order_acquire);
     if (table) {
         const auto oldMix = buildMixState(*table, g_lastMix);
@@ -1515,17 +1676,12 @@ void handle_mix(const juce::var& json) {
                 ? (slot < m.solo.size() && m.solo[slot] != 0)
                 : !(slot < m.muted.size() && m.muted[slot] != 0);
         };
-        std::vector<int> flush;
         for (uint32_t slot = 1; slot <= table->trackNames.size(); ++slot) {
             if (audible(slot, true) && !audible(slot, false)) {
                 auto it = table->channelOfTrack.find(table->trackNames[slot - 1]);
                 if (it != table->channelOfTrack.end() && table->pluginChannels.count(it->second))
-                    flush.push_back(it->second);
+                    g_muteFlushPending[it->second - 1].store(true, std::memory_order_relaxed);
             }
-        }
-        if (!flush.empty()) {
-            std::lock_guard<std::mutex> mlock(g_muteFlushMutex);
-            g_pendingMuteFlush.insert(g_pendingMuteFlush.end(), flush.begin(), flush.end());
         }
         g_mix.store(std::move(newMix), std::memory_order_release);
     }
@@ -1570,16 +1726,15 @@ void handle_transport(const juce::var& json, ix::WebSocket& ws) {
             : g_engine.lastTick.load();
         if (startTick < 0) startTick = 0;
         // Panic-before-play: a fresh play must never overlap a previous
-        // transport's ringing voices (the doubled-audio finding). Taking
-        // voicesMutex also waits out any in-flight callback buffer.
-        {
-            std::lock_guard<std::mutex> lock(g_engine.voicesMutex);
-            for (auto& v : g_engine.voices) { v.releasing = false; v.active = false; v.env = 0; v.pitch = -1; }
-        }
+        // transport's ringing voices (the doubled-audio finding). The kill is
+        // SELF-SERVICED by the next audio buffer (Stage 3c-polish D2: no
+        // cross-thread voice access anymore).
+        g_voiceKillPending.store(true, std::memory_order_relaxed);
         g_pendingPanic.store(true);  // hosted plugin gets the CC120 flush too
         g_engine.samplesProcessed.store(0);
         g_engine.playStartTick.store(startTick);
         g_engine.transportGen.fetch_add(1);  // invalidate pre-play buffer commits
+        g_playPeakMax.store(0.0f, std::memory_order_relaxed);  // fresh session peak
         g_engine.playing.store(true);
         std::cout << "[engine] transport play from tick " << startTick
                   << (hasTick ? " (explicit)" : " (resume)") << std::endl;
@@ -1589,33 +1744,35 @@ void handle_transport(const juce::var& json, ix::WebSocket& ws) {
         // against an empty/unloaded score now reads 0 scheduled in the log.
         {
             uint64_t scheduled = 0;
-            {
-                std::lock_guard<std::mutex> lock(g_engine.eventsMutex);
-                for (const auto& ev : g_engine.events)
+            size_t total = 0;
+            if (ScoreSnapshot* s = g_score.load(std::memory_order_acquire)) {
+                total = s->events.size();
+                for (const auto& ev : s->events)
                     if (ev.kind == kEvNoteOn && ev.tick >= startTick) ++scheduled;
             }
             engineLog("[play] rendering from tick " + std::to_string(startTick) + ", " +
                       withCommas(scheduled) + " voices scheduled (of " +
-                      withCommas(static_cast<uint64_t>(g_engine.events.size())) + " events)" +
+                      withCommas(static_cast<uint64_t>(total)) + " events)" +
                       (hasTick ? " (explicit tick)" : " (resume)"));
         }
     } else if (cmd == "stop") {
         // Stage 3b polish — STOP IS PANIC: every voice dies NOW (no ring-out,
         // no overlap into the next play), and lastTick keeps the stopped
         // position so a later play-without-tick resumes exactly there.
+        // Stage 3c-polish (D2): the kill is self-serviced by the next audio
+        // buffer; the receipt reports the honest active-voice count at the
+        // moment of the request plus the session peak (F3).
         g_engine.playing.store(false);
-        int killed = 0;
-        {
-            std::lock_guard<std::mutex> lock(g_engine.voicesMutex);
-            for (auto& v : g_engine.voices) {
-                if (v.active || v.releasing) ++killed;
-                v.releasing = false; v.active = false; v.env = 0; v.pitch = -1;
-            }
-        }
+        g_voiceKillPending.store(true, std::memory_order_relaxed);
+        const int killed = g_activeVoices.load(std::memory_order_relaxed);
+        const float sessionPeak = g_playPeakMax.load(std::memory_order_relaxed);
+        char peakBuf[16];
+        std::snprintf(peakBuf, sizeof(peakBuf), "%.3f", static_cast<double>(sessionPeak));
         std::cout << "[engine] transport stop: voices killed (n=" << killed
                   << ", tick=" << g_engine.lastTick.load() << ")" << std::endl;
         engineLog("[stop] transport stop — voices killed n=" + std::to_string(killed) +
-                  ", lastTick " + std::to_string(g_engine.lastTick.load()));
+                  ", lastTick " + std::to_string(g_engine.lastTick.load()) +
+                  " | session peak " + peakBuf);
         g_pendingPanic.store(true);  // hosted plugin: CC120 flush on the next buffer
     } else if (cmd == "seek") {
         int64_t tick = static_cast<int64_t>(static_cast<double>(obj->getProperty("tick")));
@@ -1625,11 +1782,9 @@ void handle_transport(const juce::var& json, ix::WebSocket& ws) {
         g_engine.lastTick.store(tick);
         g_engine.transportGen.fetch_add(1);  // pre-seek buffers must not commit
         // Hard position jump — ringing notes from the old position must not
-        // bleed over the new one (same panic semantics as stop).
-        {
-            std::lock_guard<std::mutex> lock(g_engine.voicesMutex);
-            for (auto& v : g_engine.voices) { v.releasing = false; v.active = false; v.env = 0; v.pitch = -1; }
-        }
+        // bleed over the new one (same panic semantics as stop; self-serviced
+        // by the next audio buffer — Stage 3c-polish D2).
+        g_voiceKillPending.store(true, std::memory_order_relaxed);
         std::cout << "[engine] transport seek to tick " << tick << std::endl;
         engineLog("[seek] to tick " + std::to_string(tick));
         g_pendingPanic.store(true);  // hosted plugin: no bleed across the jump
@@ -1638,14 +1793,10 @@ void handle_transport(const juce::var& json, ix::WebSocket& ws) {
 
 void handle_panic() {
     g_engine.playing.store(false);
-    int killed = 0;
-    {
-        std::lock_guard<std::mutex> lock(g_engine.voicesMutex);
-        for (auto& v : g_engine.voices) {
-            if (v.active || v.releasing) ++killed;
-            v.releasing = false; v.active = false; v.env = 0; v.pitch = -1;
-        }
-    }
+    // Stage 3c-polish (D2): the kill is self-serviced by the next audio
+    // buffer; n = honest active count at request time.
+    const int killed = g_activeVoices.load(std::memory_order_relaxed);
+    g_voiceKillPending.store(true, std::memory_order_relaxed);
     g_engine.transportGen.fetch_add(1);
     g_pendingPanic.store(true);
     std::cout << "[engine] panic — all notes off (n=" << killed << ")" << std::endl;
@@ -1680,6 +1831,17 @@ int main(int argc, char** argv) {
         }
         if (arg == "--no-audio") {
             g_forcedNoAudio = true;
+        }
+        // Stage 3c-polish F2 — conservative buffer size override (default 512).
+        if (arg == "--buffer-size" && i + 1 < argc) {
+            g_wantedBufferSize = std::atoi(argv[++i]);
+            if (g_wantedBufferSize < 64) g_wantedBufferSize = 64;
+            if (g_wantedBufferSize > 4096) g_wantedBufferSize = 4096;
+        }
+        // Stage 3c-polish F3 — hosted output gain override (default 2.0).
+        if (arg == "--plugin-gain" && i + 1 < argc) {
+            const float g = static_cast<float>(std::atof(argv[++i]));
+            g_hostedOutputGain.store(std::clamp(g, 0.25f, 8.0f), std::memory_order_relaxed);
         }
         if (arg == "--port" && i + 1 < argc) {
             port = std::atoi(argv[++i]);
@@ -1788,12 +1950,11 @@ int main(int argc, char** argv) {
                     ws.send("{\"type\":\"error\",\"code\":\"unknown\",\"echo\":\"" + escape_json(message) + "\"}");
                 }
             } else if (msg->type == ix::WebSocketMessageType::Close) {
-                // Panic on disconnect — no stuck notes
+                // Panic on disconnect — no stuck notes (self-serviced kill,
+                // Stage 3c-polish D2: no cross-thread voice access).
                 g_engine.playing.store(false);
-                {
-                    std::lock_guard<std::mutex> lock(g_engine.voicesMutex);
-                    for (auto& v : g_engine.voices) { v.releasing = false; v.active = false; v.env = 0; v.pitch = -1; }
-                }
+                g_voiceKillPending.store(true, std::memory_order_relaxed);
+                g_pendingPanic.store(true);
                 std::cout << "[engine] client disconnected (panic)" << std::endl;
                 engineLog("[ws] client disconnected (panic)");
             }
@@ -1857,6 +2018,29 @@ int main(int argc, char** argv) {
     std::thread plugin_init_thread([&server]() {
         uint64_t seenGen = 0;
         while (!g_should_exit.load()) {
+            // Stage 3c-polish (D2): retire aged publications FIRST — the
+            // grace period guarantees any in-flight audio buffer holding the
+            // old pointer finished long ago (250ms >> 23ms worst buffer).
+            // Never freed on the audio thread; deliberately NOT drained at
+            // exit (process exit reclaims — the 3c teardown policy).
+            {
+                const auto now = std::chrono::steady_clock::now();
+                std::lock_guard<std::mutex> rlock(g_retireMutex);
+                auto aged = [&now](const auto& p) {
+                    return std::chrono::duration_cast<std::chrono::milliseconds>(now - p.second).count() >= 250;
+                };
+                for (auto it = g_retiredScores.begin(); it != g_retiredScores.end();) {
+                    if (aged(*it)) { delete it->first; it = g_retiredScores.erase(it); }
+                    else ++it;
+                }
+                for (auto it = g_retiredPlugins.begin(); it != g_retiredPlugins.end();) {
+                    if (aged(*it)) {
+                        if (it->first->instance) it->first->instance->releaseResources();
+                        delete it->first;
+                        it = g_retiredPlugins.erase(it);
+                    } else ++it;
+                }
+            }
             PluginInitRequest req;
             {
                 std::unique_lock<std::mutex> lock(g_pluginInitMutex);
@@ -1901,37 +2085,47 @@ int main(int argc, char** argv) {
             // Prepare for the REAL device (create-time used nominal
             // 44100/512) BEFORE the swap — a mis-prepared instance under a
             // running callback was the other half of the empty-score
-            // regression.
+            // regression. D1: log the ACTUAL prepared config (or the nominal
+            // fallback when audio has not started yet).
             const double devRate = g_engine.sampleRate.load();
             const int devBuf = g_deviceBufferSize.load();
             if (devRate > 0.0 && loaded->instance) {
                 loaded->instance->setPlayConfigDetails(0, 2, devRate, devBuf);
                 loaded->instance->prepareToPlay(devRate, devBuf);
             }
-            if (loaded->instance) loaded->latencySamples = loaded->instance->getLatencySamples();
-            // Swap in under voicesMutex; the OLD instance is released and
-            // destroyed OUTSIDE the lock (nothing can reference it then).
-            std::unique_ptr<HostedPlugin> oldHosted;
-            {
-                std::lock_guard<std::mutex> lock(g_engine.voicesMutex);
-                oldHosted = std::move(g_hosted);
-                g_hosted = std::move(loaded);
+            int preparedLat = 0;
+            if (loaded->instance) {
+                preparedLat = static_cast<int>(loaded->instance->getLatencySamples());
+                loaded->latencySamples = static_cast<double>(preparedLat);
             }
-            if (oldHosted && oldHosted->instance) {
-                oldHosted->instance->releaseResources();
-                oldHosted.reset();
+            g_pluginLatencySamples.store(preparedLat, std::memory_order_release);
+            engineLog("[plugin] prepared (async) rate=" +
+                      std::to_string(static_cast<int>(devRate > 0.0 ? devRate : 44100.0)) +
+                      " buffer=" + std::to_string(devRate > 0.0 ? devBuf : 512) +
+                      " latencySamples=" + std::to_string(preparedLat) +
+                      (devRate > 0.0 ? " (real device)" : " (nominal — device not started yet; AboutToStart re-prepares)"));
+            // Stage 3c-polish (D2): publish via ONE atomic exchange. The
+            // replaced instance is RETIRED — the worker frees it after a
+            // grace period (an in-flight buffer may still hold the pointer);
+            // the audio thread NEVER locks or frees.
+            HostedPlugin* raw = loaded.release();   // g_hostedLive owns it from here
+            HostedPlugin* oldRaw = g_hostedLive.exchange(raw, std::memory_order_acq_rel);
+            if (oldRaw) {
+                std::lock_guard<std::mutex> rlock(g_retireMutex);
+                g_retiredPlugins.push_back({oldRaw, std::chrono::steady_clock::now()});
             }
-            engineLog("[plugin] loaded name=" + g_hosted->name + " vendor=" + g_hosted->vendor +
+            const HostedPlugin* live = g_hostedLive.load(std::memory_order_acquire);
+            engineLog("[plugin] loaded name=" + live->name + " vendor=" + live->vendor +
                       " in " + std::to_string(initMs) + "ms | seq " + std::to_string(req.seq) +
                       " channels=[" + req.channelsJson + "]");
-            std::cout << "[engine] plugin loaded: name=" << g_hosted->name
-                      << " vendor=" << g_hosted->vendor
+            std::cout << "[engine] plugin loaded: name=" << live->name
+                      << " vendor=" << live->vendor
                       << " init=" << initMs << "ms channels=[" << req.channelsJson << "]" << std::endl;
-            const double latencyMs = (g_hosted->latencySamples + 512.0) / 44100.0 * 1000.0;
+            const double latencyMs = (live->latencySamples + 512.0) / 44100.0 * 1000.0;
             char latBuf[32];
             std::snprintf(latBuf, sizeof(latBuf), "%.2f", latencyMs);
             const std::string ps = std::string("{\"type\":\"plugin_state\",\"state\":\"loaded\",\"name\":\"") +
-                escape_json(g_hosted->name) + "\",\"vendor\":\"" + escape_json(g_hosted->vendor) +
+                escape_json(live->name) + "\",\"vendor\":\"" + escape_json(live->vendor) +
                 "\",\"latencyMs\":" + latBuf + ",\"channels\":[" + req.channelsJson + "]}";
             for (auto& client : server.getClients())
                 if (client) client->send(ps);

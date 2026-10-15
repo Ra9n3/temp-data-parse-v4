@@ -107,7 +107,7 @@ jobs:
           # A compile-gated (mute) build cannot print this.
           $versionOut = & "engine/build/scorch-engine.exe" --version
           Write-Host "Version output: $versionOut"
-          if ($versionOut -notmatch "scorch-engine 0\.2\.1") { throw "Version check failed: $versionOut" }
+          if ($versionOut -notmatch "scorch-engine 0\.3\.0") { throw "Version check failed: $versionOut" }
           if ($versionOut -notmatch "audio: built-in") { throw "Audio compile gate still present — engine reports no audio support" }
 
           # Stage 3c-hotfix: start the protocol-test step with a CLEAN
@@ -317,7 +317,14 @@ jobs:
           if ($reuseReceipts -lt 1) { throw "engine.log missing the mid-play reuse receipt (same-plugin fast path)" }
           $rejectReceipts = (Select-String -Path $engineLog -Pattern "\[load\] REJECTED while playing").Count
           if ($rejectReceipts -lt 1) { throw "engine.log missing the rolling-transport rejection receipt" }
-          Write-Host "engine.log receipt assertions passed (scale load, play, load-fail, async init, reuse, rolling-transport reject all present)"
+          # Stage 3c-polish: D1 device-config receipts + F3 session peak.
+          $audioReceipts = (Select-String -Path $engineLog -Pattern "\[audio\] opened device=").Count
+          if ($audioReceipts -lt 3) { throw "engine.log missing [audio] opened receipts (got $audioReceipts, need 3: tests A+D+E)" }
+          $preparedReceipts = (Select-String -Path $engineLog -Pattern "\[plugin\] prepared").Count
+          if ($preparedReceipts -lt 3) { throw "engine.log missing [plugin] prepared receipts (got $preparedReceipts, need 3: AboutToStart + 2 async in test D)" }
+          $peakReceipts = (Select-String -Path $engineLog -Pattern "session peak").Count
+          if ($peakReceipts -lt 3) { throw "engine.log missing session-peak stop receipts (got $peakReceipts, need 3)" }
+          Write-Host "engine.log receipt assertions passed (scale load, play, load-fail, async init, reuse, rolling-transport reject, audio config, prepare config, session peak all present)"
 
       - run: npm ci
 

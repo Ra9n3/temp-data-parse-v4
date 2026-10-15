@@ -543,3 +543,76 @@ receipts caught the real chain red-handed:
 - The worker instantiate is not interruptible: a shutdown arriving during a
   multi-second BBCSO init waits for it to return (same worst case as the
   pre-fix behavior, which froze the WS thread for the same duration).
+
+## Stage 3c-polish — real-device audio quality: findings + fixes (v0.3.0)
+
+By-ear after load-receipts-v2: sound WORKS, but glitchy, low in volume, high
+latency. CI (null-audio) cannot see this — it is real-device/audio-thread
+territory. Diagnosed first (D1–D3), then the pre-authorized fixes.
+
+### Findings
+
+- **D2 (the load-bearing finding) — the audio callback was NOT realtime-safe.**
+  Concrete violations found by code audit: (1) `voicesMutex` was held across
+  the ENTIRE buffer and contended with the WS thread (load swaps, stop/seek/
+  panic kills, identity snapshots) — a classic priority-inversion glitch
+  source; (2) the events vector was read under `eventsMutex` taken **per
+  sample** (~44,100 lock acquisitions/second at 44.1kHz); (3) a fresh
+  `juce::MidiBuffer` was heap-constructed per buffer; (4) `g_muteFlushMutex`
+  + a heap vector were touched every buffer for mute flushes.
+- **D1 — the prepare/config flow is CORRECT as of v0.2.1** (AboutToStart
+  re-prepares the first instance for the actual device before any callback;
+  the worker re-prepares when audio is already running), but NOTHING logged
+  the actual device config vs the plugin prepare — unverifiable on the user's
+  machine. Now receipted (see below).
+- **D3 — latency decomposition exists** (`[engine] latency: device=Xms
+  plugin=Yms total=Zms` at AboutToStart; plugin latency = JUCE
+  getLatencySamples). Real numbers come from the user's next run.
+
+### Fixes
+
+- **F2 (handoff)** — the callback now performs NO lock and NO allocation:
+  the score is an immutable `ScoreSnapshot` published behind ONE atomic
+  pointer (retired snapshots freed by the init worker after a 250ms grace —
+  never on the audio thread); voices are audio-thread-owned with kill
+  requests self-serviced at buffer boundaries (`g_voiceKillPending`) and an
+  honest recomputed active count for receipts; the hosted plugin is
+  published behind ONE atomic pointer with worker-side retirement; the MIDI
+  buffer is a cleared member (capacity retained); mute flushes are 16
+  per-channel atomic flags (dedupe by channel, no vector). Handlers never
+  touch voices; `[stop]`/`[panic]` n= is now "active at request time".
+- **F2 (buffer)** — the real-device path requests a CONSERVATIVE 512-sample
+  buffer (`--buffer-size` overrides, 64–4096) — stability before latency at
+  this stage. The driver may refuse; the receipt says so. Trade: 512 @48kHz
+  ≈ 10.7ms device latency; `--buffer-size 1024` trades ~10ms more latency
+  for more glitch headroom.
+- **F1/D1 (prepare receipts)** — `ensureAudioReady` logs the ACTUAL opened
+  device (name/type/rate/buffer + requested buffer), the hosted output gain
+  and the latency-compensation value; `audioDeviceAboutToStart` and the
+  worker each log the exact prepared config (`[plugin] prepared ...`), so a
+  prepare/config mismatch can hide nowhere.
+- **F3 (level, bounded)** — a hosted OUTPUT gain stage (plugin path only,
+  post-render, pre-master), default ×2.0 (+6dB), `--plugin-gain` (0.25–8.0)
+  to tune. NOT the mix-v4 recalibration: CC7/CC11 remain the per-track
+  levels. Session peak is maxed by the callback and logged in the `[stop]`
+  receipt (`| session peak X`) so level iterations are receipt-driven. The
+  gain must keep peaks clear of 1.0 (clipping) — if the session peak
+  approaches 1.0, lower `--plugin-gain`.
+- **F4 (latency)** — plugin-routed events dispatch EARLIER by the plugin's
+  reported latency (`getLatencySamples`, stored atomically at publish and
+  re-read after every real-device prepare), so the audible attack lands on
+  the grid. Clamped at sample 0 (tick-0 plugin pre-sets still fire on the
+  first buffer). The test-synth path has no plugin latency and is NOT
+  shifted; a mixed score can show ≤L attack skew between paths. CI asserts
+  the arithmetic EXACTLY (stand-in reports 128: a grid-480 note must
+  dispatch at s=10897 = 11025−128).
+
+### Untested claims (fire-rate honesty)
+
+- The refactor's realtime claims (no glitches) are provable only by-ear on
+  the user's device — CI proves contracts and arithmetic, not audibility.
+- The ×2.0 default gain is a starting point, not a calibration; mix-v4 owns
+  per-track balance against real libraries.
+- WASAPI/DirectSound driver behavior on the user's machine (rejected buffer
+  requests, hidden resampling) is exactly what the new `[audio]` receipts
+  will surface on the next run.

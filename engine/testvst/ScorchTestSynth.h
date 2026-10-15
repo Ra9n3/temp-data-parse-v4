@@ -28,9 +28,15 @@ class ScorchTestSynthProcessor : public juce::AudioProcessor {
 public:
     ScorchTestSynthProcessor()
         : juce::AudioProcessor(juce::AudioProcessor::BusesProperties()
-                                   .withOutput("Output", juce::AudioChannelSet::stereo(), true)) {}
+                                   .withOutput("Output", juce::AudioChannelSet::stereo(), true)) {
+        // Stage 3c-polish F4: report a NON-ZERO latency so the CI can assert
+        // the engine's compensation arithmetic end-to-end — the ledger's
+        // dispatched sample positions must shift EARLIER by exactly this many
+        // samples for plugin-routed events (128 samples = deterministic, well
+        // inside the fixture's mute-window margins).
+        setLatencySamples(128);
+    }
 
-    // ── AudioProcessor ──────────────────────────────────────────────────────
     void prepareToPlay(double newSampleRate, int /*maxBlockSize*/) override {
         sampleRate = newSampleRate > 0 ? newSampleRate : 44100.0;
     }

@@ -163,30 +163,45 @@ function assertHostWindows() {
   hostPeakA = before.reduce((m, s) => Math.max(m, s.peak), 0);
   if (hostPeakA < 0.05) fail(`phase A: peak ${hostPeakA} while unmuted (ticks 200..${flush.t - SLACK}) — hosted plugin not audible`);
   // Phase B — MUTED window [flush+SLACK, 5200): silence + the gated note
-  // (t=3840, scheduled INSIDE the window) must NEVER dispatch.
+  // (t=3840, scheduled INSIDE the window) must NEVER dispatch. Stage 3c-polish
+  // F4: dispatch positions shift EARLIER by the plugin's reported latency, so
+  // the gate proof is asserted by PITCH (d1=62) anywhere in the ledger —
+  // shift-proof by construction.
   const during = hostStates.filter((s) => s.tick >= flush.t + SLACK && s.tick < 5200);
   hostPeakB = during.reduce((m, s) => Math.max(m, s.peak), 0);
   if (hostPeakB >= 0.02) fail(`phase B: peak ${hostPeakB} while muted (ticks ${flush.t + SLACK}..5200) — mute is not audible (gating broken)`);
-  if (hostEntries.some((e) => e.k === 1 && e.c === 1 && e.t === 3840)) fail("the muted-window note (t=3840) WAS dispatched — gating does not run before the channel send");
+  if (hostEntries.some((e) => e.k === 1 && e.c === 1 && e.d1 === 62)) fail("the muted-window note (pitch 62) WAS dispatched — gating does not run before the channel send");
   console.log(`[test] phase A ✓ unmuted peak=${hostPeakA.toFixed(3)}; phase B ✓ muted peak=${hostPeakB.toFixed(3)}, muted-window note gated`);
-  // Phase C — after unmute the late note (t=6144, ch2) must dispatch + sound.
-  const lateNote = hostEntries.find((e) => e.k === 1 && e.c === 2 && e.t === 6144);
-  if (!lateNote) fail("phase C: late note (t=6144, ch2) not in dispatch ledger — unmute did not restore audibility");
+  // Phase C — after unmute the late note (grid t=6144, ch2) must dispatch + sound.
+  // Stage 3c-polish F4: the ledger's t is the DISPATCH-time tick — shifted
+  // earlier by the plugin latency for plugin-routed events.
+  const spt = 44100 * 60 / (120 * 960);  // 22.96875 samples/tick
+  const PLUGIN_LATENCY = 128;            // ScorchTestSynth setLatencySamples(128)
+  const dispatchTick = (gridTick) => Math.round((Math.floor(gridTick * spt) - PLUGIN_LATENCY) / spt);
+  const lateNote = hostEntries.find((e) => e.k === 1 && e.c === 2 && e.t === dispatchTick(6144));
+  if (!lateNote) fail(`phase C: late note (grid t=6144, ch2) not in dispatch ledger at compensated t=${dispatchTick(6144)} — unmute did not restore audibility`);
   const after = hostStates.filter((s) => s.tick >= 6144 + 192 && s.tick < 6900);
   hostPeakC = after.reduce((m, s) => Math.max(m, s.peak), 0);
   if (hostPeakC < 0.05) fail(`phase C: peak ${hostPeakC} after unmute — late note not audible`);
   console.log(`[test] phase C ✓ late note dispatched + audible (peak=${hostPeakC.toFixed(3)})`);
-  // UACC pre-trigger arithmetic: CC#32 exactly 38 ticks before its note.
+  // UACC pre-trigger arithmetic: CC#32 exactly 38 ticks before its note —
+  // BOTH are plugin-routed so the DELTA is shift-invariant.
   const cc32 = hostEntries.find((e) => e.k === 2 && e.a === 32 && e.c === 1);
-  const note1 = hostEntries.find((e) => e.k === 1 && e.c === 1 && e.t === 480);
+  const note1 = hostEntries.find((e) => e.k === 1 && e.c === 1 && e.t === dispatchTick(480));
   if (!cc32) fail("dispatch ledger has no CC#32 articulation switch");
-  if (!note1) fail("dispatch ledger has no ch1 NOTE_ON at t=480");
-  if (cc32.t !== 442) fail(`CC#32 must dispatch at t=442 (480 − 38 pre-trigger ticks), got t=${cc32.t}`);
-  const spt = 44100 * 60 / (120 * 960);  // 22.96875 samples/tick
+  if (!note1) fail(`dispatch ledger has no ch1 NOTE_ON at compensated t=${dispatchTick(480)}`);
+  if (cc32.t !== dispatchTick(442)) fail(`CC#32 must dispatch at the compensated t=${dispatchTick(442)} (480 − 38 pre-trigger ticks, shifted by the plugin latency), got t=${cc32.t}`);
   hostDeltaSamples = note1.s - cc32.s;
   if (Math.abs(hostDeltaSamples - 38 * spt) > 1.5) fail(`pre-trigger sample delta ${hostDeltaSamples} ≠ 38 ticks (${38 * spt}) — scheduling not sample-accurate`);
-  // Channel routing: ch2 dispatched into the hosted plugin.
-  if (!hostEntries.some((e) => e.k === 1 && e.c === 2 && e.t === 960)) fail("dispatch ledger has no ch2 NOTE_ON at t=960 — channel routing broken");
+  // Stage 3c-polish F4 — LATENCY COMPENSATION ARITHMETIC (exact): a
+  // plugin-routed event at grid tick 480 must dispatch at EXACTLY
+  // floor(480·spt) − 128 samples (sample-accurate, shifted by the reported
+  // plugin latency so the audible attack lands on the grid).
+  const expectedNoteSample = Math.floor(480 * spt) - PLUGIN_LATENCY;  // 11025 − 128 = 10897
+  if (note1.s !== expectedNoteSample) fail(`latency compensation arithmetic broken: ch1 NOTE_ON dispatched at s=${note1.s}, expected EXACTLY ${expectedNoteSample} (grid ${Math.floor(480 * spt)} − ${PLUGIN_LATENCY} plugin latency)`);
+  console.log(`[test] F4 latency compensation ✓ note dispatched at s=${note1.s} = grid ${Math.floor(480 * spt)} − ${PLUGIN_LATENCY} (plugin-reported latency)`);
+  // Channel routing: ch2 dispatched into the hosted plugin (compensated tick).
+  if (!hostEntries.some((e) => e.k === 1 && e.c === 2 && e.t === dispatchTick(960))) fail(`dispatch ledger has no ch2 NOTE_ON at compensated t=${dispatchTick(960)} — channel routing broken`);
   console.log(`[test] pre-trigger ✓ CC#32@t=${cc32.t} (s=${cc32.s}) → note@t=${note1.t} (s=${note1.s}), delta=${hostDeltaSamples} samples (${(hostDeltaSamples / 44.1).toFixed(2)}ms ≈ 20ms profile pre-trigger)`);
   console.log("[test] channel routing ✓ ch1 + ch2 dispatched into the hosted plugin");
 }
@@ -397,7 +412,7 @@ ws.addEventListener("message", (event) => {
     if (msg.type === "hello" && !helloOk) {
       helloOk = true;
       if (msg.protocol !== 1) fail(`expected protocol 1, got ${msg.protocol}`);
-      if (msg.engineVersion !== "0.2.1") fail(`expected 0.2.1, got ${msg.engineVersion}`);
+      if (msg.engineVersion !== "0.3.0") fail(`expected 0.3.0, got ${msg.engineVersion}`);
       ws.send(JSON.stringify({ type: "ping" }));
     } else if (msg.type === "pong" && !pongOk) {
       pongOk = true;
