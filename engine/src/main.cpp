@@ -975,27 +975,45 @@ private:
         g_heldPluginNoteCount.store(n, std::memory_order_relaxed);
     }
 
-    // Render one buffer through the hosted plugin and copy its (up to 2)
-    // output channels into the device buffer, tracking the output peak.
+    // Render one buffer through the hosted plugin and copy its output
+    // channels into the device buffer, tracking the output peak.
     // Stage 3c-polish F3: the hosted OUTPUT GAIN is applied here — plugin
     // path only, after render, before the master bus. NOT a per-track mix
     // recalibration (that is mix-v4); CC7/CC11 remain the per-track levels.
+    //
+    // Stage 3d-2 (the gauntlet): STEREO-HONEST OUTPUT COPY. The old loop read
+    // ONLY channel 0 and copied it to EVERY device channel — a stereo
+    // instrument's right channel was silently dropped (panned patches,
+    // stereo pianos, chorused synths all rendered mono-left). Universal
+    // channel mapping (no plugin-name logic):
+    //   plugin mono   → mono fold to every device channel (unchanged)
+    //   plugin stereo → device L←ch0, device R←ch1  (THE fix)
+    //   plugin >2     → L←ch0, R←ch1, extra device channels take ch1;
+    //                   ch2+ of the plugin are NOT mixed down (documented:
+    //                   Scorch returns stereo; a surround main bus that
+    //                   refused the stereo request is accepted as-is).
+    // The fixture renders identical L/R, so the CI peak arithmetic is
+    // byte-identical pre/post (asserted: phases A/C peaks unchanged).
     void renderPlugin(juce::AudioPluginInstance* plugin, juce::MidiBuffer& midi,
                       float* const* outputChannelData, int numOutputChannels,
                       int numSamples, float& peak) {
-        if (procBuf.getNumSamples() != numSamples || procBuf.getNumChannels() < 1)
-            procBuf.setSize(juce::jmax(2, procBuf.getNumChannels()), numSamples, false, true, false);
+        const int wantChans = juce::jlimit(1, 8, plugin->getMainBusNumOutputChannels());
+        if (procBuf.getNumSamples() != numSamples || procBuf.getNumChannels() != wantChans)
+            procBuf.setSize(wantChans, numSamples, false, true, false);
         for (int ch = 0; ch < procBuf.getNumChannels(); ++ch)
             procBuf.clear(ch, 0, numSamples);
         plugin->processBlock(procBuf, midi);
         const float gain = g_hostedOutputGain.load(std::memory_order_relaxed);
-        const int chans = juce::jmin(numOutputChannels, procBuf.getNumChannels());
+        const int procChans = procBuf.getNumChannels();
         for (int s = 0; s < numSamples; ++s) {
-            float out = 0.0f;
-            if (chans > 0) out = procBuf.getSample(0, s) * gain;  // mono fold to all device channels
-            for (int ch = 0; ch < numOutputChannels; ++ch)
+            float peakSample = 0.0f;
+            for (int ch = 0; ch < numOutputChannels; ++ch) {
+                const int src = procChans > 1 ? juce::jmin(ch, 1) : 0;
+                const float out = procChans > 0 ? procBuf.getSample(src, s) * gain : 0.0f;
                 outputChannelData[ch][s] = out;
-            peak = std::max(peak, std::abs(out));
+                peakSample = std::max(peakSample, std::abs(out));
+            }
+            peak = std::max(peak, peakSample);
         }
     }
 
@@ -1605,6 +1623,13 @@ std::string loadHostedPlugin(const juce::var& pluginVar, std::unique_ptr<HostedP
         inst->setPlayConfigDetails(0, 2, 44100.0, 512);
         if (inst->getMainBusNumOutputChannels() <= 0)
             return "plugin exposes no output bus: " + chosen->name.toStdString();
+        // Stage 3d-2 (the gauntlet): bus-negotiation receipt — the plugin's
+        // ACTUAL answer to the 0-in/2-out request, so a mono or surround
+        // main bus is VISIBLE per plugin (renderPlugin maps whatever the
+        // plugin really exposes; nothing is assumed).
+        engineLog("[plugin] bus negotiation: requested 0-in/2-out, plugin answers " +
+                  std::to_string(inst->getMainBusNumOutputChannels()) + "-out (\"" +
+                  chosen->name.toStdString() + "\")");
         inst->prepareToPlay(44100.0, 512);
         inst->setNonRealtime(false);
         auto hosted = std::make_unique<HostedPlugin>();

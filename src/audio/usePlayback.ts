@@ -408,6 +408,53 @@ export function usePlayback(
     };
   }, [stopVoices]);
 
+  /**
+   * Stage 3d-2 (carried decision CLOSED): note-preview-on-click = WEBVIEW
+   * preview. A one-shot audition through the SAME preview chain as playback
+   * (family wave + lowpass, per-role trim, master bus) — never an engine
+   * message. Rationale (documented in ASSUMPTIONS.md 3d-2): an engine
+   * preview would fire a note OUTSIDE the score's key-switch/articulation
+   * context — the exact bow-scrape class of bug the 3c close-out fixed —
+   * plus device+plugin latency on the click, and it needs a preview path
+   * inside the hosted plugin. The webview preview works identically in
+   * engine AND web modes, is deterministic, and never touches the
+   * transport, the loop, or the RAF scheduler. Best-effort: a suspended/
+   * unavailable AudioContext swallows silently.
+   */
+  const previewNote = useCallback(
+    async (pitch: number, family: string, role: string, velocity = 90) => {
+      try {
+        const ctx = await getCtx();
+        const mix = readMixOverrides();
+        if (masterRef.current) masterRef.current.master.gain.value = mix?.masterGain ?? MASTER_GAIN;
+        const osc = ctx.createOscillator();
+        const gain = ctx.createGain();
+        const filter = ctx.createBiquadFilter();
+        osc.type = familyWave(family);
+        osc.frequency.value = 440 * Math.pow(2, (pitch - 69) / 12);
+        filter.type = "lowpass";
+        filter.frequency.value = family === "strings" ? 2200 : family === "brass" ? 2800 : 4200;
+        const roleTrim = mix?.trims?.[role] ?? ROLE_PREVIEW_GAIN_TRIM[role] ?? 1;
+        const peak = 0.05 * roleTrim * (velocity / 127);
+        const durSec = 0.35;
+        const when = ctx.currentTime + 0.005;
+        const atk = family === "strings" ? 0.04 : 0.015;
+        gain.gain.setValueAtTime(0, when);
+        gain.gain.linearRampToValueAtTime(peak, when + atk);
+        gain.gain.setValueAtTime(peak, when + Math.max(atk, durSec * 0.7));
+        gain.gain.linearRampToValueAtTime(0, when + durSec);
+        osc.connect(filter);
+        filter.connect(gain);
+        gain.connect(masterRef.current!.input);
+        osc.start(when);
+        osc.stop(when + durSec + 0.02);
+      } catch {
+        /* preview is best-effort — never breaks the edit */
+      }
+    },
+    [getCtx],
+  );
+
   return {
     playheadTick,
     playing,
@@ -419,6 +466,7 @@ export function usePlayback(
     seek,
     setLooping,
     setMetronome,
+    previewNote,
   };
 }
 

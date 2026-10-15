@@ -843,6 +843,7 @@ export default function App() {
             })
           }
           onClose={() => setPianoTrackId(null)}
+          onPreviewNote={(pitch) => void playback.previewNote(pitch, pianoTrack.family, pianoTrack.role)}
         />
       )}
 

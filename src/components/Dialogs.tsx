@@ -526,11 +526,16 @@ export function PianoRoll({
   project,
   onChange,
   onClose,
+  onPreviewNote,
 }: {
   track: Track;
   project: Project;
   onChange: (notes: Note[]) => void;
   onClose: () => void;
+  /** Stage 3d-2 — note-preview-on-click (webview preview): fires for the
+   * pitch of a note being ADDED (creation click). Clicking an existing note
+   * still deletes it (unchanged semantics — preview is on creation). */
+  onPreviewNote?: (pitch: number) => void;
 }) {
   const tpBar = ticksPerBar(project.timeSignature);
   const tpb = ticksPerBeat(project.timeSignature);
@@ -554,6 +559,7 @@ export function PianoRoll({
       ...track.notes,
       { pitch, startTick: Math.max(0, startTick), durationTicks: tpb, velocity: 90 },
     ]);
+    onPreviewNote?.(pitch); // Stage 3d-2: hear the pitch you just placed
   };
 
   return (

@@ -850,3 +850,55 @@ exactly ONE `[editor] opened` receipt in engine.log.
   CRASHES takes the engine process down (the shell restarts it; the
   reconnect flow exists). Isolating plugin UI into a subprocess is a
   future-stage decision, not a name-based workaround.
+
+## Stage 3d-2 — The gauntlet (prove "any VST3", no plugin-name logic)
+
+### Contract
+
+Any well-behaved VST3 instrument must work with ZERO code changes between
+subjects: scan finds it → assign → editor opens → patch selected → plays in
+sync → stop/seek clean → mute gates it. A plugin fixed by special-casing its
+NAME is a violation. Test subjects are chosen by the user at test time
+(diversity is the point); CI keeps proving with the in-repo fixture.
+
+### Hosting-layer fixes in this stage (universal, name-blind)
+
+1. STEREO-HONEST OUTPUT COPY (renderPlugin): the pre-3d-2 loop read ONLY
+   channel 0 and copied it to every device channel — a stereo instrument's
+   right channel was silently dropped (the bug class the gauntlet exists to
+   catch). Now: plugin mono → mono fold (unchanged); stereo → L←ch0,
+   R←ch1; >2-channel main bus → L/R from ch0/ch1, no surround mixdown
+   (documented). procBuf self-configures from the plugin's ACTUAL
+   `getMainBusNumOutputChannels()` per buffer (jlimit 1..8) — a plugin that
+   refused the stereo request is mapped as it really is, never assumed.
+   Fixture renders identical L/R ⇒ CI peak arithmetic byte-identical
+   (host phases A/C peaks asserted unchanged).
+2. BUS-NEGOTIATION RECEIPT: loadHostedPlugin logs the plugin's ACTUAL answer
+   to the 0-in/2-out request (`[plugin] bus negotiation: … N-out`) — a mono
+   or surround bus is visible per plugin in engine.log for the gauntlet's
+   failure forensics.
+
+### Note-preview-on-click — carried decision CLOSED: webview preview
+
+Rationale (per complexity, documented): an ENGINE preview would fire a note
+outside the score's key-switch/articulation context — the exact bow-scrape
+class the 3c close-out eliminated — add device+plugin latency to the click,
+and require a preview path inside the hosted plugin (state contamination,
+transport interaction). The WEBVIEW preview reuses the existing oscillator
+chain (family wave + lowpass, per-role trim, master bus), works identically
+in engine and web modes, never touches transport/loop/RAF, and is
+best-effort silent if audio is unavailable. "Off" rejected: the affordance
+is cheap and genuinely useful. Implemented: PianoRoll creation-click
+auditions the placed pitch (existing-note click still deletes — semantics
+unchanged).
+
+### CI + fire-rate honesty
+
+- CI (fixture, free license — documented: no commercial libraries in CI):
+  the full hosting battery keeps passing with the stereo-copy change (peak
+  arithmetic identical); scan crash/corrupt isolation unchanged.
+- The gauntlet itself is USER-MACHINE acceptance: the user picks diverse
+  plugins (different vendors, UI styles, bus layouts). Any failure gets a
+  NAMED diagnosis (bus negotiation? state init? editor crash? MIDI
+  dialect?) — each diagnosis is a hosting-layer fix in the same commit,
+  then the gauntlet re-runs. CI cannot pre-prove vendor diversity.
