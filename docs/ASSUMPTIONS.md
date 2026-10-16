@@ -1171,3 +1171,68 @@ monotonic timeline position).
   when only the plugin-side shared code changes unless the old .so is removed
   first (the 3d-1 "stale fixture" lesson, second sighting — now understood as
   a JUCE CMake bundle-relink quirk, not a copy mistake).
+
+## Stage 3e-3 — multi-output buses (+ the 3d-4 retain bug it exposed)
+
+### Bus handling order (empirical, load-time)
+
+`setPlayConfigDetails(0, 2, …)` negotiates the MAIN bus to stereo — and its
+next-best-layout path DISABLES every non-main output bus (the wrapper asks
+the module for a 2-out arrangement and answers with aux disabled). The
+enable-all therefore runs AFTER the negotiation at all three prepare sites
+(create-time, async worker real-device prepare, audioDeviceAboutToStart) —
+before it, the freshly enabled buses were silently re-disabled and the
+channel table read 0 for aux. `enabledByDefault`/`isMain` are
+construction-time flags, so the 3e-1 capability record is unaffected by any
+of this.
+
+### THE 3d-4 RETAIN BUG (found by this stage, fixed here)
+
+The worker's publish path moved the fresh instance into the set with
+`unique_ptr::release()` — which NULLS the pointer — and the old-set walk
+then used `outcomes[i].hosted == nullptr` as the "this entry FAILED, retain
+the previous instance" signal. For every successful replace the walk
+therefore RETAINED THE OLD INSTANCE at the requested slot and LEAKED the
+fresh one: restored state (3d-3), updated latency, capability fields and now
+outputRouting never reached the live instance. It was invisible since 3d-4
+because the old instance usually carried equivalent state (and the fixture's
+state round-trip asserts pass symmetrically); the 3e-3 outputRouting was the
+first OBSERVABLE old-vs-new difference (render-time routing receipt was
+empty for a "fresh" load). Fixed with an explicit `succeeded` flag recorded
+at release time. The RENDER-time receipts now prove the fresh instance is
+the one published.
+
+### The JUCE module-state observation (superseded explanation, kept for the record)
+
+Before the retain bug was found, the same symptom (a "fresh" instance
+reporting the previous instance's diverged state) was attributed to the JUCE
+VST3 module carrying the inner processor across host instantiates. The
+retain bug fully explains the evidence; the module-level question remains
+open and irrelevant for CI (the MO score normalizes masterScale via a
+score-owned CC21=127, making the phases deterministic under EITHER
+behavior).
+
+### outputRouting semantics
+
+- Per-INSTANCE, immutable after publish; applied at (re)instantiate. The
+  mid-play reuse fast path keeps the live instance's routing — changing it
+  requires a stopped reload (documented; the rolling guard already forces a
+  stop for set changes).
+- Malformed entries (non-array, non-object, non-finite gain, negative
+  busIndex) are skipped + receipt-named, never fatal — routing cannot break
+  hosting. Unknown bus indices are ignored at render time.
+- The default (field absent) is unchanged audio: bus 0 to master as always,
+  every other bus ALSO summed — nothing goes silent when a plugin exposes
+  aux buses.
+
+### CI evidence + fire-rate honesty
+
+- CI proves (fixture, host mode MO-1..MO-5): enable-all + channel table
+  correct (2 out buses in the capability record), default routing sums
+  main+aux (1.287), routed mute removes the aux (0.787), and all earlier
+  peaks byte-identical (aux default-silent, arm is score-owned CC#22).
+- By-ear only with real libraries: real aux buses of synths/FX (multi-out
+  orchestral instruments, sidechain-free FX), whether their aux content
+  SHOULD be summed to master by default (this stage's "nothing becomes
+  silent" choice) or gated behind explicit routing, and the audible effect
+  of --plugin-gain on the summed mix (clipping where one bus did not clip).

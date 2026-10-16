@@ -23,6 +23,10 @@
 // Stage 3d-1: the fixture SHIPS an editor (deterministic 360x120) so CI can
 // prove the openEditor/closeEditor contract on a free plugin. No state yet
 // (3d-3), no RNG: same input ⇒ same output.
+// Stage 3e-3: the fixture ships TWO stereo output buses ("Output" main +
+// "Aux Out"). The aux bus emits a DISTINCT CONSTANT 0.25 while armed
+// (CC#22 > 0 — score-driven, deterministic) AND a note is sounding; default
+// silent so every earlier CI peak is byte-identical. CC#22 = 0 disarms.
 
 #pragma once
 
@@ -34,8 +38,14 @@
 class ScorchTestSynthProcessor : public juce::AudioProcessor {
 public:
     ScorchTestSynthProcessor()
+        // Stage 3e-3: TWO stereo output buses — main "Output" and aux
+        // "Aux Out". The aux bus emits a DISTINCT CONSTANT 0.25 per sample
+        // only when ARMED (CC#22 > 0) and a note is sounding; default OFF,
+        // so every pre-3e-3 CI peak stays byte-identical (the arm lives in
+        // the SCORE, not in state — deterministic per load).
         : juce::AudioProcessor(juce::AudioProcessor::BusesProperties()
-                                   .withOutput("Output", juce::AudioChannelSet::stereo(), true)) {
+                                   .withOutput("Output", juce::AudioChannelSet::stereo(), true)
+                                   .withOutput("Aux Out", juce::AudioChannelSet::stereo(), true)) {
         // Stage 3c-polish F4: report a NON-ZERO latency so the CI can assert
         // the engine's compensation arithmetic end-to-end — the ledger's
         // dispatched sample positions must shift EARLIER by exactly this many
@@ -50,8 +60,12 @@ public:
     void releaseResources() override {}
 
     bool isBusesLayoutSupported(const BusesLayout& layouts) const override {
-        return layouts.getMainOutputChannelSet() == juce::AudioChannelSet::stereo() &&
-               layouts.getMainInputChannelSet().isDisabled();
+        if (layouts.getMainOutputChannelSet() != juce::AudioChannelSet::stereo()) return false;
+        if (!layouts.getMainInputChannelSet().isDisabled()) return false;
+        // Stage 3e-3: the aux bus (bus 1) must be stereo or disabled.
+        const auto aux = layouts.getChannelSet(false, 1);
+        if (!aux.isDisabled() && !(aux == juce::AudioChannelSet::stereo())) return false;
+        return true;
     }
 
     void processBlock(juce::AudioBuffer<float>& buffer, juce::MidiBuffer& midi) override {
@@ -86,6 +100,22 @@ public:
                 if (v.phase > 6.283185307179586) v.phase -= 6.283185307179586;
             }
             if (v.releasing && v.env <= 0.0f) v.active = false;
+        }
+
+        // Stage 3e-3 — AUX BUS OUTPUT: a DISTINCT CONSTANT 0.25 per sample on
+        // the aux bus's stereo pair (buffer channels after the main bus's)
+        // while ARMED (CC#22 > 0) and a note is sounding. Silent otherwise —
+        // the pre-3e-3 CI peaks stay byte-identical. The aux level is
+        // deliberately independent of velocity/masterScale: it is a routing
+        // probe, not music.
+        if (auxArmed > 0 && buffer.getNumChannels() >= 4) {
+            bool anySounding = false;
+            for (const auto& v : voices)
+                if (v.active || v.releasing) { anySounding = true; break; }
+            if (anySounding)
+                for (int ch = 2; ch < juce::jmin(4, buffer.getNumChannels()); ++ch)
+                    for (int s = 0; s < numSamples; ++s)
+                        buffer.setSample(ch, s, buffer.getSample(ch, s) + kAuxLevel);
         }
 
         // Stage 3e-2 — playhead observability: read the host's PositionInfo
@@ -229,6 +259,7 @@ private:
             if (num == 7) cc7[ch] = val;
             else if (num == 11) cc11[ch] = val;
             else if (num == 21) masterScale.store(juce::jlimit(0.0f, 4.0f, static_cast<float>(val) / 127.0f));
+            else if (num == 22) auxArmed = val > 0 ? 1 : 0;   // 3e-3: aux-bus arm (deterministic, score-driven)
             else if (num == 120 || num == 123) {
                 for (auto& v : voices) {
                     if (v.channel == ch) { v.releasing = true; v.active = false; }
@@ -246,14 +277,17 @@ private:
         else if (m.isNoteOff()) { kind = "NOTE_OFF"; d1 = m.getNoteNumber(); d2 = 0; }
         else if (m.isController()) { kind = "CC"; d1 = m.getControllerNumber(); d2 = m.getControllerValue(); }
         else if (m.isPitchWheel()) { kind = "PITCH_BEND"; d1 = 0; d2 = m.getPitchWheelValue(); }
-        std::fprintf(stdout, "[testvst] s=%lld ch=%d k=%s d1=%d d2=%d\n",
-                     static_cast<long long>(blockStart + samplePos), m.getChannel(), kind, d1, d2);
+        std::fprintf(stdout, "[testvst] s=%lld ch=%d k=%s d1=%d d2=%d ms=%.3f\n",
+                     static_cast<long long>(blockStart + samplePos), m.getChannel(), kind, d1, d2,
+                     masterScale.load());
         std::fflush(stdout);
     }
 
     Voice voices[kMaxVoices];
     int cc7[17] = {};   // [1..16]; 0 until received (MIDI fader default = silent)
     int cc11[17] = {};  // [1..16]
+    int auxArmed = 0;   // 3e-3: CC#22 arms the aux bus (default OFF — CI peaks byte-identical)
+    static constexpr float kAuxLevel = 0.25f;   // the aux bus's distinct constant level
     double sampleRate = 44100.0;
     long long blockStart = 0;
     long long lastPlayheadLogAt = -(1LL << 40);  // 3e-2 throttle (first playing block logs immediately)

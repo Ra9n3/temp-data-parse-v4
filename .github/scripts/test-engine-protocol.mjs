@@ -64,11 +64,15 @@
 //         deterministic 360x120 editor so a free plugin proves universality.
 //       Stage 3e-1: CAPABILITY HANDSHAKE — exactly one plugin_capabilities
 //         per plugin_state "loaded" (per instance), whose facts match the
-//         fixture (0 in / ≥1 out buses, main out "Output" stereo,
-//         enabled-by-default, latency 128, instrument + accepts-MIDI +
-//         editor + 1 program); plugin_state carries classId and a reload
+//         fixture (0 in / 2 out buses — main "Output" + aux "Aux Out",
+//         stereo, enabled-by-default, latency 128, instrument + accepts-MIDI
+//         + editor + 1 program); plugin_state carries classId and a reload
 //         whose uid IS the class identifier string MATCHES (the preferred
 //         key, phase R). Scan rows carry classId + capabilities too.
+//       Stage 3e-3: MULTI-OUTPUT BUSES — the fixture's aux bus is armed via
+//         score CC#22; default routing sums main+aux into the master (peak
+//         ≈1.287), outputRouting [{busIndex:1,mute:true}] leaves main only
+//         (peak ≈0.787) — both proven by peaks (phases MO-1..MO-5).
 //       Stage 3d-3: state persistence — captureState of the DEFAULT state is
 //         byte-EXACT (the fixture's state is one raw float32 masterScale,
 //         4 bytes = 1.0f); a re-host WITH an embedded state (masterScale
@@ -409,6 +413,27 @@ const HOST_EVENTS = [
   { eventType: "CONTROL_CHANGE", channel: 1, data1: 32, data2: 20, timestampTicks: 7600, trackId: "t1", isArticulationSwitch: true },
 ];
 const HOST_META = { bpm: 120, ppqn: 960, timeSignature: { numerator: 4, denominator: 4 }, endTick: 8448 };
+
+// Stage 3e-3 — MULTI-OUTPUT proof score: CC7/CC11 fader, CC21=127 NORMALIZES
+// the fixture's masterScale (a JUCE module may carry the inner processor's
+// state across host instantiates within one engine process — the phase-15
+// diverged state would otherwise leak in; the score-owned CC21 makes the
+// phase deterministic either way), CC#22 ARMS the fixture's aux bus, one
+// sustained note. The aux bus emits a DISTINCT CONSTANT 0.25 per sample
+// while armed + sounding: default routing → master peak ≈ (0.5·100/127 +
+// 0.25)·2.0 ≈ 1.287 (main + aux summed); aux muted via outputRouting →
+// master peak ≈ 0.787 (main only).
+const MO_EVENTS = [
+  { eventType: "CONTROL_CHANGE", channel: 1, data1: 7, data2: 127, timestampTicks: 0, trackId: "t1" },
+  { eventType: "CONTROL_CHANGE", channel: 1, data1: 11, data2: 127, timestampTicks: 0, trackId: "t1" },
+  { eventType: "CONTROL_CHANGE", channel: 1, data1: 21, data2: 127, timestampTicks: 0, trackId: "t1" },
+  { eventType: "CONTROL_CHANGE", channel: 1, data1: 22, data2: 127, timestampTicks: 0, trackId: "t1" },
+  { eventType: "NOTE_ON", channel: 1, data1: 60, data2: 100, timestampTicks: 480, trackId: "t1" },
+  { eventType: "NOTE_OFF", channel: 1, data1: 60, data2: 0, timestampTicks: 8448, trackId: "t1" },
+];
+const MO_META = { bpm: 120, ppqn: 960, timeSignature: { numerator: 4, denominator: 4 }, endTick: 8448 };
+const moPeaksDefault = [];   // routing ABSENT → every bus sums to master
+const moPeaksMuted = [];     // outputRouting [{busIndex:1, mute:true}] → main only
 
 function finishAndShutdown() {
   console.log("[test] sending shutdown");
@@ -813,27 +838,74 @@ ws.addEventListener("message", (event) => {
       // the PREFERRED matching key. The engine must resolve it to the same
       // class (echoed classId) without the numeric-uid fallback.
       if (msg.classId !== hostClassId) fail(`classId reload must echo the same classId (got "${msg.classId}", want "${hostClassId}")`);
-      console.log(`[test] phase R ✓ load by class identifier string MATCHED ("${hostClassId}") — editor phases (3d-1: window work, proven on CI's desktop)`);
+      console.log(`[test] phase R ✓ load by class identifier string MATCHED ("${hostClassId}") — Stage 3e-3: multi-output default routing (seq 8, aux ARMED via CC#22, NO outputRouting)`);
       hostPhase = 24;
+      ws.send(JSON.stringify({
+        type: "load", seq: 8, events: MO_EVENTS, meta: MO_META,
+        channels: { t1: 1 },
+        plugin: { uid: hostValidUid, path: hostValidPath, name: hostValidName },
+      }));
+    } else if (msg.type === "plugin_state" && hostPhase === 24 && msg.state === "loaded") {
+      console.log("[test] phase MO-1 ✓ re-hosted — playing (default routing: every bus sums to master)");
+      hostPhase = 25;
+      ws.send(JSON.stringify({ type: "transport", command: "play", tick: 0 }));
+    } else if (msg.type === "state" && hostPhase === 25) {
+      if (msg.playing) {
+        moPeaksDefault.push(msg.peak ?? 0);
+        if (msg.tick >= 2400) {
+          const pk = Math.max(...moPeaksDefault);
+          if (!(pk > 1.05 && pk < 1.45)) fail(`multi-out DEFAULT routing: master peak ${pk.toFixed(3)} must be main+aux ≈1.287 (main-only cap ≈0.787) — aux bus not summed`);
+          console.log(`[test] phase MO-2 ✓ default routing: master peak ${pk.toFixed(3)} ≈ main (0.787) + aux (0.5) — stopping`);
+          hostPhase = 26;
+          ws.send(JSON.stringify({ type: "transport", command: "stop" }));
+        }
+      }
+    } else if (msg.type === "state" && hostPhase === 26 && msg.playing === false) {
+      console.log("[test] phase MO-3 — re-hosting with outputRouting [{busIndex:1, mute:true}] (aux muted, seq 9)");
+      hostPhase = 27;
+      ws.send(JSON.stringify({
+        type: "load", seq: 9, events: MO_EVENTS, meta: MO_META,
+        channels: { t1: 1 },
+        plugin: { uid: hostValidUid, path: hostValidPath, name: hostValidName,
+                  outputRouting: [{ busIndex: 1, gain: 1, mute: true }] },
+      }));
+    } else if (msg.type === "plugin_state" && hostPhase === 27 && msg.state === "loaded") {
+      console.log("[test] phase MO-4 ✓ re-hosted with routing — playing (aux must be SILENT)");
+      hostPhase = 28;
+      ws.send(JSON.stringify({ type: "transport", command: "play", tick: 0 }));
+    } else if (msg.type === "state" && hostPhase === 28) {
+      if (msg.playing) {
+        moPeaksMuted.push(msg.peak ?? 0);
+        if (msg.tick >= 2400) {
+          const pk = Math.max(...moPeaksMuted);
+          if (!(pk > 0.65 && pk < 0.95)) fail(`multi-out MUTED routing: master peak ${pk.toFixed(3)} must be main-only ≈0.787 — the muted aux bus still contributed`);
+          console.log(`[test] phase MO-5 ✓ aux muted via outputRouting: master peak ${pk.toFixed(3)} = main only — stopping, editor phases`);
+          hostPhase = 29;
+          ws.send(JSON.stringify({ type: "transport", command: "stop" }));
+        }
+      }
+    } else if (msg.type === "state" && hostPhase === 29 && msg.playing === false) {
+      console.log("[test] phase MO ✓ multi-output contract proven both ways — editor phases (3d-1: window work, proven on CI's desktop)");
+      hostPhase = 30;
       ws.send(JSON.stringify({ type: "openEditor", instanceId: "hosted" }));
-    } else if (msg.type === "editorOpened" && hostPhase === 24) {
+    } else if (msg.type === "editorOpened" && hostPhase === 30) {
       if (msg.focused === true) fail(`first openEditor must OPEN (not focus): ${JSON.stringify(msg)}`);
       if (!msg.width || msg.width <= 0 || !msg.height || msg.height <= 0) fail(`editorOpened lacks real geometry: ${JSON.stringify(msg)}`);
       hostEditorOpenOk = true;
       console.log(`[test] phase J ✓ editor OPENED "${msg.name}" ${msg.width}x${msg.height} — repeat request must RAISE, not double-open`);
-      hostPhase = 25;
+      hostPhase = 31;
       ws.send(JSON.stringify({ type: "openEditor", instanceId: "hosted" }));
-    } else if (msg.type === "editorOpened" && hostPhase === 25) {
+    } else if (msg.type === "editorOpened" && hostPhase === 31) {
       if (msg.focused !== true) fail(`repeat openEditor must re-echo editorOpened with focused=true (one editor per instance), got ${JSON.stringify(msg)}`);
       hostEditorFocusOk = true;
       console.log("[test] phase K ✓ repeat openEditor focused the existing window (ONE editor per instance) — closing");
-      hostPhase = 26;
+      hostPhase = 32;
       ws.send(JSON.stringify({ type: "closeEditor", instanceId: "hosted" }));
-    } else if (msg.type === "editorClosed" && hostPhase === 26) {
+    } else if (msg.type === "editorClosed" && hostPhase === 32) {
       hostEditorCloseOk = true;
       console.log("[test] phase L ✓ editor CLOSED cleanly (protocol close; the X button and plugin unload converge on the same path) — shutdown");
       finishAndShutdown();
-    } else if (msg.type === "error" && msg.code === "editor_unavailable" && hostPhase === 24 && !hostEditorOpenOk) {
+    } else if (msg.type === "error" && msg.code === "editor_unavailable" && hostPhase === 30 && !hostEditorOpenOk) {
       // Headless tolerance — SAME contract as multi M-7: a display-less host
       // (this box, disconnected RDP) cannot create a window; the engine's
       // display guard answers editor_unavailable("no display …") and the
@@ -1216,13 +1288,16 @@ ws.addEventListener("close", () => {
     if (capsForHosted !== loadedForHosted) fail(`plugin_capabilities arrived ${capsForHosted}× but plugin_state loaded ${loadedForHosted}× for instance "hosted" — the handshake must be EXACTLY ONCE per instance`);
     const c = hostFirstCaps;
     if (c.inputBuses !== 0) fail(`capability record: inputBuses ${c.inputBuses} ≠ 0 (the test plugin has no input buses)`);
-    if (c.outputBuses < 1) fail(`capability record: outputBuses ${c.outputBuses} — the test plugin has a stereo main out`);
+    if (c.outputBuses !== 2) fail(`capability record: outputBuses ${c.outputBuses} ≠ 2 (the fixture ships main "Output" + aux "Aux Out", 3e-3)`);
     if ((c.buses ?? []).length !== c.inputBuses + c.outputBuses) fail("capability record: buses[] length must equal inputBuses + outputBuses (every bus reported)");
     const mainOut = (c.buses ?? []).find((b) => !b.input && b.isMain);
     if (!mainOut) fail("capability record: no main OUTPUT bus entry");
     if (mainOut.name !== "Output") fail(`capability record: main out bus name "${mainOut.name}" ≠ "Output"`);
     if (mainOut.channels !== 2) fail(`capability record: main out channels ${mainOut.channels} ≠ 2 (stereo)`);
     if (mainOut.enabledByDefault !== true) fail("capability record: the test plugin's main out must be enabled by default");
+    const auxOut = (c.buses ?? []).find((b) => !b.input && !b.isMain);
+    if (!auxOut) fail("capability record: no aux OUTPUT bus entry (3e-3)");
+    if (auxOut.name !== "Aux Out" || auxOut.channels !== 2) fail(`capability record: aux out must be "Aux Out" 2ch, got "${auxOut.name}" ${auxOut.channels}ch`);
     if (!c.classId || c.classId !== hostClassId) fail(`capability record classId must be non-empty and equal the plugin_state classId (got "${c.classId}", want "${hostClassId}")`);
     if (c.latencySamples !== 128) fail(`capability record latencySamples ${c.latencySamples} ≠ the fixture's reported 128`);
     if (c.isInstrument !== true || c.acceptsMidi !== true || c.producesMidi !== false || c.hasEditor !== true) {
@@ -1247,7 +1322,8 @@ ws.addEventListener("close", () => {
       console.log('  muted-window note never dispatched; unmute restores sound');
       console.log(`  MUSICAL stops at ticks ${hostStopTick1}/${hostStopTick2}: release marker + exact held-note offs, NO CC120`);
       console.log(`  RESUME: gentle re-attacks (vel 80) + redundant CC#32 SUPPRESSED (k=6) + genuine change SENT`);
-      console.log(`  3e-1 handshake: plugin_capabilities ×${capsForHosted} == plugin_state loaded ×${loadedForHosted} ("hosted"); main out "Output" 2ch; classId echo + identifier-string reload MATCHED`);
+      console.log(`  3e-1 handshake: plugin_capabilities ×${capsForHosted} == plugin_state loaded ×${loadedForHosted} ("hosted"); main out "Output" 2ch + aux "Aux Out" 2ch (3e-3); classId echo + identifier-string reload MATCHED`);
+      console.log(`  3e-3 multi-output: default routing peak ${Math.max(...moPeaksDefault).toFixed(3)} = main+aux; aux muted via outputRouting peak ${Math.max(...moPeaksMuted).toFixed(3)} = main only`);
       console.log(hostHeadlessSkip
         ? "  editors: SKIPPED on this headless host (editor_unavailable tolerated; Windows CI proves the window path)"
         : "  editors: open → repeat RAISES (focused, one editor per instance) → clean close");

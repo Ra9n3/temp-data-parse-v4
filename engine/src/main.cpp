@@ -92,6 +92,18 @@
 //         "classId" (and, when the scan worker can instantiate the plugin,
 //         a "capabilities" object with the same fields).
 //
+// Stage 3e-3 protocol additions (additive — MULTI-OUTPUT BUSES):
+//   load: every hosted instance's output buses are ENABLED (main + all aux
+//         the plugin allows; inputs stay disabled — no sidechain). Receipt
+//         per instance lists each output bus + its channel count.
+//   load: per-instance OPTIONAL "outputRouting": [{busIndex, gain, mute}].
+//         Absent = default: bus 0 (main) mixes to master stereo as always
+//         AND every other bus ALSO sums to master (nothing becomes silent).
+//         Entries: mute skips the bus; gain (0..8) scales it before the
+//         master bus. Malformed entries are skipped + receipt-named.
+//         Applies at (re)instantiate; the mid-play reuse path keeps the
+//         live instance's routing (changing it requires a stopped reload).
+//
 // Test synth: sine oscillator per note, voice allocation (steal oldest),
 // gain envelope (attack/release ~10ms). Every NoteOn must sound, every NoteOff
 // must stop. No VST3, no samples, no CC rendering. Loopback ONLY (127.0.0.1).
@@ -442,6 +454,16 @@ LastMix g_lastMix;                  // guarded by g_lastMixMutex
 // BEFORE the set swap, so the audio callback's plain atomic load needs no
 // lock. Instances replaced by a swap are RETIRED (freed by the worker after
 // a grace period — never on the audio thread).
+// Stage 3e-3 — per-instance output-bus routing (optional, load message):
+// {busIndex, gain, mute} per output bus. Absent = default (every bus sums to
+// master at gain 1). Immutable after publish like the rest of the identity
+// block; CHANGING it requires a stopped reload (the mid-play reuse path
+// keeps the live instance untouched — documented in ASSUMPTIONS.md 3e-3).
+struct BusRouting {
+    int busIndex = 0;
+    float gain = 1.0f;
+    bool mute = false;
+};
 struct HostedPlugin {
     std::unique_ptr<juce::AudioPluginInstance> instance;
     std::string name, vendor;
@@ -466,6 +488,15 @@ struct HostedPlugin {
     // publication like the rest of the identity block.
     std::string classId;
     std::string capabilitiesFields;
+    // Stage 3e-3 — MULTI-OUTPUT BUSES: every output bus the plugin allows is
+    // ENABLED at load (main + aux); input buses stay disabled (no sidechain
+    // in this stage). outputBusChannels[b] = channel count of output bus b
+    // (disabled buses report 0 and occupy no buffer channels — the table is
+    // also the bus→procBuffer offset map); totalOutputChannels = Σ. Immutable
+    // after publish (the audio thread reads them lock-free).
+    std::vector<int> outputBusChannels;
+    int totalOutputChannels = 0;
+    std::vector<BusRouting> outputRouting;   // optional per-load routing
 };
 // Immutable slot-ordered set published behind ONE atomic shared_ptr (same
 // publication pattern as RoutingTable/ScoreSnapshot — the audio callback
@@ -783,6 +814,9 @@ struct PluginInitEntry {
     // Stage 3d-3: the project JSON's embedded state (base64), restored after
     // instantiate and BEFORE the real-device prepare. Empty = default state.
     std::string stateB64;
+    // Stage 3e-3: the entry's optional outputRouting (immutable on the
+    // instance after instantiate).
+    std::vector<BusRouting> routing;
 };
 struct PluginInitRequest {
     // Stage 3d-4: the load's FULL desired instance set (replace-all semantics:
@@ -1031,7 +1065,7 @@ public:
                 for (int slot = 0; slot < kMaxInstances; ++slot) {
                     HostedPlugin* h = instances->slots[slot];
                     if (h == nullptr || !h->instance) continue;
-                    renderPlugin(h->instance.get(), instMidi[slot], outputChannelData,
+                    renderPlugin(*h, instMidi[slot], outputChannelData,
                                  numOutputChannels, numSamples, peak);
                 }
             }
@@ -1219,7 +1253,7 @@ public:
                 for (int slot = 0; slot < kMaxInstances; ++slot) {
                     HostedPlugin* h = instances->slots[slot];
                     if (h == nullptr || !h->instance) continue;
-                    renderPlugin(h->instance.get(), instMidi[slot], outputChannelData,
+                    renderPlugin(*h, instMidi[slot], outputChannelData,
                                  numOutputChannels, numSamples, peak);
                 }
             }
@@ -1301,6 +1335,12 @@ public:
                 p->setPlayHead(&playHead);
                 p->setPlayConfigDetails(0, 2, device->getCurrentSampleRate(),
                                         device->getCurrentBufferSizeSamples());
+                // Stage 3e-3: setPlayConfigDetails' next-best-layout
+                // negotiation disables non-main output buses — re-enable ALL
+                // output buses after it, before the prepare (same ordering
+                // as loadHostedPlugin).
+                for (int b = 0; b < p->getBusCount(false); ++b)
+                    if (auto* bus = p->getBus(false, b)) bus->enable(true);
                 p->prepareToPlay(device->getCurrentSampleRate(),
                                  device->getCurrentBufferSizeSamples());
                 const int lat = static_cast<int>(p->getLatencySamples());
@@ -1366,48 +1406,65 @@ private:
         g_heldPluginNoteCount.store(n, std::memory_order_relaxed);
     }
 
-    // Render one buffer through the hosted plugin and copy its output
-    // channels into the device buffer, tracking the output peak.
+    // Render one buffer through the hosted plugin and mix its output buses
+    // into the device buffer, tracking the output peak.
     // Stage 3c-polish F3: the hosted OUTPUT GAIN is applied here — plugin
     // path only, after render, before the master bus. NOT a per-track mix
     // recalibration (that is mix-v4); CC7/CC11 remain the per-track levels.
     //
-    // Stage 3d-2 (the gauntlet): STEREO-HONEST OUTPUT COPY. The old loop read
-    // ONLY channel 0 and copied it to EVERY device channel — a stereo
-    // instrument's right channel was silently dropped (panned patches,
-    // stereo pianos, chorused synths all rendered mono-left). Universal
-    // channel mapping (no plugin-name logic):
-    //   plugin mono   → mono fold to every device channel (unchanged)
-    //   plugin stereo → device L←ch0, device R←ch1  (THE fix)
-    //   plugin >2     → L←ch0, R←ch1, extra device channels take ch1;
-    //                   ch2+ of the plugin are NOT mixed down (documented:
-    //                   Scorch returns stereo; a surround main bus that
-    //                   refused the stereo request is accepted as-is).
-    // The fixture renders identical L/R, so the CI peak arithmetic is
-    // byte-identical pre/post (asserted: phases A/C peaks unchanged).
-    void renderPlugin(juce::AudioPluginInstance* plugin, juce::MidiBuffer& midi,
+    // Stage 3d-2 (the gauntlet): STEREO-HONEST OUTPUT COPY — L←ch0, R←ch1,
+    // mono fold, >2-ch mapped as-is (see the original comment below).
+    //
+    // Stage 3e-3 — MULTI-OUTPUT BUSES: procBuf is sized to the TOTAL output
+    // channel count across all ENABLED buses (the instance's immutable
+    // outputBusChannels table), processBlock runs ONCE, then per bus:
+    //   bus 0 (main)  → master stereo EXACTLY as always (L←ch0, R←ch1, mono
+    //                   duplicated) — for single-bus plugins the arithmetic
+    //                   below is BYTE-IDENTICAL to the pre-3e-3 loop;
+    //   every other bus → ALSO summed to master stereo by default (nothing
+    //                   becomes silent), each fold using the same L/R/mono
+    //                   mapping restricted to that bus's channel slice.
+    // outputRouting (optional, immutable per instance): {busIndex, gain,
+    // mute} — mute skips the bus entirely, gain scales the bus before the
+    // master bus (multiplied with the global hosted output gain). Absent
+    // entries = gain 1, not muted. Unknown bus indices are ignored.
+    void renderPlugin(HostedPlugin& h, juce::MidiBuffer& midi,
                       float* const* outputChannelData, int numOutputChannels,
                       int numSamples, float& peak) {
-        const int wantChans = juce::jlimit(1, 8, plugin->getMainBusNumOutputChannels());
-        if (procBuf.getNumSamples() != numSamples || procBuf.getNumChannels() != wantChans)
-            procBuf.setSize(wantChans, numSamples, false, true, false);
+        const int total = h.totalOutputChannels > 0
+            ? h.totalOutputChannels
+            : juce::jlimit(1, 8, h.instance->getMainBusNumOutputChannels());   // legacy fallback
+        if (procBuf.getNumSamples() != numSamples || procBuf.getNumChannels() != total)
+            procBuf.setSize(total, numSamples, false, true, false);
         for (int ch = 0; ch < procBuf.getNumChannels(); ++ch)
             procBuf.clear(ch, 0, numSamples);
-        plugin->processBlock(procBuf, midi);
-        const float gain = g_hostedOutputGain.load(std::memory_order_relaxed);
-        const int procChans = procBuf.getNumChannels();
-        for (int s = 0; s < numSamples; ++s) {
-            float peakSample = 0.0f;
-            for (int ch = 0; ch < numOutputChannels; ++ch) {
-                const int src = procChans > 1 ? juce::jmin(ch, 1) : 0;
-                const float out = procChans > 0 ? procBuf.getSample(src, s) * gain : 0.0f;
-                // Stage 3d-4: ADD (the device buffer is zeroed at callback
-                // entry and carries the Σ of all instances + the synth path;
-                // the old ASSIGN was only correct for one instance).
-                outputChannelData[ch][s] += out;
-                peakSample = std::max(peakSample, std::abs(out));
+        h.instance->processBlock(procBuf, midi);
+        const float masterGain = g_hostedOutputGain.load(std::memory_order_relaxed);
+        int busStart = 0;
+        const int nBuses = static_cast<int>(h.outputBusChannels.size());
+        for (int b = 0; b < nBuses; ++b) {
+            const int chans = h.outputBusChannels[static_cast<size_t>(b)];
+            busStart += chans;
+            if (chans <= 0) continue;   // disabled/refused bus — contributes nothing
+            const BusRouting* r = nullptr;
+            for (const auto& rr : h.outputRouting)
+                if (rr.busIndex == b) { r = &rr; break; }   // last entry wins
+            if (r != nullptr && r->mute) continue;          // routed mute — bus skipped
+            const float busGain = masterGain * (r != nullptr ? std::clamp(r->gain, 0.0f, 8.0f) : 1.0f);
+            if (busGain == 0.0f) continue;                  // gain 0 = silence, skip the copy
+            for (int s = 0; s < numSamples; ++s) {
+                float peakSample = 0.0f;
+                for (int ch = 0; ch < numOutputChannels; ++ch) {
+                    const int src = chans > 1 ? juce::jmin(ch, 1) : 0;
+                    const float out = procBuf.getSample(busStart - chans + src, s) * busGain;
+                    // Stage 3d-4: ADD (the device buffer is zeroed at callback
+                    // entry and carries the Σ of all instances + the synth path;
+                    // the old ASSIGN was only correct for one instance).
+                    outputChannelData[ch][s] += out;
+                    peakSample = std::max(peakSample, std::abs(out));
+                }
+                peak = std::max(peak, peakSample);
             }
-            peak = std::max(peak, peakSample);
         }
     }
 
@@ -2084,9 +2141,12 @@ std::string buildCapabilityFields(juce::AudioPluginInstance& inst,
 
 // Host a VST3 by id/path (Stage 3c-2; 3d-4: one INSTANCE of possibly many —
 // identity = the frontend's libraryGroup id, "hosted" for the legacy field).
-// Returns "" on success, else a human-readable detail.
+// Stage 3e-3: routing (optional per-load outputRouting) rides in and lands
+// on the immutable instance before publish. Returns "" on success, else a
+// human-readable detail.
 std::string loadHostedPlugin(const juce::var& pluginVar, const std::string& instanceId,
-                             std::unique_ptr<HostedPlugin>& out) {
+                             std::unique_ptr<HostedPlugin>& out,
+                             std::vector<BusRouting> routing = {}) {
     juce::DynamicObject* pobj = pluginVar.getDynamicObject();
     if (pobj == nullptr) return "plugin field must be an object";
     const std::string path = pobj->getProperty("path").toString().toStdString();
@@ -2129,7 +2189,12 @@ std::string loadHostedPlugin(const juce::var& pluginVar, const std::string& inst
         // namespace-level g_audioCallback's member.
         inst->setPlayHead(&g_audioCallback.playHead);
         // Activate the stereo output bus into the graph (nominal rate/size;
-        // audioDeviceAboutToStart re-prepares for the REAL device).
+        // audioDeviceAboutToStart re-prepares for the REAL device). Only the
+        // MAIN bus is negotiated to 2 — the aux buses keep their layouts.
+        // EMPIRICAL (3e-3): this call's next-best-layout negotiation DISABLES
+        // non-main output buses (it asks the module for a 2-out arrangement
+        // and the wrapper answers with aux disabled) — the enable-all below
+        // therefore runs AFTER it, never before.
         inst->setPlayConfigDetails(0, 2, 44100.0, 512);
         if (inst->getMainBusNumOutputChannels() <= 0)
             return "plugin exposes no output bus: " + chosen->name.toStdString();
@@ -2140,15 +2205,33 @@ std::string loadHostedPlugin(const juce::var& pluginVar, const std::string& inst
         engineLog("[plugin] bus negotiation: requested 0-in/2-out, plugin answers " +
                   std::to_string(inst->getMainBusNumOutputChannels()) + "-out (\"" +
                   chosen->name.toStdString() + "\")");
+        // Stage 3e-3 — ENABLE ALL OUTPUT BUSES the plugin allows (main +
+        // aux), AFTER the main-bus negotiation that would otherwise have
+        // disabled them. Input buses stay DISABLED — no sidechain in this
+        // stage. A refused enable (plugins may forbid it) is receipt-visible
+        // and that bus simply contributes nothing.
+        {
+            std::string busReceipt;
+            for (int i = 0; i < inst->getBusCount(false); ++i) {
+                auto* bus = inst->getBus(false, i);
+                if (bus == nullptr) continue;
+                const bool wasEnabled = bus->isEnabled();
+                const bool ok = bus->enable(true);
+                if (!busReceipt.empty()) busReceipt += " | ";
+                busReceipt += "bus" + std::to_string(i) + " \"" + bus->getName().toStdString() + "\"";
+                if (!ok && !wasEnabled) busReceipt += " ENABLE-REFUSED";
+            }
+            engineLog("[plugin] output buses ENABLED (all the plugin allows, inputs untouched): " + busReceipt);
+        }
         inst->prepareToPlay(44100.0, 512);
         inst->setNonRealtime(false);
         // Stage 3e-1 — capture the capability record after the create-time
         // prepare: a VST3 module reports its REAL latency only once its
         // wrapper has prepared (empirical: right after createPluginInstance
-        // the same fixture read 0). Bus facts stay plugin-owned here —
-        // enabledByDefault/isMain are construction-time flags no host call
-        // touches, and NO enable/disable has been issued (the 3e-3
-        // enable-all runs later, on every bus, deliberately after capture).
+        // the same fixture read 0). enabledByDefault/isMain are
+        // construction-time flags no host call touches (enable() changes the
+        // CURRENT layout, never the construction flag), so the 3e-3
+        // enable-all above does not contaminate the record.
         const std::string capsFields = buildCapabilityFields(*inst, *chosen);
         auto hosted = std::make_unique<HostedPlugin>();
         hosted->instance = std::move(inst);
@@ -2160,6 +2243,29 @@ std::string loadHostedPlugin(const juce::var& pluginVar, const std::string& inst
         hosted->instanceId = instanceId;
         hosted->classId = chosen->createIdentifierString().toStdString();
         hosted->capabilitiesFields = capsFields;
+        // Stage 3e-3 — the bus→procBuffer channel table: per output bus, the
+        // ENABLED channel count (disabled buses report 0). This table is the
+        // offset map renderPlugin walks (lock-free, immutable from here).
+        {
+            int totalOut = 0;
+            std::string chanReceipt;
+            for (int i = 0; i < hosted->instance->getBusCount(false); ++i) {
+                const auto* bus = hosted->instance->getBus(false, i);
+                const int n = bus != nullptr ? bus->getNumberOfChannels() : 0;
+                hosted->outputBusChannels.push_back(n);
+                totalOut += n;
+                if (!chanReceipt.empty()) chanReceipt += " | ";
+                chanReceipt += "bus" + std::to_string(i) + " \"" +
+                               (bus != nullptr ? bus->getName().toStdString() : "?") + "\" " +
+                               std::to_string(n) + "ch" +
+                               (bus != nullptr && bus->isMain() ? " (main)" : "");
+            }
+            hosted->totalOutputChannels = totalOut;
+            engineLog("[plugin] output buses: instance=" + instanceId + " " + chanReceipt +
+                      " — total " + std::to_string(totalOut) + "-out (renderPlugin mixes bus 0 to"+
+                      " master as always; every other bus ALSO sums to master unless outputRouting says otherwise)");
+        }
+        hosted->outputRouting = std::move(routing);
         out = std::move(hosted);
         return "";
     } catch (const std::exception& e) {
@@ -2189,6 +2295,46 @@ void sendPluginState(ix::WebSocket& ws, const char* state, const std::string& na
     if (!detail.empty()) msg += ",\"detail\":\"" + escape_json(detail) + "\"";
     msg += "}";
     ws.send(msg);
+}
+
+// Stage 3e-3 — parse the optional per-instance "outputRouting" field:
+// a JSON array of {busIndex, gain, mute}. Malformed entries are SKIPPED but
+// NAMED in the receipt (the load's named-skip discipline); the field is
+// optional and additive — absent = default routing (all buses sum at gain 1).
+void parseOutputRouting(const juce::var& v, std::vector<BusRouting>& out) {
+    if (v.isVoid()) return;
+    const auto* arr = v.getArray();
+    if (arr == nullptr) {
+        engineLog("[load] outputRouting is not an array — IGNORED (default routing: all buses sum at gain 1)");
+        return;
+    }
+    int idx = -1;
+    for (const auto& e : *arr) {
+        ++idx;
+        juce::DynamicObject* eo = e.getDynamicObject();
+        if (eo == nullptr) {
+            engineLog("[load] outputRouting[" + std::to_string(idx) + "] is not an object — SKIPPED");
+            continue;
+        }
+        BusRouting r;
+        r.busIndex = static_cast<int>(static_cast<double>(eo->getProperty("busIndex")));
+        const juce::var& gainVar = eo->getProperty("gain");
+        if (!gainVar.isVoid()) {
+            const double g = static_cast<double>(gainVar);
+            if (!std::isfinite(g)) {
+                engineLog("[load] outputRouting[" + std::to_string(idx) + "] gain not finite — entry SKIPPED");
+                continue;
+            }
+            r.gain = static_cast<float>(std::clamp(g, 0.0, 8.0));
+        }
+        r.mute = static_cast<bool>(eo->getProperty("mute"));
+        if (r.busIndex < 0) {
+            engineLog("[load] outputRouting[" + std::to_string(idx) + "] busIndex " +
+                      std::to_string(r.busIndex) + " < 0 — entry SKIPPED");
+            continue;
+        }
+        out.push_back(r);
+    }
 }
 
 // Re-resolve the last mix request (trackId lists) against a routing table.
@@ -2232,7 +2378,8 @@ void handle_load(const juce::var& json, ix::WebSocket& ws, size_t byteSize) {
     // LEGACY (still accepted, byte-compatible): plugin = {uid, path, ...}
     // (ONE instance, reserved id "hosted", slot 0 — wide channels == 1..16),
     // channels = {trackId: ch}.
-    struct ReqInstance { std::string instanceId; int slot = 0; juce::var pluginVar; std::string stateB64; };
+    struct ReqInstance { std::string instanceId; int slot = 0; juce::var pluginVar; std::string stateB64;
+                         std::vector<BusRouting> routing; };   // 3e-3: optional outputRouting
     std::vector<ReqInstance> reqInstances;
     std::unordered_map<std::string, std::string> instanceOfTrack;   // trackId → instanceId
     if (const auto* pluginsArr = obj->getProperty("plugins").getArray()) {
@@ -2273,6 +2420,7 @@ void handle_load(const juce::var& json, ix::WebSocket& ws, size_t byteSize) {
             r.slot = static_cast<int>(reqInstances.size());   // slot = declaration order (deterministic)
             r.pluginVar = pv;
             r.stateB64 = po->getProperty("state").toString().toStdString();
+            parseOutputRouting(po->getProperty("outputRouting"), r.routing);
             reqInstances.push_back(std::move(r));
         }
     }
@@ -2285,6 +2433,7 @@ void handle_load(const juce::var& json, ix::WebSocket& ws, size_t byteSize) {
         r.slot = 0;
         r.pluginVar = pluginVar;
         r.stateB64 = pluginVar.getDynamicObject()->getProperty("state").toString().toStdString();
+        parseOutputRouting(pluginVar.getDynamicObject()->getProperty("outputRouting"), r.routing);
         reqInstances.push_back(std::move(r));
     }
     const bool pluginRequested = !reqInstances.empty();
@@ -2687,6 +2836,7 @@ void handle_load(const juce::var& json, ix::WebSocket& ws, size_t byteSize) {
                 e.slot = r.slot;
                 e.pluginVar = r.pluginVar;
                 e.stateB64 = r.stateB64;
+                e.routing = r.routing;
                 auto cit = chansJsonPerInst.find(r.instanceId);
                 if (cit != chansJsonPerInst.end()) e.channelsJson = cit->second;
                 entries.push_back(std::move(e));
@@ -3405,6 +3555,15 @@ int main(int argc, char** argv) {
                 std::unique_ptr<HostedPlugin> hosted;
                 std::string err;
                 long long initMs = 0;
+                // 3e-3 FIX (3d-4 bug): success is tracked EXPLICITLY — the
+                // publish path release()s `hosted` into the set, which NULLS
+                // it, so `hosted == nullptr` cannot mean "failed" downstream.
+                // Before this flag, EVERY successful replace was misread as a
+                // failure and the OLD instance was retained at the requested
+                // slot (the fresh instance leaked) — masked until now because
+                // the old instance usually carried equivalent state; the 3e-3
+                // outputRouting was the first observable old-vs-new difference.
+                bool succeeded = false;
             };
             std::vector<EntryOutcome> outcomes(req.entries.size());
             bool superseded = false;
@@ -3412,7 +3571,7 @@ int main(int argc, char** argv) {
                 const PluginInitEntry& e = req.entries[i];
                 const auto te0 = std::chrono::steady_clock::now();
                 std::unique_ptr<HostedPlugin> h;
-                const std::string hostErr = loadHostedPlugin(e.pluginVar, e.instanceId, h);
+                const std::string hostErr = loadHostedPlugin(e.pluginVar, e.instanceId, h, e.routing);
                 outcomes[i].initMs = std::chrono::duration_cast<std::chrono::milliseconds>(
                     std::chrono::steady_clock::now() - te0).count();
                 {
@@ -3479,6 +3638,11 @@ int main(int argc, char** argv) {
                     // prepare (see loadHostedPlugin).
                     h->instance->setPlayHead(&g_audioCallback.playHead);
                     h->instance->setPlayConfigDetails(0, 2, devRate, devBuf);
+                    // Stage 3e-3: re-enable all output buses AFTER the
+                    // negotiation (it disables non-main buses — same
+                    // ordering as loadHostedPlugin).
+                    for (int b = 0; b < h->instance->getBusCount(false); ++b)
+                        if (auto* bus = h->instance->getBus(false, b)) bus->enable(true);
                     h->instance->prepareToPlay(devRate, devBuf);
                 }
                 int preparedLat = 0;
@@ -3492,6 +3656,15 @@ int main(int argc, char** argv) {
                           " latencySamples=" + std::to_string(preparedLat) +
                           " instance=" + e.instanceId +
                           (devRate > 0.0 ? " (real device)" : " (nominal — device not started yet; AboutToStart re-prepares)"));
+                if (!e.routing.empty()) {
+                    std::string rStr;
+                    for (const auto& rr : e.routing) {
+                        if (!rStr.empty()) rStr += ", ";
+                        rStr += "bus" + std::to_string(rr.busIndex) +
+                                (rr.mute ? " MUTE" : " gain=" + std::to_string(rr.gain));
+                    }
+                    engineLog("[plugin] outputRouting instance=" + e.instanceId + ": " + rStr);
+                }
                 outcomes[i].hosted = std::move(h);
             }
             if (g_should_exit.load()) continue;   // unique_ptrs free the set
@@ -3520,6 +3693,7 @@ int main(int argc, char** argv) {
             for (size_t i = 0; i < req.entries.size(); ++i) {
                 if (!outcomes[i].hosted) continue;
                 HostedPlugin* raw = outcomes[i].hosted.release();   // the set owns it from here
+                outcomes[i].succeeded = true;   // release() nulls `hosted` — record success EXPLICITLY
                 raw->slot = req.entries[i].slot;
                 nextSet->slots[raw->slot] = raw;
                 nextSet->slotLatency[raw->slot] = static_cast<int>(raw->latencySamples);
@@ -3536,7 +3710,7 @@ int main(int argc, char** argv) {
                         retiredNow.push_back(old);   // group vanished from the project
                         continue;
                     }
-                    if (outcomes[eit->second].hosted == nullptr) {
+                    if (!outcomes[eit->second].succeeded) {
                         // FAILED entry → retain the previous instance at the
                         // REQUESTED slot (routing truth = request order).
                         old->slot = req.entries[eit->second].slot;
