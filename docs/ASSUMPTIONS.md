@@ -1477,3 +1477,24 @@ with its capabilitiesError; per-user installer VST3 layouts landing in
 after the list appears); and the ProbeHangDummy's real-library analogue (a
 licence-server wait inside `GetPluginFactory`) — the 90 s probe timeout is a
 policy number that may need re-tuning by ear.
+
+**CI-fix notes (the two rounds it took to reach green).** (1) The probe
+worker's first implementation held the `ScopedJuceInitialiser_GUI` in a
+static `SharedResourcePointer`, whose static DESTRUCTION at process exit
+races the VST3 module-handle cache's `FreeLibrary` during the CRT atexit
+unwind — on Windows CI the synth probe's SUCCESS path died with heap
+corruption (exit `0xC0000374`) while every path that never reached teardown
+(abort, kill-at-timeout) classified exactly as designed. Lesson: in a
+short-lived child process, a deliberately LEAKED initialiser is the only
+teardown-order-safe form; the engine process itself keeps its initialiser
+alive at exit and was already clean. (2) The 3f-1 uninstall-hook CI step
+originally grepped the `RMDir` fragments inside the GENERATED
+`installer.nsi` — but tauri-v2's bundler does not inline hook files; it
+emits `!include "<path>/installer-hooks.nsh"` (the macros are invoked via
+`!ifmacrodef NSIS_HOOK_POSTUNINSTALL` in the uninstall section, which also
+confirmed `$UpdateMode` really is set from `/UPDATE` before the hook runs).
+The step now proves the `!include` wiring in the generated script and the
+delete-path/guard content in the hook file itself. A future bundler that
+inlines hooks would pass BOTH proofs; a bundler that stops emitting the
+`!include` fails the wiring proof loudly instead of silently shipping an
+unwired hook.

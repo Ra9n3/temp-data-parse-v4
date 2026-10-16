@@ -487,17 +487,34 @@ jobs:
       - name: Verify NSIS uninstall hook (fresh-install hygiene)
         shell: pwsh
         run: |
+          # The tauri-bundler does NOT inline the hooks file into the
+          # generated installer.nsi — its template emits
+          #   !include "<absolute path to installer-hooks.nsh>"
+          # and invokes the NSIS_HOOK_* macros via !ifmacrodef (verified
+          # against the tauri-v2 bundler template: NSIS_HOOK_POSTUNINSTALL
+          # sits in the uninstall section, after $UpdateMode is set from
+          # /UPDATE). So the wiring proof and the content proof are TWO
+          # different files:
+          #   1. the generated installer.nsi must carry the !include line
+          #      (the hook is actually wired into THIS build), and
+          #   2. the hook file itself must carry both delete paths and the
+          #      $UpdateMode guard (the hook does what the stage claims).
           $nsi = Get-ChildItem -Path "src-tauri/target/release/bundle/nsis" -Filter "installer.nsi" -ErrorAction SilentlyContinue | Select-Object -First 1
           if (-not $nsi) { $nsi = Get-ChildItem -Path "src-tauri/target" -Recurse -Filter "installer.nsi" -ErrorAction SilentlyContinue | Select-Object -First 1 }
           if (-not $nsi) { throw "generated installer.nsi not found under src-tauri/target" }
           Write-Host "Generated NSIS script: $($nsi.FullName)"
           $text = Get-Content $nsi.FullName -Raw
+          if (-not ($text -match '(?m)!\s*include\s+"[^"]*installer-hooks\.nsh"')) {
+            throw "installer.nsi does not !include installer-hooks.nsh — the uninstall hook is not wired into this build"
+          }
+          Write-Host "installer.nsi wires the hook:!include installer-hooks.nsh present"
+          $hookText = Get-Content "src-tauri/installer-hooks.nsh" -Raw
           foreach ($needle in @(
             'RMDir /r "$LOCALAPPDATA\com.scorch.app"',
             'RMDir /r "$APPDATA\scorch"',
             '$UpdateMode != 1'
           )) {
-            if (-not $text.Contains($needle)) { throw "installer.nsi missing fresh-install hook fragment: $needle" }
+            if (-not $hookText.Contains($needle)) { throw "installer-hooks.nsh missing fresh-install hook fragment: $needle" }
           }
           Write-Host "NSIS uninstall hook verified: both delete paths + UpdateMode guard present"
 
