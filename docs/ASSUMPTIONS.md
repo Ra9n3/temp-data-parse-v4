@@ -1546,3 +1546,43 @@ therefore ship WITHOUT a further bump: the stage target "0.8.0 → 0.8.1" is
 already satisfied, the runner version asserts stay untouched, and no CI
 assertion changes meaning. If a distinct version for the pill-swap build is
 wanted, it is a one-line `kEngineVersion` change plus this note's update.
+
+## Stage 3f-4 — swap the plugin from the pill (tag `swap-from-pill-v1`)
+
+**Scope decisions.** (1) The swap icon renders only on plugin-BOUND tracks
+(the same `editorTrackIds` gate as the editor affordance); unbound tracks
+keep the VST browser for assignment — "remove" on an unbound track is
+meaningless and the browser already covers assignment. (2) The picker lists
+DESKTOP scan rows only: it drives REAL hosting, and the web-preview mock has
+nothing to swap; an empty list tells the user to scan first. (3) "Remove
+plugin" gets the same one-line confirm as replace (the spec's confirm
+sentence is about the saved-state discard, which removal also does) — one
+consistent destructive-action contract instead of a silent one-click
+discard. (4) Removal clears only the hosting binding; a user-CHOSEN
+profileId (expression map) survives because it governs export, not hosting,
+and was an explicit user choice. A swap, by contrast, re-runs the
+deterministic name→profile heuristic on the new plugin's name (the same rule
+as first assignment) — a user-chosen profile is therefore REPLACED by a
+swap; noted here as the documented trade-off (the heuristic is the
+assignment contract from 3c; tracking "chosen vs derived" would need a
+schema field for no behavioural gain).
+
+**Failure semantics (reused, not invented).** The replace/remove load is the
+same full instance-set load the ready/play paths send, with the group id
+(= engine instanceId) kept. The engine worker instantiates per entry and
+RETAINS the previous instance on failure, erroring by id (3d-4, CI-proven in
+multi mode) — so a failed swap leaves the OLD plugin live under the same id
+while the UI shows the new label + the plugin_state error toast. Known edge,
+accepted: the pill label updates optimistically at confirm time, so after a
+FAILED swap the label may read the new name while the retained old instance
+sounds, until the next edit+play (or another swap) reloads. The toast names
+the failure; a fuller reconciliation would need a per-group "currently live
+uid" receipt channel — deliberately out of scope here.
+
+**State discard.** The confirm promises "its saved sound state will be
+discarded" and the implementation delivers exactly that: the group's
+`pluginState` is set to null at confirm (replace AND remove). The discard is
+commit()-tracked (undoable with the score edit itself) — an undo of the
+swap restores the binding but NOT the discarded blob (the blob was captured
+from the retired instance's live state; undo cannot resurrect engine-side
+audio state). Documented as the price of the promised semantics.

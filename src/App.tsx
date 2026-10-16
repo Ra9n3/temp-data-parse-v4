@@ -5,7 +5,7 @@ import dorianFixture from "./fixtures/dorian-16bars.json";
 import { TopBar } from "./components/TopBar";
 import { Arranger } from "./components/Arranger";
 import { GenerationSettingsPanel } from "./components/GenerationSettingsPanel";
-import { EngineClient, formatPluginInfo, mergeScanProbe, type EngineLoadMeta, type EngineStatus, type EditorEventMessage, type LoadFailure, type PluginCapabilitiesMessage, type PluginSavedStateMessage, type PluginStateMessage, type ScanResultMessage } from "./engine/engineClient";
+import { EngineClient, formatPluginInfo, mergeScanProbe, type EngineLoadMeta, type EngineStatus, type EditorEventMessage, type LoadFailure, type PluginCapabilitiesMessage, type PluginSavedStateMessage, type PluginStateMessage, type ScanResultMessage, type ScannedPlugin } from "./engine/engineClient";
 import { buildEngineStream, resolveEngineChannelView } from "./engine/engineStream";
 import { PPQ, projectEndTick, tickToBar } from "./shared/schema";
 import {
@@ -13,6 +13,7 @@ import {
   ExportDialog,
   MixDialog,
   PianoRoll,
+  PluginSwapDialog,
   TestsPanel,
   Toasts,
   VstBrowser,
@@ -215,6 +216,9 @@ export default function App() {
   // Latest project value for imperative callbacks (status transition, engine
   // receipts) that outlive renders and must read the CURRENT project.
   const projectRef = useRef<Project | null>(null);
+  // Stage 3f-4 — the track whose plugin the SWAP picker is open for (the
+  // pill's swap icon). null = closed; the dialog itself owns search + confirm.
+  const [swapTrackId, setSwapTrackId] = useState<string | null>(null);
   // Chord v2 — the editing chord id is LIFTED here (was local to the Arranger
   // lane) so the top-bar panel and the in-lane editor share one source of
   // truth: creation/retarget/Esc/delete all stay in sync. No schema change.
@@ -616,6 +620,101 @@ export default function App() {
       setVstOpen(true);
     }
   }, [project, engineStatus, hostedIds, toast]);
+
+  // Stage 3f-4 — the EXISTING replace path, reused verbatim: the full
+  // instance-set load (routing + plugins[], per-group uid+path). The group id
+  // (= engine instanceId) is KEPT by both swap and remove, so the engine
+  // worker instantiates per entry and — on failure — RETAINS the previous
+  // instance and errors by id (3d-4; multi-mode CI-proven). Routing is never
+  // touched by a swap: track MIDI channels stay exactly as they are.
+  const sendSwapLoad = useCallback(
+    (p: Project) => {
+      const client = engineClientRef.current;
+      if (!client || client.getStatus() !== "ready") {
+        toast("info", "audio engine not ready — press play to load the changed project");
+        return;
+      }
+      const stream = buildEngineStream(p);
+      if (stream.events.length === 0 && stream.plugins.length === 0) return;
+      const meta: EngineLoadMeta = {
+        bpm: p.bpm,
+        ppqn: PPQ,
+        timeSignature: p.timeSignature,
+        endTick: projectEndTick(p),
+      };
+      void client
+        .load(stream.events, meta, { routing: stream.routing, plugins: stream.plugins })
+        .then(() => {
+          lastLoadedRef.current = p; // confirmed load — play fast-path eligible
+          client.mix(
+            p.tracks.filter((t) => t.muted).map((t) => t.id),
+            p.tracks.filter((t) => t.soloed).map((t) => t.id),
+          );
+        })
+        .catch((failure: LoadFailure) => {
+          writeErrorLog("pluginSwap", `replace load failed: ${failure.reason}`);
+          toast("error", `engine reload failed — press play to retry (${failure.reason})`);
+        });
+    },
+    [toast],
+  );
+
+  // Stage 3f-4 — confirmed replace: keep the group (id = instanceId), swap
+  // its binding to the picked scan row, and DROP the embedded saved state —
+  // the confirm promised exactly that (a stale blob silently restoring into
+  // a different plugin would violate the contract). profileId re-runs the
+  // SAME deterministic name→profile heuristic as first assignment (onPick):
+  // binding BBCSO keeps its expression map, anything else hosts as raw notes.
+  const replaceTrackPlugin = useCallback(
+    (trackId: string, pick: ScannedPlugin) => {
+      const t = project.tracks.find((tr) => tr.id === trackId);
+      const g = t ? project.libraryGroups.find((lg) => lg.id === t.libraryGroupId) : undefined;
+      if (!t || !g || !g.pluginId) return;
+      const profileId = /bbcso|bbc symphony/i.test(pick.name) ? "spitfire-bbcso" : undefined;
+      const { profileId: _oldProfile, ...rest } = g;
+      const next: Project = {
+        ...project,
+        libraryGroups: project.libraryGroups.map((lg) =>
+          lg.id === g.id
+            ? { ...rest, name: pick.name, pluginId: pick.uid, pluginPath: pick.path, pluginState: null, ...(profileId ? { profileId } : {}) }
+            : lg,
+        ),
+      };
+      commit(next);
+      setPluginLabels((p) => ({ ...p, [trackId]: pick.name }));
+      setSwapTrackId(null);
+      toast("ok", `Replaced ${g.name} with ${pick.name} — saved state discarded`);
+      sendSwapLoad(next);
+    },
+    [project, commit, toast, sendSwapLoad],
+  );
+
+  // Stage 3f-4 — confirmed remove: clear ONLY the hosting binding (pluginId,
+  // pluginPath, pluginState — back to the test synth). A deliberately chosen
+  // profileId (expression map) is preserved: it governs export, not hosting,
+  // and the user picked it explicitly. The engine retires the instance for
+  // the now-unbound group (grace + capture + editor close by id — 3d-4).
+  const removeTrackPlugin = useCallback(
+    (trackId: string) => {
+      const t = project.tracks.find((tr) => tr.id === trackId);
+      const g = t ? project.libraryGroups.find((lg) => lg.id === t.libraryGroupId) : undefined;
+      if (!t || !g || !g.pluginId) return;
+      const { pluginPath: _ppath, ...rest } = g;
+      const next: Project = {
+        ...project,
+        libraryGroups: project.libraryGroups.map((lg) => (lg.id === g.id ? { ...rest, pluginId: null, pluginState: null } : lg)),
+      };
+      commit(next);
+      setPluginLabels((p) => {
+        const { [trackId]: _drop, ...labels } = p;
+        return labels;
+      });
+      setSwapTrackId(null);
+      toast("ok", `${g.name} removed — the track rides the built-in test synth`);
+      sendSwapLoad(next);
+    },
+    [project, commit, toast, sendSwapLoad],
+  );
 
   // Stage 3d-4 derived sets for the Arranger pills: which tracks have a
   // plugin-bound group (editor affordance) and which of their instances
@@ -1050,6 +1149,7 @@ export default function App() {
         onOpenEditor={openTrackEditor}
         editorTrackIds={editorTrackIds}
         editorOpenTrackIds={editorOpenTrackIds}
+        onSwapPlugin={setSwapTrackId}
         onLoadAudio={() => audioInputRef.current?.click()}
         onAddTrack={(family: Family) => {
           const t = createAddedTrack(family);
@@ -1190,6 +1290,25 @@ export default function App() {
           toast("ok", `Assigned ${name} (expression map)${needsBbcso && match ? " + hosted plugin" : ""}`);
         }}
       />
+      {(() => {
+        // Stage 3f-4 — the pill's swap picker. currentName resolves from the
+        // track's group (its hosting identity), falling back to the pill
+        // label. Desktop scan rows only (real hosting); an empty list tells
+        // the user to scan first.
+        if (swapTrackId === null) return null;
+        const t = project.tracks.find((tr) => tr.id === swapTrackId);
+        const g = t ? project.libraryGroups.find((lg) => lg.id === t.libraryGroupId) : undefined;
+        return (
+          <PluginSwapDialog
+            open
+            currentName={g?.name ?? pluginLabels[swapTrackId] ?? "the plugin"}
+            plugins={desktopScan?.plugins ?? []}
+            onClose={() => setSwapTrackId(null)}
+            onReplace={(pick) => replaceTrackPlugin(swapTrackId, pick)}
+            onRemove={() => removeTrackPlugin(swapTrackId)}
+          />
+        );
+      })()}
       <ExportDialog
         open={exportOpen}
         project={project}

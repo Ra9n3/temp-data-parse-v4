@@ -20,6 +20,9 @@ interface Props {
   onOpenEditor?: () => void;
   /** Stage 3d-1 — the hosted editor window is currently open. */
   editorOpen?: boolean;
+  /** Stage 3f-4 — open the SWAP picker for this track's plugin (only
+   * rendered for plugin-bound tracks; the caller owns the dialog). */
+  onSwapPlugin?: () => void;
   onLoadAudio?: () => void;
   /** Stage 3c-3 — resolved engine channel (explicit or first-come auto),
    * undefined = test synth. */
@@ -41,6 +44,7 @@ export function TrackHeader({
   onOpenVst,
   onOpenEditor,
   editorOpen,
+  onSwapPlugin,
   onLoadAudio,
   engineChannelResolved,
   engineChannelExplicit,
@@ -100,6 +104,22 @@ export function TrackHeader({
             >
               <Ph name="plug" className="h-3 w-3 shrink-0" />
               <span className="truncate">{vstDisabled ? "—" : onOpenEditor ? `${pluginLabel} · editor` : pluginLabel}</span>
+            </button>
+          )}
+          {/* Stage 3f-4 — the pill's SWAP affordance: plugin-bound tracks only
+              (onOpenEditor present = bound; the caller gates per track).
+              Separate click target — the pill itself still opens the editor. */}
+          {!isAudio && onSwapPlugin && onOpenEditor && !vstDisabled && (
+            <button
+              type="button"
+              onClick={(e) => {
+                e.stopPropagation();
+                onSwapPlugin();
+              }}
+              title={`Swap or remove ${pluginLabel} — pick another scanned plugin, or back to the test synth`}
+              className="mt-1 ml-1 inline-flex h-[22px] w-[22px] shrink-0 items-center justify-center rounded-md bg-orange-500/20 text-orange-200 ring-1 ring-orange-400/30 hover:bg-orange-500/30"
+            >
+              <Ph name="loop" className="h-3 w-3" />
             </button>
           )}
         </div>

@@ -73,6 +73,11 @@ interface Props {
   onOpenEditor?: (id: string) => void;
   editorTrackIds?: Set<string>;
   editorOpenTrackIds?: Set<string>;
+  // Stage 3f-4 — open the SWAP picker for a plugin-bound track's plugin
+  // (the pill's swap icon). Gated to editorTrackIds like onOpenEditor:
+  // unbound tracks keep the VST browser (assignment) — swapping is for
+  // tracks that already host something.
+  onSwapPlugin?: (id: string) => void;
   // Stage 3c-3 — engine-channel assignment (per-track compact selector).
   engineChannels: Record<string, number>;
   onEngineChannel: (id: string, ch: number | null) => void;
@@ -225,6 +230,7 @@ export function Arranger(props: Props) {
     onSelectTrack,
     onOpenPianoRoll,
     onOpenEditor,
+    onSwapPlugin,
     editorTrackIds,
     editorOpenTrackIds,
     editingChord,
@@ -425,6 +431,11 @@ export function Arranger(props: Props) {
                 ? () => onOpenEditor(track.id)
                 : undefined
             }
+            onSwapPlugin={
+              onSwapPlugin && editorTrackIds?.has(track.id)
+                ? () => onSwapPlugin(track.id)
+                : undefined
+            }
             editorOpen={editorOpenTrackIds?.has(track.id) ?? false}
             onLoadAudio={onLoadAudio}
             engineChannelResolved={engineChannels[track.id]}
@@ -520,6 +531,8 @@ function TrackRow(props: {
   // Stage 3d-1 — editor-window request (present only when a plugin is hosted).
   onOpenEditor?: () => void;
   editorOpen?: boolean;
+  // Stage 3f-4 — open the swap picker (bound tracks only, gated upstream).
+  onSwapPlugin?: () => void;
   onLoadAudio: () => void;
   onSelectTrack: () => void;
   onOpenPianoRoll: () => void;
@@ -552,6 +565,7 @@ function TrackRow(props: {
           onOpenVst={props.onOpenVst}
           onOpenEditor={props.onOpenEditor}
           editorOpen={props.editorOpen}
+          onSwapPlugin={props.onSwapPlugin}
           onLoadAudio={props.onLoadAudio}
           engineChannelResolved={props.engineChannelResolved}
           engineChannelExplicit={props.engineChannelExplicit}

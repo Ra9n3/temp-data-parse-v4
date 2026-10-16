@@ -44,7 +44,7 @@ import { consolidateSustains } from "../generation/sustain";
 import { cc7ForWeight, acousticWeightForTrack, DEFAULT_BALANCE_CONFIG } from "../generation/balance";
 import { builtInProfileById, vst3EventAdapter } from "../plugins/expressionMaps";
 import { buildEngineStream, resolveInstanceRouting } from "../engine/engineStream";
-import { mergeScanProbe, type ScannedPlugin } from "../engine/engineClient";
+import { mergeScanProbe, swapPickerRows, type ScannedPlugin } from "../engine/engineClient";
 import userProjectJson from "../fixtures/user-project.json";
 import { mulberry32 } from "../generation/prng";
 import { snapshotDigest } from "../generation/efgGolden";
@@ -1076,6 +1076,33 @@ export function runUnitTests(): TestResult[] {
       const unknown = mergeScanProbe(rows, { type: "scan_probe", classId: "cid-unknown", capabilities: caps });
       assert(unknown === rows, "a probe for an unknown classId is ignored entirely");
       return "merge-by-classId keeps row count/identity/order; error rows stay listed with their annotation; unknown probes ignored";
+    }),
+    timed("Stage 3f-4: swapPickerRows — instruments first, search filter, deterministic and PURE", () => {
+      const rows: ScannedPlugin[] = [
+        { name: "Zeus Effect", vendor: "V", uid: "uid-1", path: "/p/1.vst3", classId: "c1" },
+        { name: "Alpha Synth", vendor: "Aco", uid: "uid-2", path: "/p/2.vst3", classId: "c2", isInstrument: true },
+        { name: "beta synth", vendor: "B", uid: "uid-3", path: "/p/3.vst3", classId: "c3", isInstrument: true },
+        { name: "alpha synth x", vendor: "Z", uid: "uid-4", path: "/p/4.vst3", classId: "c4" },
+      ];
+      // No query: instruments FIRST (name A–Z within each group, case-
+      // insensitive), then everything else (name A–Z).
+      const all = swapPickerRows(rows, "");
+      assert(all.map((r) => r.uid).join(",") === "uid-2,uid-3,uid-4,uid-1", "instruments first (A–Z), then the rest (A–Z: 'alpha synth x' < 'Zeus Effect' case-insensitively)");
+      // Search: case-insensitive over name AND vendor; instruments still first.
+      const byName = swapPickerRows(rows, "ALPH");
+      assert(byName.length === 2 && byName[0].uid === "uid-2" && byName[1].uid === "uid-4", "case-insensitive name search keeps the instruments-first order");
+      const byVendor = swapPickerRows(rows, "aco");
+      assert(byVendor.length === 1 && byVendor[0].uid === "uid-2", "vendor matches are found too");
+      // No match: empty list — never throws, never fabricates rows.
+      assert(swapPickerRows(rows, "no-such-plugin").length === 0, "no match → empty list");
+      // PURE: the input array is never reordered or mutated (the dialog can
+      // render straight from the store without copying).
+      assert(rows.length === 4 && rows[0].name === "Zeus Effect", "the input array is untouched");
+      // A capabilitiesError-annotated row STAYS listed (a failed capability
+      // probe never makes a plugin unswappable — hosting is the real judge).
+      const annotated: ScannedPlugin[] = [{ name: "Sick Synth", vendor: "V", uid: "uid-9", path: "/p/9.vst3", classId: "c9", isInstrument: true, capabilitiesError: "probe timeout after 90s" }];
+      assert(swapPickerRows(annotated, "").length === 1, "probed-failed rows stay listed in the picker");
+      return "instruments-first sort + case-insensitive name/vendor search; pure, deterministic; probe-failed rows stay listed";
     }),
   ];
 }

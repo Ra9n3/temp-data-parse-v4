@@ -152,6 +152,25 @@ export function mergeScanProbe(plugins: ScannedPlugin[], msg: ScanProbeMessage):
   return next;
 }
 
+/** Stage 3f-4 — the pill-swap picker's PURE row pipeline: case-insensitive
+ * substring filter over name+vendor, then instruments FIRST and name A–Z
+ * within each group (deterministic; the dialog only renders this). Rows with
+ * a capabilitiesError annotation stay listed — a failed capability PROBE
+ * never makes a plugin unswappable (the hosting load is the real judge).
+ * PURE: the input array is never reordered or mutated. */
+export function swapPickerRows(plugins: ScannedPlugin[], query: string): ScannedPlugin[] {
+  const q = query.trim().toLowerCase();
+  const pool = q
+    ? plugins.filter((p) => `${p.name} ${p.vendor ?? ""}`.toLowerCase().includes(q))
+    : plugins.slice();
+  return pool.sort((a, b) => {
+    const ai = a.isInstrument ? 0 : 1;
+    const bi = b.isInstrument ? 0 : 1;
+    if (ai !== bi) return ai - bi;
+    return a.name.localeCompare(b.name, undefined, { sensitivity: "base" });
+  });
+}
+
 /** Stage 3c-2 — hosting outcome. "loaded" carries the real name/vendor/latency
  * and the hosted channels; "error" carries the detail and means ALL tracks
  * fell back to the engine's built-in test synth (the app never dead-ends).

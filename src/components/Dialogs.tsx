@@ -9,6 +9,7 @@ import {
   type PluginScanState,
 } from "../plugins/mockService";
 import type { ScanFailedEntry, ScannedPlugin } from "../engine/engineClient";
+import { swapPickerRows } from "../engine/engineClient";
 import { BUILT_IN_PROFILES } from "../plugins/expressionMaps";
 import type { ExportTrackMode } from "../export/midi";
 import { exportMergedMidi, exportPerTrackMidi } from "../export/midi";
@@ -284,6 +285,159 @@ export function VstBrowser({
           </ul>
         )}
       </div>
+    </Modal>
+  );
+}
+
+/**
+ * Stage 3f-4 — swap the plugin from the pill. Lists the engine's scanned
+ * plugins (instruments FIRST, search box — the PURE swapPickerRows pipeline
+ * in engineClient.ts, unit-tested). Picking a row switches to the spec's
+ * one-line confirm: "Replace <old> with <new>? Its saved sound state will be
+ * discarded." — only then does the caller send the EXISTING load/replace
+ * path for that instance group (previous instance retained on failure,
+ * engine-side, 3d-4). "Remove plugin" runs the same confirm shape and
+ * returns the track to the built-in test synth. Desktop rows only: the
+ * picker drives REAL hosting (the web-preview mock has nothing to swap).
+ */
+export function PluginSwapDialog({
+  open,
+  currentName,
+  plugins,
+  onClose,
+  onReplace,
+  onRemove,
+}: {
+  open: boolean;
+  /** The plugin currently bound to the track (the <old> in the confirm). */
+  currentName: string;
+  plugins: ScannedPlugin[];
+  onClose: () => void;
+  onReplace: (pick: ScannedPlugin) => void;
+  onRemove: () => void;
+}) {
+  const [query, setQuery] = useState("");
+  const [pending, setPending] = useState<"remove" | ScannedPlugin | null>(null);
+  // Fresh dialog per open: the search and any half-taken confirm must not
+  // survive into the next swap (different track, different list).
+  useEffect(() => {
+    if (open) {
+      setQuery("");
+      setPending(null);
+    }
+  }, [open]);
+  const rows = useMemo(() => swapPickerRows(plugins, query), [plugins, query]);
+  if (!open) return null;
+  return (
+    <Modal title={pending ? "Confirm" : "Swap plugin"} onClose={onClose}>
+      {pending ? (
+        <div>
+          <p className="text-sm leading-relaxed text-stone-200">
+            {pending === "remove" ? (
+              <>
+                Remove <span className="font-semibold text-orange-300">{currentName}</span>? Its saved
+                sound state will be discarded. The track returns to the built-in test synth.
+              </>
+            ) : (
+              <>
+                Replace <span className="font-semibold text-orange-300">{currentName}</span> with{" "}
+                <span className="font-semibold text-orange-300">{pending.name}</span>? Its saved sound
+                state will be discarded.
+              </>
+            )}
+          </p>
+          <p className="mt-1.5 text-[11px] text-stone-500">Track MIDI channels stay unchanged.</p>
+          <div className="mt-4 flex justify-end gap-2">
+            <button
+              type="button"
+              onClick={() => setPending(null)}
+              className="rounded-md bg-white/10 px-3 py-1.5 text-sm text-stone-100 hover:bg-white/15"
+            >
+              Cancel
+            </button>
+            <button
+              type="button"
+              onClick={() => {
+                if (pending === "remove") onRemove();
+                else onReplace(pending);
+                onClose();
+              }}
+              className={cn(
+                "rounded-md px-3 py-1.5 text-sm font-medium text-black",
+                pending === "remove" ? "bg-red-400 hover:bg-red-300" : "bg-orange-400 hover:bg-orange-300",
+              )}
+            >
+              {pending === "remove" ? "Remove plugin" : "Replace"}
+            </button>
+          </div>
+        </div>
+      ) : (
+        <div>
+          <div className="flex items-center gap-2 rounded-md bg-black/40 px-2 py-1.5 ring-1 ring-white/10 focus-within:ring-orange-400/40">
+            <Ph name="search" className="h-4 w-4 shrink-0 text-stone-500" />
+            <input
+              autoFocus
+              value={query}
+              onChange={(e) => setQuery(e.target.value)}
+              placeholder="Search scanned plugins (name or vendor)…"
+              spellCheck={false}
+              className="w-full bg-transparent text-sm text-stone-100 outline-none placeholder:text-stone-600"
+            />
+          </div>
+          <div className="mt-3 min-h-[200px] max-h-[300px] overflow-auto rounded-lg border border-white/10 bg-black/30 p-2">
+            {plugins.length === 0 ? (
+              <div className="flex h-[180px] flex-col items-center justify-center gap-2 text-center text-stone-400">
+                <div>No scanned plugins yet.</div>
+                <div className="text-[11px] text-stone-500">
+                  Run a scan in the VST browser first — the picker lists real scan results only.
+                </div>
+              </div>
+            ) : rows.length === 0 ? (
+              <div className="flex h-[180px] items-center justify-center text-stone-400">
+                Nothing matches "{query}".
+              </div>
+            ) : (
+              <ul className="space-y-1">
+                {rows.map((p) => (
+                  <li key={p.uid + p.classId}>
+                    <button
+                      type="button"
+                      onClick={() => setPending(p)}
+                      className="flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-left text-sm hover:bg-white/5"
+                    >
+                      <Ph name="plug" className="h-4 w-4 shrink-0 text-orange-300" />
+                      <span className="min-w-0 flex-1 truncate">
+                        {p.name}
+                        {p.isInstrument ? (
+                          <span className="ml-2 rounded bg-emerald-500/15 px-1 py-0.5 text-[10px] font-medium text-emerald-300">
+                            instrument
+                          </span>
+                        ) : null}
+                        {p.capabilitiesError && (
+                          <Ph name="warning" className="ml-1.5 inline h-3.5 w-3.5 shrink-0 text-amber-400" />
+                        )}
+                      </span>
+                      <span className="shrink-0 text-[11px] text-stone-500">
+                        {[p.vendor, p.version].filter(Boolean).join(" · ")}
+                      </span>
+                    </button>
+                  </li>
+                ))}
+              </ul>
+            )}
+          </div>
+          <div className="mt-3 border-t border-white/10 pt-3">
+            <button
+              type="button"
+              onClick={() => setPending("remove")}
+              className="flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-left text-sm text-red-300 hover:bg-red-500/10"
+            >
+              <Ph name="trash" className="h-4 w-4 shrink-0" />
+              Remove plugin (back to the test synth)
+            </button>
+          </div>
+        </div>
+      )}
     </Modal>
   );
 }
