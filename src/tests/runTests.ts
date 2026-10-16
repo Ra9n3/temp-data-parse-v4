@@ -44,6 +44,7 @@ import { consolidateSustains } from "../generation/sustain";
 import { cc7ForWeight, acousticWeightForTrack, DEFAULT_BALANCE_CONFIG } from "../generation/balance";
 import { builtInProfileById, vst3EventAdapter } from "../plugins/expressionMaps";
 import { buildEngineStream, resolveInstanceRouting } from "../engine/engineStream";
+import { mergeScanProbe, type ScannedPlugin } from "../engine/engineClient";
 import userProjectJson from "../fixtures/user-project.json";
 import { mulberry32 } from "../generation/prng";
 import { snapshotDigest } from "../generation/efgGolden";
@@ -1053,6 +1054,28 @@ export function runUnitTests(): TestResult[] {
       const lateCc = late.find((e) => e.eventType === "CONTROL_CHANGE" && e.data1 === 32);
       assert(!!lateCc && lateCc.timestampTicks === 1004, "1042 − 38 = 1004 (real pre-trigger, no clamp)");
       return "20ms = 38 ticks @120bpm; clamp only at transport start; real offsets elsewhere";
+    }),
+    timed("Stage 3f-2: mergeScanProbe — probe results merge by classId, NEVER remove/change rows", () => {
+      const rows: ScannedPlugin[] = [
+        { name: "Synth A", vendor: "V", uid: "1", path: "/p/A.vst3", classId: "cid-a" },
+        { name: "Crashy B", vendor: "V", uid: "2", path: "/p/B.vst3", classId: "cid-b" },
+      ];
+      // Success merge: capabilities land on the RIGHT row; identity untouched.
+      const caps = { name: "Synth A", vendor: "V", version: "", isInstrument: true, acceptsMidi: true, producesMidi: false, isMidiEffect: false, hasEditor: false, numPrograms: 1, latencySamples: 0, tailSeconds: 0, supportsDoublePrecision: false, inputBuses: 0, outputBuses: 1, classId: "cid-a", buses: [] };
+      const okMerged = mergeScanProbe(rows, { type: "scan_probe", classId: "cid-a", capabilities: caps });
+      assert(okMerged.length === 2, "a probe must never add rows");
+      assert(okMerged[0].capabilities === caps && !okMerged[0].capabilitiesError, "capabilities merge into the matching row");
+      assert(okMerged[1] === rows[1], "other rows keep their reference");
+      // Failure merge: the row STAYS at the same index with the same identity,
+      // gaining only the capabilitiesError annotation.
+      const errMerged = mergeScanProbe(rows, { type: "scan_probe", classId: "cid-b", capabilitiesError: "probe worker crashed (exit 3)" });
+      assert(errMerged.length === 2 && errMerged[1].name === "Crashy B" && errMerged[1].path === "/p/B.vst3", "a failed probe never removes or re-identifies the row");
+      assert(errMerged[1].capabilitiesError === "probe worker crashed (exit 3)", "failed probe stores its capabilitiesError annotation");
+      assert(errMerged[0] === rows[0], "successful rows untouched by other probes' failures");
+      // Unknown classId: array returned by reference (no state churn).
+      const unknown = mergeScanProbe(rows, { type: "scan_probe", classId: "cid-unknown", capabilities: caps });
+      assert(unknown === rows, "a probe for an unknown classId is ignored entirely");
+      return "merge-by-classId keeps row count/identity/order; error rows stay listed with their annotation; unknown probes ignored";
     }),
   ];
 }

@@ -11,14 +11,37 @@
 //                     is reserved for panic and the play-time pre-panic guard.
 //   client -> server: {"type":"panic"}
 //   client -> server: {"type":"scan","dirs":[...]?}   (3c-1, OPTIONAL dirs;
-//                     default: %COMMONPROGRAMFILES%\VST3 + %APPDATA%\VST3 on
-//                     Windows, /usr/lib/vst3 + ~/.vst3 elsewhere)
+//                     default: %COMMONPROGRAMFILES%\VST3 +
+//                     %LOCALAPPDATA%\Programs\Common\VST3 + %APPDATA%\VST3 on
+//                     Windows, /usr/lib/vst3 + ~/.vst3 elsewhere; 3f-2: each
+//                     dir is walked RECURSIVELY up to 4 subfolder levels, and
+//                     a .vst3 hit is never descended into)
 //   server -> client: {"type":"scan_result","plugins":[{name,vendor,version,
-//                     uid,isInstrument,path}],"failed":[{path,error}],
-//                     "scannedDirs":[{dir,status}]}
-//                     Crash isolation: each .vst3 is scanned by a CHILD copy
-//                     of this exe (--scan-worker); a plugin that crashes or
-//                     hangs kills only its worker — the scan survives.
+//                     uid,classId,isInstrument,path}],"failed":[{path,error,
+//                     exitCode,elapsedMs,stderrTail}],"scannedDirs":[{dir,
+//                     status}]}
+//                     3f-2 DESCRIBE/PROBE SPLIT: a scan row is built ONLY
+//                     from findAllTypesForFile (the --scan-worker child never
+//                     instantiates; 20 s timeout). Duplicate classIds are
+//                     deduped — first by scan order wins. Crash isolation
+//                     still holds: each .vst3 is described by a CHILD copy of
+//                     this exe (--scan-worker); a plugin that crashes or
+//                     hangs during DESCRIBE kills only its worker.
+//                     Failed entries carry diagnostics (3f-2): the exit code,
+//                     the wall-clock elapsedMs, and the last 2000 chars of
+//                     the worker's stderr (JUCE merges the child's stdout and
+//                     stderr into one pipe — see handle_scan).
+//   server -> client: {"type":"scan_probe","classId":...,"capabilities":{...}}
+//                     | {"type":"scan_probe","classId":...,
+//                        "capabilitiesError":"..."}  (3f-2, ADDITIVE) — AFTER
+//                     scan_result, the engine probes each row SEQUENTIALLY
+//                     in the background: a --probe-worker child runs
+//                     createPluginInstance + prepareToPlay +
+//                     buildCapabilityFields with a 90 s timeout. A probe
+//                     failure, timeout or crash NEVER removes or changes the
+//                     row in the list — the frontend merges capabilities into
+//                     the stored row by classId, or keeps the row untouched
+//                     with only its capabilitiesError annotation.
 //   server -> client: {"type":"state","playing":bool,"tick":<n>,"peak":<f>}  (~30Hz;
 //                     while stopped, tick = the remembered stop position;
 //                     "peak" (3c-2, additive) = max |output| of the last buffer)
@@ -171,7 +194,7 @@
 
 namespace {
 
-constexpr const char* kEngineVersion = "0.8.0";
+constexpr const char* kEngineVersion = "0.8.1";
 constexpr int kProtocolVersion = 1;
 constexpr int kDefaultPort = 9377;
 constexpr int kMaxVoices = 64;
@@ -1885,16 +1908,19 @@ std::string escape_json(const std::string& s) {
     return out;
 }
 
-// ─── VST3 scan (Stage 3c-1) ─────────────────────────────────────────────────
-// Default directories per the brief: %COMMONPROGRAMFILES%\VST3 and
-// %APPDATA%\VST3 on Windows (the two standard per-machine / per-user VST3
-// locations); the POSIX conventions elsewhere for dev/CI convenience.
+// ─── VST3 scan (Stage 3c-1; 3f-2 describe/probe split) ──────────────────────
+// Default directories per the brief: %COMMONPROGRAMFILES%\VST3 (per-machine),
+// %LOCALAPPDATA%\Programs\Common\VST3 (per-user "Programs" location some
+// installers write into — 3f-2), and %APPDATA%\VST3 (per-user) on Windows;
+// the POSIX conventions elsewhere for dev/CI convenience.
 std::vector<std::string> defaultVst3Dirs() {
     std::vector<std::string> dirs;
 #ifdef _WIN32
     const char* cf = std::getenv("COMMONPROGRAMFILES");
+    const char* lad = std::getenv("LOCALAPPDATA");
     const char* ad = std::getenv("APPDATA");
     if (cf != nullptr) dirs.push_back(std::string(cf) + "\\VST3");
+    if (lad != nullptr) dirs.push_back(std::string(lad) + "\\Programs\\Common\\VST3");
     if (ad != nullptr) dirs.push_back(std::string(ad) + "\\VST3");
 #else
     dirs.push_back("/usr/lib/vst3");
@@ -1904,14 +1930,62 @@ std::vector<std::string> defaultVst3Dirs() {
     return dirs;
 }
 
+// 3f-2 — RECURSIVE discovery. Real-world VST3 layouts nest bundles several
+// folders deep (vendor/brand/product/Name.vst3), and a flat top-level walk
+// loses them. Walk `root` collecting every entry whose name ends in .vst3
+// (case-insensitive; a bundle DIRECTORY or a bare file): a hit is collected
+// and NEVER descended into (a .vst3 bundle contains the plugin's own tree —
+// scanning inside it would find the same classes again). Up to `depth`
+// subfolder levels below the root (task contract: max depth 4). Deterministic
+// order: entries at each level sorted case-insensitively by path, so
+// "first by path order" dedup (below) is reproducible.
+void collectVst3Paths(const juce::File& dir, int depth, std::vector<std::string>& out) {
+    juce::Array<juce::File> entries;
+    dir.findChildFiles(entries, juce::File::findFilesAndDirectories, false, "*");
+    std::vector<juce::File> sorted;
+    sorted.reserve(static_cast<size_t>(entries.size()));
+    for (const auto& e : entries) sorted.push_back(e);
+    std::sort(sorted.begin(), sorted.end(), [](const juce::File& a, const juce::File& b) {
+        const std::string as = a.getFullPathName().toStdString();
+        const std::string bs = b.getFullPathName().toStdString();
+        const auto n = std::min(as.size(), bs.size());
+        for (size_t i = 0; i < n; ++i) {
+            const int ca = std::tolower(static_cast<unsigned char>(as[i]));
+            const int cb = std::tolower(static_cast<unsigned char>(bs[i]));
+            if (ca != cb) return ca < cb;
+        }
+        return as.size() < bs.size();
+    });
+    for (const auto& entry : sorted) {
+        const std::string name = entry.getFileName().toStdString();
+        const bool isVst3 = name.size() >= 5 &&
+            std::equal(name.end() - 5, name.end(), ".vst3",
+                       [](char a, char b) { return std::tolower(static_cast<unsigned char>(a)) ==
+                                                    std::tolower(static_cast<unsigned char>(b)); });
+        if (isVst3) {
+            out.push_back(entry.getFullPathName().toStdString());
+            continue;   // never look INSIDE a .vst3
+        }
+        if (depth > 1 && entry.isDirectory())
+            collectVst3Paths(entry, depth - 1, out);
+    }
+}
+
 // Scan ONE path and print its plugin descriptions between markers.
 // Runs as a CHILD process (scorch-engine --scan-worker <path>): a plugin whose
 // module crashes or hangs during load kills only this child — the parent scan
 // records the failure and continues. Deliberately NO catch(...): a crashing
 // plugin must actually take this process down (that is the crash-isolation
 // contract the CI test proves); graceful load failures return zero types.
+// Stage 3f-2 — DESCRIBE ONLY: this worker prints the row identity
+// (name, vendor, version, uid, classId, isInstrument, path) from
+// findAllTypesForFile alone and NEVER instantiates. Instantiating here was
+// the 3e-1 "scanner loses plugins" defect: one library whose cold
+// first-instantiate wedged >45 s erased its (already-described) row and every
+// row behind it in the same worker. The instantiation work moved to
+// runProbeWorker (--probe-worker), a SEPARATE child per row.
 // Defined with the hosting code below (Stage 3e-1): the capability-record
-// builder both the WS handshake and the scan rows share.
+// builder both the WS handshake and the probe worker share.
 std::string buildCapabilityFields(juce::AudioPluginInstance& inst,
                                   const juce::PluginDescription& desc);
 
@@ -1919,8 +1993,6 @@ int runScanWorker(const std::string& path) {
     juce::VST3PluginFormat format;
     juce::OwnedArray<juce::PluginDescription> types;
     format.findAllTypesForFile(types, juce::String(path));
-    juce::AudioPluginFormatManager mgr;
-    mgr.addDefaultFormats();
     std::cout << "SCORCH_SCAN_BEGIN\n";
     for (const auto* t : types) {
         const juce::String displayName =
@@ -1930,34 +2002,85 @@ int runScanWorker(const std::string& path) {
                   << "\",\"version\":\"" << escape_json(t->version.toStdString())
                   << "\",\"uid\":\"" << escape_json(juce::String(t->uniqueId).toStdString())
                   << "\",\"isInstrument\":" << (t->isInstrument ? "true" : "false")
-                  // Stage 3e-1: the full VST3 class identifier string — the
-                  // rebind key the host prefers when loading by this row.
+                  // The full VST3 class identifier string (3e-1) — the
+                  // rebind key the host prefers when loading by this row,
+                  // and (3f-2) the key the scan_probe result merges by.
                   << ",\"classId\":\"" << escape_json(t->createIdentifierString().toStdString())
-                  << "\",\"path\":\"" << escape_json(path) << "\"";
-        // Stage 3e-1: best-effort capability record — instantiate the class
-        // and query its real buses/program/latency surface. Failure degrades
-        // gracefully (row ships without capabilities); a CRASH here still
-        // kills this worker (the isolation contract, unchanged).
-        juce::String instErr;
-        auto inst = mgr.createPluginInstance(*t, 44100.0, 512, instErr);
-        if (inst != nullptr) {
-            // Same capture ordering as loadHostedPlugin (3e-1): the module
-            // reports its real latency only after a prepare.
-            inst->prepareToPlay(44100.0, 512);
-            std::cout << ",\"capabilities\":{" << buildCapabilityFields(*inst, *t) << "}";
-        } else {
-            std::cout << ",\"capabilitiesError\":\"" << escape_json(instErr.toStdString()) << "\"";
-        }
-        std::cout << "}\n";
+                  << "\",\"path\":\"" << escape_json(path) << "\""
+                  << "}\n";
     }
     std::cout << "SCORCH_SCAN_END" << std::endl;
     return 0;
 }
 
-// Out-of-process directory scan. Each *.vst3 entry (bundle dir or file) is
-// scanned by a child copy of this exe with a hard 45s timeout (3e-1: the
-// worker also instantiates for the capability record); crashes and
-// hangs become per-file "failed" entries — the engine and the scan survive.
+// Stage 3f-2 — PROBE one row. Runs as a CHILD process (scorch-engine
+// --probe-worker <path> <classId>): the createPluginInstance +
+// prepareToPlay + buildCapabilityFields work the scan worker used to do
+// inline (3e-1), isolated so a wedged/crashing INSTANTIATE can no longer
+// erase the scan row it belongs to. Prints EXACTLY ONE JSON object between
+// the SCORCH_PROBE_BEGIN/END markers:
+//   success            {"classId":"…","capabilities":{…}}
+//   graceful failure   {"classId":"…","capabilitiesError":"…"}
+// A hard crash or a hang prints nothing — the PARENT classifies both (exit
+// code / 90 s timeout) and reports capabilitiesError itself.
+// The ScopedJuceInitialiser_GUI: a probe child is a fresh process that does
+// no other JUCE GUI work; if no initialiser is alive (the normal case here),
+// create one as the FIRST statement. SharedResourcePointer makes that
+// idempotent — if a future caller already holds one, this refs it instead of
+// double-initialising.
+int runProbeWorker(const std::string& path, const std::string& classId) {
+    static juce::SharedResourcePointer<juce::ScopedJuceInitialiser_GUI> juceInit;
+    (void) juceInit;
+    juce::VST3PluginFormat format;
+    juce::OwnedArray<juce::PluginDescription> types;
+    format.findAllTypesForFile(types, juce::String(path));
+    const juce::PluginDescription* chosen = nullptr;
+    for (const auto* t : types)
+        if (t->createIdentifierString() == juce::String(classId)) { chosen = t; break; }
+    if (chosen == nullptr) {
+        std::cout << "SCORCH_PROBE_BEGIN\n{\"classId\":\"" << escape_json(classId)
+                  << "\",\"capabilitiesError\":\"classId not found at " << escape_json(path)
+                  << "\"}\nSCORCH_PROBE_END" << std::endl;
+        return 0;
+    }
+    juce::AudioPluginFormatManager mgr;
+    mgr.addDefaultFormats();
+    juce::String instErr;
+    auto inst = mgr.createPluginInstance(*chosen, 44100.0, 512, instErr);
+    if (inst == nullptr) {
+        std::cout << "SCORCH_PROBE_BEGIN\n{\"classId\":\"" << escape_json(classId)
+                  << "\",\"capabilitiesError\":\"" << escape_json(instErr.toStdString())
+                  << "\"}\nSCORCH_PROBE_END" << std::endl;
+        return 0;
+    }
+    // Same capture ordering as loadHostedPlugin (3e-1): the module reports
+    // its real latency only after a prepare.
+    inst->prepareToPlay(44100.0, 512);
+    std::cout << "SCORCH_PROBE_BEGIN\n{\"classId\":\"" << escape_json(classId)
+              << "\",\"capabilities\":{" << buildCapabilityFields(*inst, *chosen)
+              << "}}\nSCORCH_PROBE_END" << std::endl;
+    return 0;
+}
+
+// ─── Stage 3f-2 — background scan probes ────────────────────────────────────
+// After scan_result goes out, each row is probed SEQUENTIALLY by the
+// dedicated probe thread in main(): one --probe-worker child per row (90 s
+// cap). The queue lives here; a fresher scan REPLACES pending jobs (its
+// rows already supersede), while a probe in flight still completes.
+struct ScanProbeJob { std::string path; std::string classId; };
+std::mutex g_scanProbeMutex;
+std::vector<ScanProbeJob> g_scanProbeQueue;
+std::condition_variable g_scanProbeCv;
+
+// Out-of-process directory scan (3f-2 DESCRIBE stage). Each *.vst3 entry
+// (bundle dir or file, found RECURSIVELY up to 4 subfolder levels) is
+// described by a child copy of this exe with a hard 20 s timeout — describe
+// is findAllTypesForFile ONLY (the instantiate work moved to --probe-worker).
+// Crashes and hangs become per-file "failed" entries that now CARRY THE
+// DIAGNOSTICS (exit code, wall-clock elapsedMs, last 2000 chars of the
+// worker's stderr) — the engine and the scan survive. Duplicate classIds are
+// deduped, first by scan order. The resulting rows are queued for the
+// background probes right after scan_result is sent.
 void handle_scan(const juce::var& json, ix::WebSocket& ws) {
     juce::DynamicObject* obj = json.getDynamicObject();
     std::vector<std::string> dirs;
@@ -1976,7 +2099,28 @@ void handle_scan(const juce::var& json, ix::WebSocket& ws) {
         juce::File::getSpecialLocation(juce::File::currentExecutableFile).getFullPathName();
 
     std::string pluginsJson, failedJson, scannedJson;
+    std::vector<ScanProbeJob> probeJobs;
+    std::unordered_set<std::string> seenClassIds;
     int pluginCount = 0, failedCount = 0;
+
+    // 3f-2 — one failed entry WITH DIAGNOSTICS: path, error, exitCode,
+    // elapsedMs and the last 2000 chars of the worker's output. JUCE's
+    // ChildProcess merges the child's stdout AND stderr into a single pipe
+    // on every platform (both dup2'd / STARTF_USESTDHANDLES onto one handle
+    // when both stream flags are set), so for a crashed or killed worker
+    // that tail IS the worker's stderr — the class of evidence the old
+    // "scanner worker crashed (exit N)" one-liner threw away.
+    auto addFailed = [&](const std::string& path, const std::string& error,
+                         int code, long long ms, const std::string& out) {
+        std::string tail = out.size() > 2000 ? out.substr(out.size() - 2000) : out;
+        if (!failedJson.empty()) failedJson += ",";
+        failedJson += std::string("{\"path\":\"") + escape_json(path) +
+                      "\",\"error\":\"" + escape_json(error) +
+                      "\",\"exitCode\":" + std::to_string(code) +
+                      ",\"elapsedMs\":" + std::to_string(ms) +
+                      ",\"stderrTail\":\"" + escape_json(tail) + "\"}";
+        ++failedCount;
+    };
 
     for (const auto& dir : dirs) {
         const juce::File dirFile(dir);
@@ -1987,49 +2131,52 @@ void handle_scan(const juce::var& json, ix::WebSocket& ws) {
         }
         scannedJson += std::string("{\"dir\":\"") + escape_json(dir) + "\",\"status\":\"scanned\"}";
 
-        // Deterministic scan order — no RNG: collect top-level *.vst3 entries
-        // (bundle dirs or files) and sort case-insensitively by path.
-        juce::Array<juce::File> entries;
-        dirFile.findChildFiles(entries, juce::File::findFilesAndDirectories, false, "*.vst3");
+        // 3f-2: RECURSIVE walk — vendor/product nests real libraries deep;
+        // max 4 subfolder levels below the root; a .vst3 hit is never
+        // descended into. Deterministic order (case-insensitive path sort at
+        // every level) → "keep the FIRST by path order" dedup is stable.
         std::vector<std::string> paths;
-        paths.reserve(static_cast<size_t>(entries.size()));
-        for (const auto& entry : entries) paths.push_back(entry.getFullPathName().toStdString());
-        std::sort(paths.begin(), paths.end(), [](const std::string& a, const std::string& b) {
-            const auto n = std::min(a.size(), b.size());
-            for (size_t i = 0; i < n; ++i) {
-                const int ca = std::tolower(static_cast<unsigned char>(a[i]));
-                const int cb = std::tolower(static_cast<unsigned char>(b[i]));
-                if (ca != cb) return ca < cb;
-            }
-            return a.size() < b.size();
-        });
+        collectVst3Paths(dirFile, 4, paths);
 
         for (const auto& path : paths) {
+            const auto t0 = std::chrono::steady_clock::now();
+            const auto elapsedMs = [&t0]() {
+                return std::chrono::duration_cast<std::chrono::milliseconds>(
+                    std::chrono::steady_clock::now() - t0).count();
+            };
             juce::ChildProcess child;
-            if (!child.start(juce::StringArray{ exePath, "--scan-worker", juce::String(path) })) {
-                if (!failedJson.empty()) failedJson += ",";
-                failedJson += std::string("{\"path\":\"") + escape_json(path) + "\",\"error\":\"scanner child failed to start\"}";
-                ++failedCount;
+            // Both stream flags EXPLICIT: the child's stdout+stderr arrive
+            // merged (see addFailed) — stderr is what a crash diagnosis
+            // reads.
+            const bool started = child.start(
+                juce::StringArray{ exePath, "--scan-worker", juce::String(path) },
+                juce::ChildProcess::wantStdOut | juce::ChildProcess::wantStdErr);
+            std::string out;
+            int exitCode = -1;
+            if (!started) {
+                addFailed(path, "scanner child failed to start", -1, elapsedMs(), out);
+                engineLog(std::string("[scan] path=") + path + " outcome=start-failed elapsedMs=" +
+                          std::to_string(elapsedMs()));
                 continue;
             }
-            if (!child.waitForProcessToFinish(45000)) {
-                // Stage 3e-1: 45s (was 15s) — the worker now ALSO
-                // instantiates each type for the capability record, and a
-                // cold first-instantiate of a large library is exactly the
-                // multi-second class the async-init receipts documented.
-                // Crashes still die instantly; hangs still bounded.
+            // 3f-2: 20 s describe timeout (was 45 s) — the worker no longer
+            // instantiates; describing a real library (module load +
+            // GetPluginFactory enumeration) is a seconds-scale job.
+            if (!child.waitForProcessToFinish(20000)) {
                 child.kill();
-                if (!failedJson.empty()) failedJson += ",";
-                failedJson += std::string("{\"path\":\"") + escape_json(path) + "\",\"error\":\"scanner timeout after 45s\"}";
-                ++failedCount;
+                out = child.readAllProcessOutput().toStdString();
+                addFailed(path, "scanner timeout after 20s", -1, elapsedMs(), out);
+                engineLog(std::string("[scan] path=") + path + " outcome=timeout elapsedMs=" +
+                          std::to_string(elapsedMs()));
                 continue;
             }
-            const int exitCode = child.getExitCode();
-            const std::string out = child.readAllProcessOutput().toStdString();
+            exitCode = child.getExitCode();
+            out = child.readAllProcessOutput().toStdString();
             if (exitCode != 0) {
-                if (!failedJson.empty()) failedJson += ",";
-                failedJson += std::string("{\"path\":\"") + escape_json(path) + "\",\"error\":\"scanner worker crashed (exit " + std::to_string(exitCode) + ")\"}";
-                ++failedCount;
+                addFailed(path, "scanner worker crashed (exit " + std::to_string(exitCode) + ")",
+                          exitCode, elapsedMs(), out);
+                engineLog(std::string("[scan] path=") + path + " outcome=crashed elapsedMs=" +
+                          std::to_string(elapsedMs()) + " exitCode=" + std::to_string(exitCode));
                 continue;
             }
             const std::string begin = "SCORCH_SCAN_BEGIN";
@@ -2037,13 +2184,14 @@ void handle_scan(const juce::var& json, ix::WebSocket& ws) {
             const auto b = out.find(begin);
             const auto e = out.find(end);
             if (b == std::string::npos || e == std::string::npos || e < b) {
-                if (!failedJson.empty()) failedJson += ",";
                 // Exit 0 but NO markers = the worker died mid-scan (SIGABRT /
                 // hard kill before printing — JUCE reports signal death as
                 // exit 0 on POSIX). Windows abort() surfaces as a real exit
                 // code above; here we still classify it as a crash.
-                failedJson += std::string("{\"path\":\"") + escape_json(path) + "\",\"error\":\"scanner produced no result (worker crashed or was killed)\"}";
-                ++failedCount;
+                addFailed(path, "scanner produced no result (worker crashed or was killed)",
+                          0, elapsedMs(), out);
+                engineLog(std::string("[scan] path=") + path + " outcome=crashed elapsedMs=" +
+                          std::to_string(elapsedMs()) + " (no markers, exit 0)");
                 continue;
             }
             // One compact JSON object per line between the markers.
@@ -2061,17 +2209,39 @@ void handle_scan(const juce::var& json, ix::WebSocket& ws) {
                 if (line.empty()) continue;
                 auto parsed = juce::JSON::parse(juce::String(line));
                 if (parsed.getDynamicObject() == nullptr) continue;
+                // 3f-2: the SAME classId found twice (nested layouts, copied
+                // bundles, overlapping dirs) keeps the FIRST row by scan
+                // order; the duplicate is dropped entirely — never a second
+                // row, never a second probe.
+                const std::string cid =
+                    parsed.getProperty("classId", juce::var("")).toString().toStdString();
+                if (!cid.empty() && !seenClassIds.insert(cid).second) continue;
                 if (!pluginsJson.empty()) pluginsJson += ",";
                 pluginsJson += line;
                 ++pluginCount;
+                if (!cid.empty()) probeJobs.push_back(ScanProbeJob{path, cid});
             }
+            engineLog(std::string("[scan] path=") + path + " outcome=ok elapsedMs=" +
+                      std::to_string(elapsedMs()));
         }
     }
 
     std::cout << "[engine] scan: " << pluginCount << " plugin(s), " << failedCount
               << " failed, dirs=" << dirs.size() << std::endl;
+    engineLog("[scan] summary: " + std::to_string(pluginCount) + " row(s), " +
+              std::to_string(failedCount) + " failed, dirs=" + std::to_string(dirs.size()) +
+              ", probing " + std::to_string(probeJobs.size()) + " row(s) in the background");
     ws.send(std::string("{\"type\":\"scan_result\",\"plugins\":[") + pluginsJson +
             "],\"failed\":[" + failedJson + "],\"scannedDirs\":[" + scannedJson + "]}");
+
+    // 3f-2 — the rows are SAFE in the frontend list; only now do the probes
+    // start (sequentially, on the dedicated thread). A probe failure can
+    // never retroactively remove the row it belongs to.
+    {
+        std::lock_guard<std::mutex> lock(g_scanProbeMutex);
+        g_scanProbeQueue = std::move(probeJobs);
+    }
+    g_scanProbeCv.notify_one();
 }
 
 // ─── Message handlers ───────────────────────────────────────────────────────
@@ -3265,12 +3435,19 @@ void handle_capture_state() {
 } // namespace
 
 int main(int argc, char** argv) {
-    // --scan-worker mode (Stage 3c-1): scan ONE .vst3 path, print JSON between
-    // markers, exit. Spawned by handle_scan() for crash isolation — never used
-    // by the app itself.
+    // --scan-worker mode (Stage 3c-1, 3f-2: DESCRIBE only): scan ONE .vst3
+    // path, print JSON rows between markers, exit. Spawned by handle_scan()
+    // for crash isolation — never used by the app itself.
+    // --probe-worker mode (Stage 3f-2): instantiate ONE class (path + classId)
+    // and print its capability record between markers, exit. A crash or a
+    // hang here costs that row's probe only — the row itself is already safe
+    // in the frontend list.
     for (int i = 1; i < argc; ++i) {
         if (std::string(argv[i]) == "--scan-worker" && i + 1 < argc) {
             return runScanWorker(argv[i + 1]);
+        }
+        if (std::string(argv[i]) == "--probe-worker" && i + 2 < argc) {
+            return runProbeWorker(argv[i + 1], argv[i + 2]);
         }
     }
 
@@ -3777,6 +3954,130 @@ int main(int argc, char** argv) {
         }
     });
 
+    // ─── Stage 3f-2 — background scan-probe thread ─────────────────────────
+    // Probes each queued scan row SEQUENTIALLY: one --probe-worker child per
+    // row (90 s cap, waited in 250 ms slices so shutdown never stalls). A
+    // probe failure, timeout or crash sends a capabilitiesError scan_probe —
+    // it can NEVER remove or change a row (rows were already sent with
+    // scan_result; the frontend merges by classId).
+    std::thread scan_probe_thread([&server]() {
+        const juce::String exePath =
+            juce::File::getSpecialLocation(juce::File::currentExecutableFile).getFullPathName();
+        while (!g_should_exit.load()) {
+            ScanProbeJob job;
+            {
+                std::unique_lock<std::mutex> lock(g_scanProbeMutex);
+                g_scanProbeCv.wait_for(lock, std::chrono::milliseconds(200), [] {
+                    return !g_scanProbeQueue.empty() || g_should_exit.load();
+                });
+                if (g_should_exit.load()) break;
+                if (g_scanProbeQueue.empty()) continue;
+                job = g_scanProbeQueue.front();
+                g_scanProbeQueue.erase(g_scanProbeQueue.begin());
+            }
+            const auto t0 = std::chrono::steady_clock::now();
+            const auto elapsedMs = [&t0]() {
+                return std::chrono::duration_cast<std::chrono::milliseconds>(
+                    std::chrono::steady_clock::now() - t0).count();
+            };
+            std::string resultInner;   // the fields after {"type":"scan_probe",
+            std::string tailForLog;    // stderr evidence for the failure classes
+            const char* outcome = "error";
+            juce::ChildProcess child;
+            const bool started = child.start(
+                juce::StringArray{ exePath, "--probe-worker",
+                                   juce::String(job.path), juce::String(job.classId) },
+                juce::ChildProcess::wantStdOut | juce::ChildProcess::wantStdErr);
+            if (!started) {
+                // 3f-2: EVERY scan_probe names its row — the classId is how
+                // the frontend merges (and a failure must still be able to
+                // annotate its row; a probe never removes one).
+                resultInner = "\"classId\":\"" + escape_json(job.classId) +
+                              "\",\"capabilitiesError\":\"probe worker failed to start\"";
+                outcome = "start-failed";
+            } else {
+                // 90 s cap — 360 × 250 ms slices; g_should_exit checked between
+                // slices so engine shutdown never waits behind a hung probe.
+                bool finished = false;
+                for (int i = 0; i < 360 && !finished; ++i) {
+                    finished = child.waitForProcessToFinish(250);
+                    if (g_should_exit.load()) break;
+                }
+                if (!finished) {
+                    child.kill();
+                    tailForLog = child.readAllProcessOutput().toStdString();
+                    resultInner = "\"classId\":\"" + escape_json(job.classId) +
+                                  "\",\"capabilitiesError\":\"probe timeout after 90s\"";
+                    outcome = "timeout";
+                } else {
+                    const int exitCode = child.getExitCode();
+                    const std::string out = child.readAllProcessOutput().toStdString();
+                    if (exitCode != 0) {
+                        resultInner = "\"classId\":\"" + escape_json(job.classId) +
+                                      "\",\"capabilitiesError\":\"probe worker crashed (exit " +
+                                      std::to_string(exitCode) + ")\"";
+                        outcome = "crashed";
+                        tailForLog = out;
+                    } else {
+                        const std::string pb = "SCORCH_PROBE_BEGIN";
+                        const std::string pe = "SCORCH_PROBE_END";
+                        const auto b = out.find(pb);
+                        const auto e = out.find(pe);
+                        if (b == std::string::npos || e == std::string::npos || e < b) {
+                            // Exit 0 but no markers — the JUCE POSIX wrapper
+                            // reports signal death as exit 0; still a crash.
+                            resultInner = "\"classId\":\"" + escape_json(job.classId) +
+                                          "\",\"capabilitiesError\":\"probe worker produced no result (crashed or killed)\"";
+                            outcome = "crashed";
+                            tailForLog = out;
+                        } else {
+                            std::string body = out.substr(b + pb.size(), e - (b + pb.size()));
+                            const auto f = body.find_first_not_of(" \t\r\n");
+                            if (f == std::string::npos) {
+                                resultInner = "\"classId\":\"" + escape_json(job.classId) +
+                                              "\",\"capabilitiesError\":\"probe worker produced empty output\"";
+                                tailForLog = out;
+                            } else {
+                                body = body.substr(f, body.find_last_not_of(" \t\r\n") - f + 1);
+                                auto parsed = juce::JSON::parse(juce::String(body));
+                                if (parsed.getDynamicObject() == nullptr) {
+                                    resultInner = "\"classId\":\"" + escape_json(job.classId) +
+                                                  "\",\"capabilitiesError\":\"probe worker produced unparsable output\"";
+                                    tailForLog = out;
+                                } else {
+                                    // The worker already wrapped classId +
+                                    // capabilities/capabilitiesError in a
+                                    // JSON object — forward its FIELDS
+                                    // verbatim (the send site below wraps
+                                    // them as {"type":"scan_probe", …}).
+                                    resultInner = body.substr(1, body.size() - 2);
+                                    outcome = parsed.getProperty("capabilities", juce::var())
+                                                  .getDynamicObject() != nullptr ? "ok" : "error";
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            if (!g_should_exit.load() && !resultInner.empty()) {
+                const std::string msg = "{\"type\":\"scan_probe\"," + resultInner + "}";
+                for (auto& client : server.getClients())
+                    if (client) client->send(msg);
+            }
+            std::string logLine = std::string("[probe] path=") + job.path +
+                                  " outcome=" + outcome +
+                                  " elapsedMs=" + std::to_string(elapsedMs());
+            if (!tailForLog.empty()) {
+                const std::string tail =
+                    tailForLog.size() > 2000 ? tailForLog.substr(tailForLog.size() - 2000) : tailForLog;
+                logLine += " stderrTail=" + tail;
+            }
+            engineLog(logLine);
+            std::cout << "[engine] scan_probe " << outcome
+                      << " (" << elapsedMs() << "ms)" << std::endl;
+        }
+    });
+
     std::cout << "[engine] scorch-engine " << kEngineVersion
               << " listening on 127.0.0.1:" << port << std::endl;
 
@@ -3794,6 +4095,9 @@ int main(int argc, char** argv) {
     server.stop();
     state_thread.join();
     plugin_init_thread.join();
+    // Stage 3f-2: the probe thread checks g_should_exit between its 250 ms
+    // wait slices and kills any in-flight probe child — join is bounded.
+    scan_probe_thread.join();
     // Stage 3d-1: graceful exit closes editor windows FIRST (bounded wait —
     // the pump is still running). A hard kill needs nothing: the OS reaps
     // the process's windows, so orphans are impossible either way.

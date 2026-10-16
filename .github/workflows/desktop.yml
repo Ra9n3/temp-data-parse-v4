@@ -98,6 +98,34 @@ jobs:
           New-Item -ItemType Directory -Path $corruptDir -Force | Out-Null
           [System.IO.File]::WriteAllBytes("$corruptDir\CorruptDummy.vst3", [System.Text.Encoding]::ASCII.GetBytes("this is not a PE module — garbage"))
           Write-Host "Corrupt fixture written"
+
+          # 4. Probe dummies (Stage 3f-2): their bundle carries a valid
+          #    Contents/Resources/moduleinfo.json, so DESCRIBE succeeds on the
+          #    fast path and NEVER loads the binary — but the binary fails
+          #    when the PROBE actually loads it. ProbeHangDummy sleeps forever
+          #    in GetPluginFactory (proves the 90 s probe timeout sends
+          #    capabilitiesError without removing the row); ProbeCrashDummy
+          #    aborts there (proves probe-crash isolation keeps the row) and
+          #    lives in a nested subfolder tree, which doubles as the proof
+          #    that the recursive scan finds plugins up to 4 levels deep.
+          $probeSrc = "engine\testvst\probedummy.c"
+          $hangBundle = Join-Path $fx "ProbeHangDummy.vst3"
+          $hangBin = Join-Path $hangBundle "Contents\x86_64-win"
+          New-Item -ItemType Directory -Path $hangBin -Force | Out-Null
+          New-Item -ItemType Directory -Path (Join-Path $hangBundle "Contents\Resources") -Force | Out-Null
+          cl /nologo /LD /DPROBE_HANG=1 $probeSrc /Fe:"$hangBin\ProbeHangDummy.vst3"
+          if (-not (Test-Path "$hangBin\ProbeHangDummy.vst3")) { throw "probe hang dummy build failed" }
+          Copy-Item engine\testvst\fixtures\probe-hang-moduleinfo.json (Join-Path $hangBundle "Contents\Resources\moduleinfo.json")
+          Write-Host "Probe hang fixture built"
+
+          $crashBundle = Join-Path $fx "nested\L1\L2\ProbeCrashDummy.vst3"
+          $crashBin = Join-Path $crashBundle "Contents\x86_64-win"
+          New-Item -ItemType Directory -Path $crashBin -Force | Out-Null
+          New-Item -ItemType Directory -Path (Join-Path $crashBundle "Contents\Resources") -Force | Out-Null
+          cl /nologo /LD $probeSrc /Fe:"$crashBin\ProbeCrashDummy.vst3"
+          if (-not (Test-Path "$crashBin\ProbeCrashDummy.vst3")) { throw "probe crash dummy build failed" }
+          Copy-Item engine\testvst\fixtures\probe-crash-moduleinfo.json (Join-Path $crashBundle "Contents\Resources\moduleinfo.json")
+          Write-Host "Probe crash fixture built (nested 3 levels deep)"
           "SCAN_FIXTURES=$fx" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
 
       - name: Engine standalone protocol test (null-audio + graceful no-device + scan + host + real-scale paths)
@@ -224,6 +252,22 @@ jobs:
             $scanProof = Select-String -Path "engine-c-stdout.txt" -Pattern "\[engine\] scan: "
             if (-not $scanProof) { throw "scan proof missing: no '[engine] scan:' lines in engine stdout" }
             foreach ($l in $scanProof.Line) { Write-Host "Scan proof: $l" }
+            # Stage 3f-2 receipt assertions (engine.log — cleaned at step start):
+            # one [scan] line PER SCANNED plugin (path/outcome/elapsedMs), a
+            # summary naming the probed-row count, and one [probe] line per
+            # probe outcome class (ok + timeout + crashed must ALL exist —
+            # the ProbeHangDummy eats its 90 s; ProbeCrashDummy dies).
+            $scanLines = Select-String -Path (Join-Path $env:APPDATA "scorch\engine.log") -Pattern "\[scan\] path="
+            if (-not $scanLines) { throw "3f-2 receipt missing: no '[scan] path=' lines in engine.log" }
+            Write-Host "[scan] per-plugin receipt lines: $($scanLines.Count)"
+            $scanSummary = Select-String -Path (Join-Path $env:APPDATA "scorch\engine.log") -Pattern "\[scan\] summary: .*probing"
+            if (-not $scanSummary) { throw "3f-2 receipt missing: no '[scan] summary ... probing' line in engine.log" }
+            foreach ($l in $scanSummary.Line) { Write-Host "Scan summary: $l" }
+            foreach ($required in @("outcome=ok", "outcome=timeout", "outcome=crashed")) {
+              $probeLine = Select-String -Path (Join-Path $env:APPDATA "scorch\engine.log") -Pattern ("\[probe\] .*" + [regex]::Escape($required))
+              if (-not $probeLine) { throw "3f-2 receipt missing: no '[probe] ... $required' line in engine.log" }
+              Write-Host "Probe proof: $($probeLine.Line.Substring(0, [Math]::Min(120, $probeLine.Line.Length)))"
+            }
             $procC.WaitForExit(10000) | Out-Null
             if (-not $procC.HasExited -or $procC.ExitCode -ne 0) { throw "Engine C did not exit cleanly (code=$($procC.ExitCode))" }
             Write-Host "Engine C clean exit 0 (scan + crash isolation verified)"

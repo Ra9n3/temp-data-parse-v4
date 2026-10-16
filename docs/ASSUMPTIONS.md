@@ -1411,3 +1411,69 @@ an update-mode uninstall really preserves them. Those are the user's by-hand
 acceptance steps on Windows (stated in the commit message). A `$UpdateMode`
 rename in a future Tauri bundler would fail the CI grep loudly rather than
 silently break the guard.
+
+## Stage 3f-2 — the scanner must not lose plugins (describe/probe split)
+
+The user lost plugins from the VST library list. Forensics across the three
+receipt streams named three causes; each is fixed at the hosting layer with
+zero plugin-name logic.
+
+**Cause 1 — instantiate-in-describe.** The 3e-1 scan worker instantiated every
+class it described (for the capability record). A library whose cold
+first-instantiate wedges (licence checks, sample-set pre-scans, DRM phone-home)
+hit the worker's 45 s timeout, and the worker's death erased ITS OWN
+already-described row plus every row behind it in the same worker. Describe and
+probe are now SEPARATE processes: describe is `findAllTypesForFile` only
+(20 s worker cap), probe is a dedicated `--probe-worker <path> <classId>` child
+per row (90 s cap) run AFTER `scan_result` has been sent. A probe failure can
+never retroactively remove the row it belongs to — the row was already in the
+frontend list, and the failure arrives as a `capabilitiesError` annotation
+merged by classId. Assumption to revisit: a probe that takes tens of seconds
+delays the capability record of large libraries (by design — the row itself is
+never blocked on it); if real libraries routinely probe slower than 90 s, the
+next step is per-row progress receipts, not a bigger timeout.
+
+**Cause 2 — flat scan.** The scan walked only TOP-LEVEL `.vst3` entries; real
+installers nest bundles (vendor/brand/product/Name.vst3). Each dir is now
+walked recursively up to 4 subfolder levels, never descending INTO a `.vst3`
+(the bundle's own tree would re-find the same classes), deterministically
+ordered (case-insensitive path sort) so the "first by scan order" classId dedup
+across overlapping dirs is stable. Windows scan defaults gain
+`%LOCALAPPDATA%\Programs\Common\VST3`. The dialog gains persisted extra-folder
+paths (localStorage `scorch.scanDirs`) that ride every scan message — chosen
+over a folder picker because Tauri's dialog/fs capabilities would add shell
+permissions for zero additional reach (the engine already opens arbitrary
+paths).
+
+**Cause 3 — evidence-free failures.** A failed entry used to be one error
+string; a crashed worker's stderr was discarded with the pipe. Failed entries
+now carry exitCode, elapsedMs and the last 2000 chars of the worker's merged
+stdout+stderr (JUCE's ChildProcess merges both streams when both stream flags
+are set), shown in the dialog (path + error + elapsed, tail on hover), and
+every scan/probe writes an engineLog receipt line. Diagnosis of a real
+library's scan failure should now be a copy-paste, not a by-ear session.
+
+**Fixture lesson (bit us locally).** JUCE's describe fast path parses
+`Contents/Resources/moduleinfo.json` and NEVER loads the binary — but the VST3
+SDK's parser requires `SDKVersion` AND `Cardinality` keys per class (plus
+`Class Flags`); a manifest missing them parses as EMPTY and JUCE silently falls
+back to loading the binary. Our first probe-dummy manifests lacked those keys,
+so "describe" crashed/hung in `GetPluginFactory` exactly like the old world.
+Fixed in the committed fixtures; worth remembering when adding any fixture
+whose describe must not touch the binary.
+
+**What CI proves:** the describe/probe split (scan rows carry NO capability
+fields), recursive discovery + classId dedup (a bundle reachable from TWO
+scanned dirs yields exactly ONE row), per-failure diagnostics (exitCode +
+elapsedMs + stderrTail on every failed entry), all three probe outcome classes
+(capabilities / probe-crash isolation / probe-timeout isolation) with rows
+never removed, engine liveness (ping→pong) after ALL probes, and the engineLog
+receipt lines per scanned plugin, per summary and per probe.
+
+**What CI cannot prove (by-ear/by-hand on real Windows):** a real
+multi-gigabyte library whose first-instantiate wedges surviving in the list
+with its capabilitiesError; per-user installer VST3 layouts landing in
+`Programs\Common\VST3`; the scan UX feel (probe results streaming in seconds
+after the list appears); and the ProbeHangDummy's real-library analogue (a
+licence-server wait inside `GetPluginFactory`) — the 90 s probe timeout is a
+policy number that may need re-tuning by ear.

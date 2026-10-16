@@ -1,0 +1,23 @@
+{
+  "Name": "ProbeCrashDummy",
+  "Version": "1.0.0",
+  "Factory Info": {
+    "Vendor": "Scorch CI",
+    "URL": "",
+    "E-Mail": "",
+    "Flags": {}
+  },
+  "Classes": [
+    {
+      "CID": "5C0C1A7B00004F0B9E1D2C3A4B5D6E7F",
+      "Category": "Audio Module Class",
+      "Name": "ProbeCrashDummy",
+      "Vendor": "Scorch CI",
+      "Version": "1.0.0",
+      "SDKVersion": "VST 3.7.12",
+      "Sub Categories": ["Instrument", "Synth"],
+      "Class Flags": 0,
+      "Cardinality": 2147483647
+    }
+  ]
+}

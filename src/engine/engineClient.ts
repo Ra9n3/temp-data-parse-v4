@@ -85,12 +85,30 @@ export interface ScannedPlugin {
   uid: string;
   isInstrument?: boolean;
   path: string;
+  /** 3e-1/3f-2: the full VST3 class identifier string
+   * (PluginDescription::createIdentifierString()) — the load-matching key
+   * and the merge key scan_probe results address the row by. */
+  classId?: string;
+  /** 3f-2: NEVER present in scan_result itself (describe never instantiates);
+   * merged into the stored row when the engine's background scan_probe
+   * succeeds. */
+  capabilities?: ScanPluginCapabilities;
+  /** 3f-2: annotation from a FAILED probe. A probe failure NEVER removes or
+   * changes the row's identity — the row stays listed and usable. */
+  capabilitiesError?: string;
 }
 
-/** Stage 3c-1 — a .vst3 whose scan-worker child crashed or timed out. */
+/** Stage 3c-1 — a .vst3 whose scan-worker child crashed or timed out.
+ * Stage 3f-2: every failed entry also carries the diagnostics (exit code,
+ * wall-clock elapsed ms, and the last 2000 chars of the worker's stderr —
+ * JUCE merges the child's stdout+stderr into one pipe, so for a crashed
+ * worker that tail IS the stderr evidence). */
 export interface ScanFailedEntry {
   path: string;
   error: string;
+  exitCode?: number;
+  elapsedMs?: number;
+  stderrTail?: string;
 }
 
 export interface ScanResultMessage {
@@ -98,6 +116,40 @@ export interface ScanResultMessage {
   plugins: ScannedPlugin[];
   failed: ScanFailedEntry[];
   scannedDirs: { dir: string; status: string }[];
+}
+
+/** 3f-2 — the capability record as a scan probe reports it: the same shape
+ * the plugin_capabilities handshake carries, minus the instanceId wrapper
+ * (a scan row is not a hosted instance). */
+export type ScanPluginCapabilities = Omit<PluginCapabilitiesMessage, "type" | "instanceId">;
+
+/** 3f-2 — ONE per scan row, sent by the engine's background probe thread
+ * AFTER scan_result: capabilities on success, capabilitiesError on failure
+ * (timeout / crash / graceful instantiate refusal). A failure never removes
+ * or changes the row — see mergeScanProbe. */
+export interface ScanProbeMessage {
+  type: "scan_probe";
+  classId: string;
+  capabilities?: ScanPluginCapabilities;
+  capabilitiesError?: string;
+}
+
+/** 3f-2 — merge one engine scan_probe into the stored scan rows.
+ * Contract: a probe NEVER adds, removes, reorders or re-identifies rows.
+ * A matching row gains `capabilities` (success) or `capabilitiesError`
+ * (failure, only when it has no capabilities yet). Unknown classIds are
+ * ignored (same-array reference returned — callers can skip state churn). */
+export function mergeScanProbe(plugins: ScannedPlugin[], msg: ScanProbeMessage): ScannedPlugin[] {
+  const idx = plugins.findIndex((p) => p.classId !== undefined && p.classId === msg.classId);
+  if (idx < 0) return plugins;
+  const next = plugins.slice();
+  const row = next[idx];
+  if (msg.capabilities) {
+    next[idx] = { ...row, capabilities: msg.capabilities, capabilitiesError: undefined };
+  } else if (msg.capabilitiesError && !row.capabilities) {
+    next[idx] = { ...row, capabilitiesError: msg.capabilitiesError };
+  }
+  return next;
 }
 
 /** Stage 3c-2 — hosting outcome. "loaded" carries the real name/vendor/latency
@@ -232,7 +284,7 @@ export interface PluginSavedStateMessage {
   state?: "too_large";
 }
 
-type EngineMessage = HelloMessage | PongMessage | ErrorMessage | StateMessage | ScanResultMessage | PluginStateMessage | LoadAckMessage | EditorEventMessage | PluginSavedStateMessage | PluginCapabilitiesMessage;
+type EngineMessage = HelloMessage | PongMessage | ErrorMessage | StateMessage | ScanResultMessage | ScanProbeMessage | PluginStateMessage | LoadAckMessage | EditorEventMessage | PluginSavedStateMessage | PluginCapabilitiesMessage;
 
 // Deterministic backoff sequence (seconds): 1, 2, 4, 8, 16 — no jitter.
 const BACKOFF_SEQUENCE = [1, 2, 4, 8, 16] as const;
@@ -296,6 +348,10 @@ export class EngineClient {
   private onStateChange: ((playing: boolean, tick: number) => void) | null = null;
   private onAudioErrorChange: ((code: string | null, detail: string) => void) | null = null;
   private onScanResultChange: ((result: ScanResultMessage) => void) | null = null;
+  // Stage 3f-2: background probe results (capabilities / capabilitiesError
+  // per scan-row classId) — pushed to the app, which merges them into the
+  // stored rows via mergeScanProbe.
+  private onScanProbeChange: ((msg: ScanProbeMessage) => void) | null = null;
   private onPluginStateChange: ((result: PluginStateMessage) => void) | null = null;
   // Stage 3d-1: editor window open/close events (engine-owned popups).
   private onEditorChange: ((msg: EditorEventMessage) => void) | null = null;
@@ -344,6 +400,12 @@ export class EngineClient {
   /** Stage 3c-1: register a callback for VST3 scan results. */
   onScanResult(cb: (result: ScanResultMessage) => void): void {
     this.onScanResultChange = cb;
+  }
+
+  /** Stage 3f-2: register a callback for background scan probe results
+   * (capabilities / capabilitiesError per scan-row classId). */
+  onScanProbe(cb: (msg: ScanProbeMessage) => void): void {
+    this.onScanProbeChange = cb;
   }
 
   /** Stage 3c-2: register a callback for plugin hosting outcomes. */
@@ -426,6 +488,10 @@ export class EngineClient {
           }
         } else if (msg.type === "scan_result") {
           this.onScanResultChange?.(msg);
+        } else if (msg.type === "scan_probe") {
+          // Stage 3f-2: one per row AFTER scan_result — the app merges it
+          // into the stored row by classId (failures never remove rows).
+          this.onScanProbeChange?.(msg);
         } else if (msg.type === "plugin_state") {
           this.onPluginStateChange?.(msg);
         } else if (msg.type === "editorOpened" || msg.type === "editorClosed") {

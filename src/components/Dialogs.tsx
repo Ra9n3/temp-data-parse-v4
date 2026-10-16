@@ -14,7 +14,7 @@ import type { ExportTrackMode } from "../export/midi";
 import { exportMergedMidi, exportPerTrackMidi } from "../export/midi";
 import { exportProjectJson } from "../export/json";
 import { MASTER_GAIN, ROLE_PREVIEW_GAIN_TRIM } from "../audio/usePlayback";
-import { type MixOverrides, clearMixOverrides, readMixOverrides, saveMixOverrides } from "../state/persistence";
+import { type MixOverrides, clearMixOverrides, readMixOverrides, saveMixOverrides, readExtraScanDirs, saveExtraScanDirs } from "../state/persistence";
 import type { Note, Project, Track } from "../shared/schema/types";
 import { projectEndTick, ticksPerBar, ticksPerBeat } from "../shared/schema/time";
 import { midiName } from "../generation/generate";
@@ -75,11 +75,18 @@ export function VstBrowser({
    * preview), the browser-only MOCK scan stays exactly as it was. In desktop
    * mode the listing comes from the engine's crash-isolated VST3 scan (real
    * name + vendor), and failed entries come from the scan's isolation report.
+   * Stage 3f-2: onScan carries the dialog's extra folder paths (one per line,
+   * persisted under localStorage "scorch.scanDirs") alongside the shell's
+   * defaults.
    */
-  desktop?: { result: { plugins: ScannedPlugin[]; failed: ScanFailedEntry[] } | null; onScan: () => void } | null;
+  desktop?: { result: { plugins: ScannedPlugin[]; failed: ScanFailedEntry[] } | null; onScan: (extraDirs?: string[]) => void } | null;
 }) {
   const [query, setQuery] = useState("");
   const [loaded, setLoaded] = useState(0);
+  // Stage 3f-2: extra scan folders, one path per line, persisted under
+  // "scorch.scanDirs" (no folder picker, no new Tauri permissions — the
+  // engine receives them with the scan message next to the shell defaults).
+  const [extraDirsText, setExtraDirsText] = useState(() => readExtraScanDirs().join("\n"));
   const total = MOCK_PLUGINS.length;
   const isDesktop = desktop !== null;
 
@@ -143,8 +150,24 @@ export function VstBrowser({
         )}
       </div>
       <div className="text-[11px] text-stone-500">
-        {isDesktop ? "Scan: standard VST3 directories (per-machine + per-user)" : `Scan directory: ${DEFAULT_SCAN_DIR}`}
+        {isDesktop ? "Scan: standard VST3 directories (per-machine, per-user Programs, per-user) + extra folders below" : `Scan directory: ${DEFAULT_SCAN_DIR}`}
       </div>
+      {isDesktop && (
+        <div className="mt-2">
+          <label className="text-[11px] uppercase tracking-wide text-stone-500" htmlFor="scorch-extra-scan-dirs">
+            Extra folders (one path per line, saved locally)
+          </label>
+          <textarea
+            id="scorch-extra-scan-dirs"
+            value={extraDirsText}
+            onChange={(e) => setExtraDirsText(e.target.value)}
+            rows={2}
+            spellCheck={false}
+            placeholder={"D:\\Audio\\VST3\n\\\\nas\\share\\Plugins"}
+            className="mt-1 w-full resize-y rounded-md bg-black/40 px-2 py-1.5 font-mono text-xs outline-none ring-1 ring-white/10 focus:ring-orange-400/40"
+          />
+        </div>
+      )}
       <div className="mt-3 min-h-[220px] rounded-lg border border-white/10 bg-black/30 p-3">
         {state === "scanning" && (
           <div className="flex h-[200px] flex-col items-center justify-center gap-3 text-stone-300">
@@ -172,7 +195,11 @@ export function VstBrowser({
               className="rounded-md bg-orange-500 px-3 py-1.5 text-sm font-medium text-black"
               onClick={() => {
                 if (isDesktop) {
-                  desktop?.onScan();
+                  // 3f-2: persist the extra dirs and ride them with the scan
+                  // message (next to the shell's default folders).
+                  const extras = extraDirsText.split(/[\r\n]+/).map((s) => s.trim()).filter(Boolean);
+                  saveExtraScanDirs(extras);
+                  desktop?.onScan(extras);
                   return;
                 }
                 onState("scanning");
@@ -210,9 +237,28 @@ export function VstBrowser({
               );
             })}
             {(isDesktop ? realFailed : MOCK_PLUGINS.filter((p) => p.failed)).map((p) => (
-              <li key={"error" in p ? p.path : p.id} className="flex items-center gap-2 px-2 py-1 text-xs text-red-400">
-                <Ph name="warning" className="h-3.5 w-3.5" />
-                Failed: {"error" in p ? p.path.split(/[\\/]/).pop()?.replace(/\.vst3$/i, "") ?? p.path : pluginDisplayName(p.rawName)}
+              <li key={"error" in p ? p.path : p.id} className="px-2 py-1 text-xs text-red-400">
+                {"error" in p ? (
+                  // Stage 3f-2: the failed list shows PATH + ERROR + ELAPSED —
+                  // the diagnostics the scan carries per failed entry.
+                  <>
+                    <div className="flex items-start gap-2">
+                      <Ph name="warning" className="mt-0.5 h-3.5 w-3.5 shrink-0" />
+                      <span className="min-w-0 break-all" title={p.path}>{p.path}</span>
+                      {typeof p.elapsedMs === "number" && (
+                        <span className="ml-auto shrink-0 whitespace-nowrap text-red-300/70">
+                          {(p.elapsedMs / 1000).toFixed(1)}s
+                        </span>
+                      )}
+                    </div>
+                    <div className="pl-5 text-red-300/90" title={p.stderrTail}>{p.error}</div>
+                  </>
+                ) : (
+                  <div className="flex items-center gap-2">
+                    <Ph name="warning" className="h-3.5 w-3.5" />
+                    Failed: {pluginDisplayName(p.rawName)}
+                  </div>
+                )}
               </li>
             ))}
             <li className="pt-2 text-[11px] uppercase tracking-wide text-stone-500">Built-in expression maps</li>

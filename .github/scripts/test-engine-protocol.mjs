@@ -23,18 +23,29 @@
 //     error (the historical 0xC0000005 headless crash is now a clean reply) and
 //     the engine stays protocol-functional afterwards (ping/pong, stop, seek,
 //     panic, shutdown → clean exit).
-//   scan (argv[4] = fixture dir) — Stage 3c-1: VST3 scan-protocol proof. Sends
-//     {"type":"scan","dirs":[fixtureDir]} where the fixture dir contains
+//   scan (argv[4] = fixture dir) — Stage 3c-1 + 3f-2: VST3 scan-protocol
+//     proof with the DESCRIBE/PROBE split. Sends
+//     {"type":"scan","dirs":[fixtureDir, fixtureDir/nested/L1/L2]} where the
+//     fixture dir contains
 //       * the VALID free test VST3 ("Scorch Test Synth", must be found with
-//         its real name + vendor + isInstrument),
+//         its real name + vendor + isInstrument + classId),
 //       * CrashDummy.vst3 (a VALID shared library that aborts inside
-//         GetPluginFactory — kills its scan-worker child),
-//       * CorruptDummy.vst3 (garbage bytes — graceful zero-type load failure).
-//     Asserts: the valid plugin is found; the crash dummy appears as a failed
-//     entry AND does not kill the scan or the engine (ping→pong after); the
-//     corrupt dummy is isolated silently (zero types, no failed entry); a
-//     default-dir scan returns a clean (possibly empty) result; shutdown →
-//     clean exit.
+//         GetPluginFactory — kills its scan-worker child during DESCRIBE),
+//       * CorruptDummy.vst3 (garbage bytes — graceful zero-type load failure),
+//       * ProbeCrashDummy.vst3 nested 3 subfolder levels deep (describes via
+//         its moduleinfo.json WITHOUT loading the binary; aborts in
+//         GetPluginFactory when the PROBE loads it),
+//       * ProbeHangDummy.vst3 (describes fine; sleeps forever in
+//         GetPluginFactory — eats the 90 s probe timeout).
+//     Asserts: the valid plugin is found and carries NO capabilities (the
+//     split); the nested dummy appears EXACTLY ONCE (recursive scan + classId
+//     dedup across the two dirs); the crash dummy appears as a failed entry
+//     WITH exitCode+elapsedMs+stderrTail AND does not kill the scan or the
+//     engine (ping→pong); the corrupt dummy is isolated silently; ALL THREE
+//     scan_probes arrive (synth → capabilities with main out "Output" 2ch,
+//     probe-crash → capabilitiesError, probe-hang → timeout capabilitiesError)
+//     and remove no rows; a default-dir scan returns a clean (possibly empty)
+//     result; shutdown → clean exit.
 //   host (argv[4] = fixture dir) — Stage 3c-2: HOSTING proof against the free
 //     test VST3 as the stand-in host (BBCSO cannot run in CI). Scans, loads
 //     the plugin by uid+path with a 2-track channel map (t1→ch1, t2→ch2),
@@ -228,7 +239,7 @@ const timeout = setTimeout(() => {
   } else if (mode === "scale") {
     console.error(`TIMEOUT at step ${step} (phase=${scalePhase} scaleAck=${scaleAckOk} negArray=${negArrayOk} negEvent=${negEventOk} restore=${restoreOk} play=${scalePlayOk} ticks=${scaleTicksOk} stop=${scaleStopOk} panic=${scalePanicOk} sent=${SCALE_SENT} events/${SCALE_SENT_BYTES} bytes)`);
   } else if (mode === "scan") {
-    console.error(`TIMEOUT at step ${step} (hello=${helloOk} scanSent=${scanSent} scanResult=${scanResultOk} aliveAfterCrash=${aliveAfterCrashOk} defaultScan=${defaultScanOk})`);
+    console.error(`TIMEOUT at step ${step} (hello=${helloOk} scanSent=${scanSent} scanResult=${scanResultOk} aliveAfterCrash=${aliveAfterCrashOk} probes=${Object.keys(scanProbes).length}/3 asserted=${scanProbesAsserted} defaultScan=${defaultScanOk})`);
   } else if (mode === "host") {
     console.error(`TIMEOUT at step ${step} phase=${hostPhase} (scan=${hostScanSent} pluginState=${hostPluginStateOk} editorNeg=${hostEditorNegOk} editorOpen=${hostEditorOpenOk} editorFocus=${hostEditorFocusOk} editorClose=${hostEditorCloseOk} stateCap=${hostStateCaptureOk} stateRestore=${hostStateRestoreOk} stateRT=${hostStateRoundtripOk} reloadAck=${hostReloadAckOk} reject=${hostRejectOk} stillPlaying=${hostPlayingAfterReject} stops=${hostStopTick1}/${hostStopTick2} peaks A/B/C=${hostPeakA.toFixed(3)}/${hostPeakB.toFixed(3)}/${hostPeakC.toFixed(3)} entries=${hostEntries.length})`);
   } else if (mode === "multi") {
@@ -237,10 +248,17 @@ const timeout = setTimeout(() => {
     console.error(`TIMEOUT at step ${step} (hello=${helloOk} pong=${pongOk} load=${loadOk} noDeviceErr=${noDeviceErrOk} pongAfterErr=${pongAfterErrOk} stillFunctional=${stillFunctionalOk})`);
   }
   process.exit(1);
-}, mode === "host" || mode === "multi" ? 40000 : 30000);
+// 3f-2: scan mode now waits out the ProbeHangDummy 90 s probe timeout (plus
+// the describe stage and the fast probes) — 180 s budget.
+}, mode === "scan" ? 180000 : mode === "host" || mode === "multi" ? 40000 : 30000);
 
 // scan-mode flags
 let scanSent = false, scanResultOk = false, aliveAfterCrashOk = false, defaultScanOk = false;
+// 3f-2 — background probe collection: classId → {kind, capabilities|error}
+const scanProbes = {};
+let scanProbesAsserted = false;
+let scanSynthClassId = null, scanCrashClassId = null, scanHangClassId = null;
+let postProbePongOk = false;
 // host-mode flags + shared collection
 let hostScanSent = false, hostPluginStateOk = false, hostPhase = 0;
 // Stage 3d-1: editor-window contract flags.
@@ -461,9 +479,9 @@ ws.addEventListener("message", (event) => {
     }
     if (msg.type === "hello" && multiPhase === 0) {
       if (msg.protocol !== 1) fail(`expected protocol 1, got ${msg.protocol}`);
-      if (msg.engineVersion !== "0.8.0") fail(`expected 0.7.1, got ${msg.engineVersion}`);
+      if (msg.engineVersion !== "0.8.1") fail(`expected 0.8.1, got ${msg.engineVersion}`);
       if (!fixtureDir) fail("multi mode requires a fixture dir argument");
-      console.log("[test] hello OK (0.8.0) — scanning for the stand-in host plugin...");
+      console.log("[test] hello OK (0.8.1) — scanning for the stand-in host plugin...");
       multiPhase = 1;
       ws.send(JSON.stringify({ type: "scan", dirs: [fixtureDir] }));
     } else if (msg.type === "scan_result" && multiPhase === 1) {
@@ -922,52 +940,111 @@ ws.addEventListener("message", (event) => {
   }
 
   if (mode === "scan") {
-    // ── Stage 3c-1: VST3 scan protocol + crash isolation ──
+    // ── Stage 3c-1 scan protocol + 3f-2 describe/probe split ──
     if (msg.type === "hello" && !helloOk) {
       helloOk = true;
       if (msg.protocol !== 1) fail(`expected protocol 1, got ${msg.protocol}`);
+      if (msg.engineVersion !== "0.8.1") fail(`expected 0.8.1, got ${msg.engineVersion}`);
       if (!fixtureDir) fail("scan mode requires a fixture dir argument");
-      console.log("[test] hello OK — sending scan of fixture dir:", fixtureDir);
+      console.log("[test] hello OK — sending scan of fixture dir + nested dir (dedup proof):", fixtureDir);
       scanSent = true;
-      ws.send(JSON.stringify({ type: "scan", dirs: [fixtureDir] }));
+      // TWO dirs: the fixture root AND the nested L1/L2 dir directly —
+      // ProbeCrashDummy is reachable through BOTH walks (same classId), and
+      // 3f-2 must keep exactly ONE row (first by path order wins).
+      ws.send(JSON.stringify({ type: "scan", dirs: [fixtureDir, fixtureDir + "/nested/L1/L2"] }));
     } else if (msg.type === "scan_result" && scanSent && !scanResultOk) {
       scanResultOk = true;
       const plugins = Array.isArray(msg.plugins) ? msg.plugins : [];
       const failed = Array.isArray(msg.failed) ? msg.failed : [];
       const dirs = Array.isArray(msg.scannedDirs) ? msg.scannedDirs : [];
+      if (dirs.length !== 2) fail(`expected 2 scannedDirs, got ${JSON.stringify(dirs)}`);
       // 1. The valid free test VST3 must be found with its real identity.
       const valid = plugins.find((p) => p.name === "Scorch Test Synth");
       if (!valid) fail(`scan_result did not include "Scorch Test Synth" (plugins: ${JSON.stringify(plugins)})`);
       if (valid.vendor !== "Scorch Audio") fail(`vendor mismatch: ${valid.vendor}`);
       if (valid.isInstrument !== true) fail("test synth must report isInstrument=true");
       if (!valid.uid) fail("scan_result entries must carry a uid");
-      // Stage 3e-1: scan rows carry the full class identifier string AND —
-      // when the worker could instantiate — the capability record.
-      if (!valid.classId) fail("scan_result rows must carry classId (the VST3 class identifier string, 3e-1)");
-      if (!valid.capabilities || typeof valid.capabilities.outputBuses !== "number" || valid.capabilities.outputBuses < 1) {
-        fail(`scan_result rows must carry a capabilities record with an output bus (3e-1): ${JSON.stringify(valid.capabilities ?? null)}`);
-      }
-      const scanMainOut = (valid.capabilities.buses ?? []).find((b) => !b.input && b.isMain);
-      if (!scanMainOut || scanMainOut.name !== "Output" || scanMainOut.channels !== 2) {
-        fail(`scan capabilities: main out bus must be "Output" 2ch, got ${JSON.stringify(scanMainOut ?? null)}`);
-      }
-      console.log(`[test] valid plugin found: "${valid.name}" vendor="${valid.vendor}" uid=${valid.uid} classId="${valid.classId}" caps(out=${valid.capabilities.outputBuses}) ✓`);
-      // 2. The crash dummy must appear as a failed entry (its worker died).
+      if (!valid.classId) fail("scan_result rows must carry classId (3e-1)");
+      // 3f-2 SPLIT PROOF: rows carry NO capability data at all — describe is
+      // findAllTypesForFile ONLY. Capabilities arrive later via scan_probe.
+      if (valid.capabilities !== undefined) fail("3f-2: scan rows must NOT carry capabilities (describe never instantiates)");
+      if (valid.capabilitiesError !== undefined) fail("3f-2: scan rows must NOT carry capabilitiesError");
+      console.log(`[test] valid plugin found: "${valid.name}" uid=${valid.uid} classId="${valid.classId}" — rows carry NO capabilities (split) ✓`);
+      // 2. 3f-2: the nested probe-crash dummy is found by the RECURSIVE scan
+      //    (3 subfolder levels) EXACTLY ONCE, despite being reachable from
+      //    BOTH scanned dirs (classId dedup, first by path order).
+      const crashRows = plugins.filter((p) => p.name === "ProbeCrashDummy");
+      if (crashRows.length !== 1) fail(`ProbeCrashDummy must appear exactly once (recursive scan + classId dedup), got ${crashRows.length}: ${JSON.stringify(crashRows)}`);
+      if (!/[\\/]nested[\\/]L1[\\/]L2[\\/]ProbeCrashDummy\.vst3$/i.test(crashRows[0].path)) fail(`ProbeCrashDummy must be the NESTED bundle, got ${crashRows[0].path}`);
+      if (!crashRows[0].classId) fail("nested row must carry classId");
+      scanCrashClassId = crashRows[0].classId;
+      console.log(`[test] nested plugin found (once): ${crashRows[0].path} ✓ (recursive scan + dedup)`);
+      // 3. The probe-HANG dummy row is present (top level).
+      const hangRow = plugins.find((p) => p.name === "ProbeHangDummy");
+      if (!hangRow || !hangRow.classId) fail(`ProbeHangDummy row missing or class-less: ${JSON.stringify(hangRow)}`);
+      scanHangClassId = hangRow.classId;
+      scanSynthClassId = valid.classId;
+      // 4. The crash dummy must appear as a failed entry WITH DIAGNOSTICS.
       const crashFail = failed.find((f) => f.path.includes("CrashDummy"));
       if (!crashFail) fail(`crash dummy not recorded as failed — crash isolation broken (failed: ${JSON.stringify(failed)})`);
       if (!/crash|exit/i.test(crashFail.error ?? "")) fail(`crash dummy failure lacks crash evidence: ${crashFail.error}`);
-      console.log(`[test] crash dummy isolated: "${crashFail.error}" ✓`);
-      // 3. The corrupt dummy fails GRACEFULLY (zero types — neither plugin nor failed).
+      // 3f-2: EVERY failed entry carries exitCode + elapsedMs + stderrTail.
+      for (const f of failed) {
+        if (typeof f.exitCode !== "number") fail(`failed entry missing numeric exitCode: ${JSON.stringify(f).slice(0, 200)}`);
+        if (typeof f.elapsedMs !== "number") fail(`failed entry missing numeric elapsedMs: ${JSON.stringify(f).slice(0, 200)}`);
+        if (typeof f.stderrTail !== "string") fail(`failed entry missing stderrTail: ${JSON.stringify(f).slice(0, 200)}`);
+      }
+      console.log(`[test] crash dummy isolated with diagnostics: exit=${crashFail.exitCode} elapsed=${crashFail.elapsedMs}ms stderrTail=${crashFail.stderrTail.length} chars ✓`);
+      // 5. The corrupt dummy fails GRACEFULLY (zero types — neither plugin nor failed).
       if (failed.some((f) => f.path.includes("CorruptDummy"))) fail("corrupt dummy must fail gracefully (zero types), not as a scan failure");
       if (plugins.some((p) => p.path.includes("CorruptDummy"))) fail("corrupt dummy must not yield plugin types");
       console.log("[test] corrupt dummy isolated silently (graceful zero-type load) ✓");
-      // 4. The engine is ALIVE after the crash: ping must answer.
+      // 6. Engine alive after the crash: ping must answer. The background
+      //    probes stream in while we wait (ProbeHangDummy will take 90 s).
       ws.send(JSON.stringify({ type: "ping" }));
     } else if (msg.type === "pong" && scanResultOk && !aliveAfterCrashOk) {
       aliveAfterCrashOk = true;
-      console.log("[test] engine alive after crash isolation (ping→pong) ✓ — default-dir scan");
-      ws.send(JSON.stringify({ type: "scan" }));  // no dirs → engine defaults (may be empty — must not error/hang)
-    } else if (msg.type === "scan_result" && aliveAfterCrashOk && !defaultScanOk) {
+      console.log("[test] engine alive after crash isolation (ping→pong) ✓ — waiting for 3 background scan_probes (ProbeHangDummy eats its 90s timeout)…");
+    } else if (msg.type === "scan_probe" && scanResultOk) {
+      // 3f-2: exactly ONE scan_probe per row classId, carrying EXACTLY ONE
+      // of capabilities / capabilitiesError.
+      if (!msg.classId) fail(`scan_probe without classId: ${JSON.stringify(msg).slice(0, 200)}`);
+      const hasCaps = msg.capabilities !== undefined && typeof msg.capabilities === "object" && !Array.isArray(msg.capabilities);
+      const hasErr = typeof msg.capabilitiesError === "string" && msg.capabilitiesError.length > 0;
+      if (hasCaps === hasErr) fail(`scan_probe must carry EXACTLY ONE of capabilities/capabilitiesError: ${JSON.stringify(msg).slice(0, 200)}`);
+      if (scanProbes[msg.classId]) fail(`duplicate scan_probe for classId ${msg.classId} (probes are one-per-row)`);
+      scanProbes[msg.classId] = hasCaps
+        ? { kind: "capabilities", capabilities: msg.capabilities }
+        : { kind: "error", error: msg.capabilitiesError };
+      console.log(`[test] scan_probe [${Object.keys(scanProbes).length}/3] classId="${msg.classId}" → ${hasCaps ? "capabilities" : `capabilitiesError("${msg.capabilitiesError.slice(0, 80)}")`}`);
+      // All three expected probes arrived → assert their contents.
+      const expected = [scanSynthClassId, scanCrashClassId, scanHangClassId].filter(Boolean);
+      if (!scanProbesAsserted && expected.length === 3 && expected.every((c) => scanProbes[c])) {
+        const synthProbe = scanProbes[scanSynthClassId];
+        if (synthProbe.kind !== "capabilities") fail(`test synth probe must SUCCEED, got: ${synthProbe.error}`);
+        const caps = synthProbe.capabilities;
+        if (typeof caps.outputBuses !== "number" || caps.outputBuses < 1) fail(`synth probe capabilities must include an output bus: ${JSON.stringify(caps).slice(0, 200)}`);
+        // The 3e-1 capability contract, RELOCATED to scan_probe (rows no
+        // longer carry it): main out bus "Output", 2 channels.
+        const mainOut = (caps.buses ?? []).find((b) => !b.input && b.isMain);
+        if (!mainOut || mainOut.name !== "Output" || mainOut.channels !== 2) {
+          fail(`synth probe capabilities: main out bus must be "Output" 2ch, got ${JSON.stringify(mainOut ?? null)}`);
+        }
+        if (typeof caps.latencySamples !== "number") fail("synth probe capabilities must carry numeric latencySamples");
+        const crashProbe = scanProbes[scanCrashClassId];
+        if (crashProbe.kind !== "error") fail("ProbeCrashDummy probe must FAIL (it aborts in GetPluginFactory) — probe-crash isolation");
+        const hangProbe = scanProbes[scanHangClassId];
+        if (hangProbe.kind !== "error") fail("ProbeHangDummy probe must FAIL (90s timeout)");
+        if (!/timeout/i.test(hangProbe.error)) fail(`ProbeHangDummy error must name the timeout, got: ${hangProbe.error}`);
+        scanProbesAsserted = true;
+        console.log("[test] probe contract asserted: synth=capabilities(Output 2ch main), crash=isolated error, hang=timeout error — rows never removed ✓ — default-dir scan");
+        ws.send(JSON.stringify({ type: "ping" }));
+      }
+    } else if (msg.type === "pong" && scanProbesAsserted && !postProbePongOk) {
+      postProbePongOk = true;
+      console.log("[test] engine alive after ALL probes (ping→pong) ✓ — default-dir scan");
+      ws.send(JSON.stringify({ type: "scan" }));  // no dirs → engine defaults (must not error/hang)
+    } else if (msg.type === "scan_result" && scanProbesAsserted && postProbePongOk && !defaultScanOk) {
       defaultScanOk = true;
       if (!Array.isArray(msg.plugins) || !Array.isArray(msg.failed)) fail("default scan_result shape invalid");
       console.log(`[test] default-dir scan clean (plugins=${msg.plugins.length}, failed=${msg.failed.length}) ✓ — shutdown`);
@@ -981,7 +1058,7 @@ ws.addEventListener("message", (event) => {
     if (msg.type === "hello" && !helloOk) {
       helloOk = true;
       if (msg.protocol !== 1) fail(`expected protocol 1, got ${msg.protocol}`);
-      if (msg.engineVersion !== "0.8.0") fail(`expected 0.7.1, got ${msg.engineVersion}`);
+      if (msg.engineVersion !== "0.8.1") fail(`expected 0.8.1, got ${msg.engineVersion}`);
       // Stage 3c close-out: the dispatch ledger streams what the engine
       // ACTUALLY dispatched — the replay-burst and re-attack asserts read it.
       ws.send(JSON.stringify({ type: "dispatch_log", enable: true }));
@@ -1334,20 +1411,24 @@ ws.addEventListener("close", () => {
       process.exit(1);
     }
   } else if (mode === "scan") {
-    allOk = helloOk && scanSent && scanResultOk && aliveAfterCrashOk && defaultScanOk;
+    allOk = helloOk && scanSent && scanResultOk && aliveAfterCrashOk && scanProbesAsserted && postProbePongOk && defaultScanOk;
     if (allOk) {
       console.log("");
       console.log("========================================");
-      console.log("ALL SCAN TESTS PASSED (3c-1):");
+      console.log("ALL SCAN TESTS PASSED (3c-1 + 3f-2):");
       console.log('  scan protocol: scan → scan_result (plugins/failed/scannedDirs)');
-      console.log('  valid test VST3 found with real name + vendor + uid');
-      console.log('  CRASH ISOLATION: worker crash → failed entry, scan + engine survive');
+      console.log('  valid test VST3 found with real name + vendor + uid + classId');
+      console.log('  3f-2 SPLIT: rows carry NO capabilities — describe is findAllTypesForFile only');
+      console.log('  3f-2 RECURSIVE SCAN: nested plugin (3 levels) found exactly ONCE (classId dedup across dirs)');
+      console.log('  CRASH ISOLATION: worker crash → failed entry with exitCode+elapsedMs+stderrTail');
       console.log('  corrupt .vst3 → graceful zero types (no failed entry)');
+      console.log('  3f-2 PROBES: synth=capabilities, probe-crash=isolated error, probe-hang=90s timeout error');
+      console.log('  probe failures NEVER remove rows (rows went out with scan_result, untouched by probes)');
       console.log('  default-dir scan → clean (possibly empty) result');
       console.log("========================================");
       process.exit(0);
     } else {
-      console.error(`FAILED: hello=${helloOk} scanSent=${scanSent} scanResult=${scanResultOk} aliveAfterCrash=${aliveAfterCrashOk} defaultScan=${defaultScanOk}`);
+      console.error(`FAILED: hello=${helloOk} scanSent=${scanSent} scanResult=${scanResultOk} aliveAfterCrash=${aliveAfterCrashOk} probes=${Object.keys(scanProbes).length}/3 asserted=${scanProbesAsserted} postProbePong=${postProbePongOk} defaultScan=${defaultScanOk}`);
       process.exit(1);
     }
   } else if (mode === "scale") {

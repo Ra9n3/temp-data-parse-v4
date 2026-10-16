@@ -140,3 +140,34 @@ export function clearMixOverrides(): void {
     /* storage unavailable — nothing to clear */
   }
 }
+
+// ─── Stage 3f-2 — extra scan directories ("scanner must not lose plugins") ──
+// The scan dialog's free-text box (one folder path per line, no folder picker,
+// no new Tauri permissions) persists here and rides EVERY scan message
+// together with the shell's default folders.
+export const SCAN_DIRS_KEY = "scorch.scanDirs";
+
+/** Read the persisted extra scan dirs; tolerate garbage (returns []). */
+export function readExtraScanDirs(): string[] {
+  try {
+    const raw = window.localStorage.getItem(SCAN_DIRS_KEY);
+    if (!raw) return [];
+    const parsed: unknown = JSON.parse(raw);
+    if (!Array.isArray(parsed)) return [];
+    return parsed
+      .filter((s): s is string => typeof s === "string")
+      .map((s) => s.trim())
+      .filter((s) => s.length > 0);
+  } catch {
+    return [];
+  }
+}
+
+/** Persist the extra scan dirs (already-normalized list). */
+export function saveExtraScanDirs(dirs: string[]): void {
+  try {
+    window.localStorage.setItem(SCAN_DIRS_KEY, JSON.stringify(dirs));
+  } catch {
+    /* storage unavailable — the box still works for this session */
+  }
+}

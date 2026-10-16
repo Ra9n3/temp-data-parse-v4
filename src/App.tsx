@@ -5,7 +5,7 @@ import dorianFixture from "./fixtures/dorian-16bars.json";
 import { TopBar } from "./components/TopBar";
 import { Arranger } from "./components/Arranger";
 import { GenerationSettingsPanel } from "./components/GenerationSettingsPanel";
-import { EngineClient, formatPluginInfo, type EngineLoadMeta, type EngineStatus, type EditorEventMessage, type LoadFailure, type PluginCapabilitiesMessage, type PluginSavedStateMessage, type PluginStateMessage, type ScanResultMessage } from "./engine/engineClient";
+import { EngineClient, formatPluginInfo, mergeScanProbe, type EngineLoadMeta, type EngineStatus, type EditorEventMessage, type LoadFailure, type PluginCapabilitiesMessage, type PluginSavedStateMessage, type PluginStateMessage, type ScanResultMessage } from "./engine/engineClient";
 import { buildEngineStream, resolveEngineChannelView } from "./engine/engineStream";
 import { PPQ, projectEndTick, tickToBar } from "./shared/schema";
 import {
@@ -341,6 +341,13 @@ export default function App() {
       setDesktopScan(result);
       setVstState(result.plugins.length > 0 ? "loaded" : "empty");
     });
+    // Stage 3f-2: background probe results merge into the STORED rows by
+    // classId — capabilities on success, a capabilitiesError annotation on
+    // failure. A probe NEVER removes a row (mergeScanProbe contract).
+    client.onScanProbe((msg) => {
+      if (disposed) return;
+      setDesktopScan((prev) => (prev ? { ...prev, plugins: mergeScanProbe(prev.plugins, msg) } : prev));
+    });
     // Stage 3c-2: hosting outcome → toast + footer; error never dead-ends.
     client.onPluginState((result) => {
       if (disposed) return;
@@ -551,12 +558,15 @@ export default function App() {
     if (engineStatus !== "ready") return null;
     return {
       result: desktopScan ? { plugins: desktopScan.plugins, failed: desktopScan.failed } : null,
-      onScan: () => {
+      // Stage 3f-2: the scan message carries the shell's default folders
+      // PLUS the dialog's persisted extra dirs ("scorch.scanDirs").
+      onScan: (extraDirs?: string[]) => {
         setDesktopScan(null);
         setVstState("scanning");
         void (async () => {
-          const dirs = await invoke<string[]>("vst3_paths").catch(() => undefined);
-          engineClientRef.current?.scan(dirs && dirs.length ? dirs : undefined);
+          const defaults = await invoke<string[]>("vst3_paths").catch(() => undefined);
+          const dirs = [...(defaults ?? []), ...(extraDirs ?? [])];
+          engineClientRef.current?.scan(dirs.length ? dirs : undefined);
         })();
       },
     };
