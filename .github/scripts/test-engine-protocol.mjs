@@ -142,6 +142,20 @@ const url = `ws://127.0.0.1:${port}`;
 //     editor_unavailable "no display"), a repeat RAISES (focused), inst-a
 //     opens a SECOND SIMULTANEOUS window, each closes by id;
 //   captureState → one pluginSavedState PER INSTANCE (distinct instanceIds);
+//   Stage 3f-6 PUBLISH-SAFE phase (M-13..M-17): the slow-state marker file
+//     (SCORCH_TESTVST_SLOWSTATE_FILE, engine-process env) is created mid-
+//     session, so every PREPARED test-synth instance's getStateInformation
+//     stalls 10 s — the stand-in for the real Falcon/BBCSO hang (JUCE's
+//     creation-time state handshake stays fast: a being-created instance is
+//     not prepared yet). A replace load retires TWO live slow instances;
+//     the assertions are: the NEW set's plugin_state loaded receipts arrive
+//     < 5 s after the load (the 3f-6 reorder — they precede the captures),
+//     a FOLLOWING load is processed (the pre-fix worker wedged forever after
+//     "init started (async)"; post-fix it waits for the message thread to
+//     drain the unkillable 10 s stalls — JUCE's createPluginInstance also
+//     round-trips through it), the deferred captures' pluginSavedState
+//     broadcasts all land (the drain proof), and a post-drain load proves
+//     the fast capture path still ENDS (not TIMEOUTS).
 //   clean shutdown.
 const MULTI_META = { bpm: 120, ppqn: 960, timeSignature: { numerator: 4, denominator: 4 }, endTick: 8448 };
 const multiEvents = [
@@ -179,6 +193,23 @@ let multiCapIds = new Set(), multiHeadlessSkip = false;
 // capabilities must match 1:1 for BOTH instances — initial load + reuse).
 const multiCapsCount = {};
 const multiLoadedCount = {};
+// Stage 3f-6 publish-safe phase: the marker file the ENGINE's env var names
+// (its existence makes every test-synth getStateInformation stall 10 s),
+// plus the send timestamps of the two probe loads. The env var is set by
+// desktop.yml for the ENGINE process AND inherited by this script, so both
+// sides agree on the exact path; the tmpdir default covers local runs.
+const multiSlowMarker = process.env.SCORCH_TESTVST_SLOWSTATE_FILE || path.join(os.tmpdir(), "scorch-3f6-slowstate.marker");
+let multiTSlowLoad = 0, multiTFastLoad = 0, multiTFinalLoad = 0;
+// Stage 3f-6 drain-wait: the stalled retire captures complete LATER on the
+// message thread (each stall occupies the MM for its full 10 s — unkillable
+// from the host side, exactly like the real Falcon symptom) and each
+// completion broadcasts its pluginSavedState. JUCE's createPluginInstance
+// ALSO round-trips through the message thread, so a following load's
+// instantiate can only run once the MM has drained. The final probe load is
+// therefore sent only after ALL THREE deferred captures (inst-a + inst-b
+// from seq 4, inst-slow from seq 5) have been seen — the drain proof.
+const multiDrainTargets = new Set(["inst-a", "inst-b", "inst-slow"]);
+const multiDrained = new Set();
 
 // Events chosen so a note IS sounding when the test stops (tick ~600): the
 // stop-panic kill count in the engine's stdout ("voices killed (n=…)") is then
@@ -320,8 +351,12 @@ const timeout = setTimeout(() => {
   }
   process.exit(1);
 // 3f-2: scan mode now waits out the ProbeHangDummy 90 s probe timeout (plus
-// the describe stage and the fast probes) — 180 s budget.
-}, mode === "scan" ? 180000 : mode === "host" || mode === "multi" ? 40000 : 30000);
+// the describe stage and the fast probes) — 180 s budget. 3f-6: multi mode
+// grows the publish-safe phase (slow-capture replace + following load) whose
+// 10 s message-thread stalls run ASYNCHRONOUSLY to the assertions — the 5 s
+// loaded-receipt bound is asserted EXPLICITLY per phase below — but the
+// wall-clock budget still covers them: 90 s.
+}, mode === "scan" ? 180000 : mode === "host" ? 40000 : mode === "multi" ? 90000 : 30000);
 
 // scan-mode flags
 let scanSent = false, scanResultOk = false, aliveAfterCrashOk = false, defaultScanOk = false;
@@ -529,6 +564,25 @@ function finishAndShutdown() {
   ws.send(JSON.stringify({ type: "shutdown" }));
 }
 
+// Stage 3f-6: when the message thread has DRAINED (all three deferred
+// retire-capture broadcasts seen) and the marker is disarmed (M-14, phase
+// >= 15), send the final probe load — the fast-path proof: its retire
+// capture completes within the 3000 ms budget (END receipt, not TIMEOUT)
+// and its loaded receipts arrive in milliseconds.
+function maybeFinish3f6Drain() {
+  if (multiPhase !== 15 || multiDrained.size < multiDrainTargets.size) return;
+  console.log("[test] phase M-15 ✓ message thread DRAINED (inst-a + inst-b + inst-slow deferred captures all completed) — final probe load (fast capture path)");
+  multiPhase = 16;
+  multiTFinalLoad = Date.now();
+  ws.send(JSON.stringify({
+    type: "load", seq: 6, events: multiEvents, meta: MULTI_META,
+    plugins: [
+      { instanceId: "inst-final", uid: multiScanPlugin.uid, path: multiScanPlugin.path, name: multiScanPlugin.name },
+    ],
+    routing: { t1: { inst: "inst-final", ch: 1 } },
+  }));
+}
+
 ws.addEventListener("open", () => {
   console.log(`[test] connected to ws://127.0.0.1:${port} (mode=${mode}), waiting for hello...`);
 });
@@ -550,9 +604,9 @@ ws.addEventListener("message", (event) => {
     }
     if (msg.type === "hello" && multiPhase === 0) {
       if (msg.protocol !== 1) fail(`expected protocol 1, got ${msg.protocol}`);
-      if (msg.engineVersion !== "0.8.1") fail(`expected 0.8.1, got ${msg.engineVersion}`);
+      if (msg.engineVersion !== "0.8.2") fail(`expected 0.8.2, got ${msg.engineVersion}`);
       if (!fixtureDir) fail("multi mode requires a fixture dir argument");
-      console.log("[test] hello OK (0.8.1) — scanning for the stand-in host plugin...");
+      console.log("[test] hello OK (0.8.2) — scanning for the stand-in host plugin...");
       multiPhase = 1;
       ws.send(JSON.stringify({ type: "scan", dirs: [fixtureDir] }));
     } else if (msg.type === "scan_result" && multiPhase === 1) {
@@ -657,9 +711,70 @@ ws.addEventListener("message", (event) => {
       }
       multiCapIds.add(msg.instanceId);
       if (multiCapIds.size === 2) {
-        console.log("[test] phase M-12 ✓ state captured PER INSTANCE (inst-a + inst-b, distinct ids) — shutdown");
-        finishAndShutdown();
+        // Stage 3f-6 PUBLISH-SAFE probe: arm the slow-state marker, then
+        // replace BOTH live instances. Every PREPARED test-synth instance's
+        // getStateInformation now stalls 10 s (a being-created instance is
+        // not prepared yet — JUCE's creation handshake stays fast) — the
+        // exact shape the user's engine.log showed ("prepared (async)" for
+        // all instances, then NO loaded receipts and every later load stuck
+        // behind "init started (async)"). The worker must publish the new
+        // set and speak within 5 s REGARDLESS.
+        console.log("[test] phase M-12 ✓ state captured PER INSTANCE (inst-a + inst-b, distinct ids) — 3f-6 publish-safe probe: arming slow-state marker, replacing the set");
+        multiPhase = 13;
+        try { fs.unlinkSync(multiSlowMarker); } catch {}
+        fs.writeFileSync(multiSlowMarker, "slow");
+        multiTSlowLoad = Date.now();
+        ws.send(JSON.stringify({
+          type: "load", seq: 4, events: multiEvents, meta: MULTI_META,
+          plugins: [
+            { instanceId: "inst-slow", uid: multiScanPlugin.uid, path: multiScanPlugin.path, name: multiScanPlugin.name },
+          ],
+          routing: { t1: { inst: "inst-slow", ch: 1 } },
+        }));
       }
+    } else if (msg.type === "plugin_state" && multiPhase === 13 && msg.state === "loaded") {
+      if (msg.instanceId !== "inst-slow") fail(`multi: publish-safe load must report inst-slow, got ${msg.instanceId}`);
+      if (JSON.stringify(msg.channels) !== "[1]") fail(`multi: inst-slow channels must be [1], got ${JSON.stringify(msg.channels)}`);
+      const dt = Date.now() - multiTSlowLoad;
+      if (dt > 5000) fail(`multi: 3f-6 publish-safe FAILED — the NEW set's loaded receipts took ${dt} ms (> 5000 ms) — the init worker blocked behind the retired instances' captures`);
+      console.log(`[test] phase M-13 ✓ NEW set live + loaded receipts in ${dt} ms (< 5000 ms) while BOTH retired captures stall 10 s on the message thread — sending the FOLLOWING load (pre-fix, the worker never got here)`);
+      multiPhase = 14;
+      multiTFastLoad = Date.now();
+      ws.send(JSON.stringify({
+        type: "load", seq: 5, events: multiEvents, meta: MULTI_META,
+        plugins: [
+          { instanceId: "inst-fast", uid: multiScanPlugin.uid, path: multiScanPlugin.path, name: multiScanPlugin.name },
+        ],
+        routing: { t1: { inst: "inst-fast", ch: 1 } },
+      }));
+    } else if (msg.type === "plugin_state" && multiPhase === 14 && msg.state === "loaded") {
+      if (msg.instanceId !== "inst-fast") fail(`multi: following load must report inst-fast, got ${msg.instanceId}`);
+      const dt = Date.now() - multiTFastLoad;
+      if (dt > 30000) fail(`multi: FOLLOWING load not processed in ${dt} ms — the init worker is still wedged`);
+      console.log(`[test] phase M-14 ✓ FOLLOWING load processed (${dt} ms after send) — the worker survived the slow captures. Disarming marker, waiting for the message thread to DRAIN (deferred captures complete)...`);
+      multiPhase = 15;
+      try { fs.unlinkSync(multiSlowMarker); } catch {}
+      maybeFinish3f6Drain();
+    } else if (msg.type === "plugin_state" && multiPhase === 16 && msg.state === "loaded") {
+      if (msg.instanceId !== "inst-final") fail(`multi: post-drain load must report inst-final, got ${msg.instanceId}`);
+      const dt = Date.now() - multiTFinalLoad;
+      if (dt > 5000) fail(`multi: post-drain load took ${dt} ms (> 5000 ms) — capture path did not recover`);
+      console.log(`[test] phase M-17 ✓ post-drain load processed (${dt} ms; its retire capture completes — END receipt, not TIMEOUT) — shutdown`);
+      // Hold the shutdown ~1500 ms so seq-6's retire capture OBSERVABLY
+      // completes: the engine.log END receipt is a desktop.yml assertion, and
+      // an instant shutdown could race the capture's done flag into an
+      // "engine exiting" timeout instead.
+      setTimeout(finishAndShutdown, 1500);
+      multiPhase = 17;
+    } else if (msg.type === "pluginSavedState" && multiPhase >= 13) {
+      // Deferred retire captures broadcast their blob when the message thread
+      // finally gets to them (up to ~10 s after the init thread stopped
+      // waiting). Collect them for the M-15 drain proof.
+      if (msg.instanceId && multiDrainTargets.has(msg.instanceId)) {
+        multiDrained.add(msg.instanceId);
+        console.log(`[test] deferred capture completed on the message thread: ${msg.instanceId} (${multiDrained.size}/${multiDrainTargets.size})`);
+      }
+      maybeFinish3f6Drain();
     } else if (msg.type === "error" && msg.code === "editor_unavailable" && multiPhase === 7 && !multiHeadlessSkip) {
       // Headless host (local validation): the display guard answers
       // editor_unavailable — tolerate ONLY that detail and skip the window
@@ -670,6 +785,8 @@ ws.addEventListener("message", (event) => {
       console.log(`[test] phase M-7 (headless) editor_unavailable tolerated ("${msg.detail}") — skipping to state capture`);
       multiPhase = 12;
       ws.send(JSON.stringify({ type: "captureState" }));
+    } else if (msg.type === "error" && multiPhase >= 13) {
+      fail(`multi: 3f-6 publish-safe phase got error: ${msg.code} ${msg.detail ?? ""}`);
     } else if (msg.type === "error" && multiPhase >= 2 && !multiRejectOk) {
       fail(`multi mode: unexpected error: ${msg.code} ${msg.detail ?? ""}`);
     }
@@ -1026,7 +1143,7 @@ ws.addEventListener("message", (event) => {
     if (msg.type === "hello" && !helloOk) {
       helloOk = true;
       if (msg.protocol !== 1) fail(`expected protocol 1, got ${msg.protocol}`);
-      if (msg.engineVersion !== "0.8.1") fail(`expected 0.8.1, got ${msg.engineVersion}`);
+      if (msg.engineVersion !== "0.8.2") fail(`expected 0.8.2, got ${msg.engineVersion}`);
       if (!fixtureDir) fail("scan mode requires a fixture dir argument");
       console.log("[test] hello OK — sending scan of fixture dir + nested dir (dedup proof):", fixtureDir);
       scanSent = true;
@@ -1140,7 +1257,7 @@ ws.addEventListener("message", (event) => {
     if (msg.type === "hello" && !helloOk) {
       helloOk = true;
       if (msg.protocol !== 1) fail(`expected protocol 1, got ${msg.protocol}`);
-      if (msg.engineVersion !== "0.8.1") fail(`expected 0.8.1, got ${msg.engineVersion}`);
+      if (msg.engineVersion !== "0.8.2") fail(`expected 0.8.2, got ${msg.engineVersion}`);
       // Stage 3c close-out: the dispatch ledger streams what the engine
       // ACTUALLY dispatched — the replay-burst and re-attack asserts read it.
       ws.send(JSON.stringify({ type: "dispatch_log", enable: true }));

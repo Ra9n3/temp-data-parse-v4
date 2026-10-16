@@ -194,7 +194,7 @@
 
 namespace {
 
-constexpr const char* kEngineVersion = "0.8.1";
+constexpr const char* kEngineVersion = "0.8.2";
 constexpr int kProtocolVersion = 1;
 constexpr int kDefaultPort = 9377;
 constexpr int kMaxVoices = 64;
@@ -284,6 +284,22 @@ struct HostedPlugin;   // defined below (lock-free published instance)
 std::mutex g_retireMutex;
 std::vector<std::pair<ScoreSnapshot*, std::chrono::steady_clock::time_point>> g_retiredScores;
 std::vector<std::pair<HostedPlugin*, std::chrono::steady_clock::time_point>> g_retiredPlugins;
+
+// Stage 3f-6: a retire capture runs on the MESSAGE thread (callAsync) while
+// the init worker only WAITS up to 3000 ms for it — so when the budget
+// expires the capture job can still be queued or mid-sleep inside a slow
+// plugin's getStateInformation. The janitor must not free a HostedPlugin
+// whose capture job has not finished dereferencing it: each armed record
+// pairs the instance with the job's done flag and the janitor defers the
+// free until the flag lands (a bounded leak if the message thread never
+// runs the job — process exit reclaims, the standing 3c teardown policy).
+struct PendingRetireCapture {
+    HostedPlugin* plugin;
+    std::shared_ptr<std::atomic<bool>> done;
+    bool named = false;   // one "retire deferred" line per record
+};
+std::mutex g_retireCaptureMutex;                 // guards the vector only
+std::vector<PendingRetireCapture> g_retireCaptures;
 
 // Voice kill requests: stop/seek/panic/play set the flag; the NEXT audio
 // buffer performs the kill itself (voices are audio-thread-owned). The
@@ -884,6 +900,48 @@ void captureAndBroadcastState(const HostedPlugin& h, const char* trigger) {
         engineLog(std::string("[plugin] state capture FAILED (") + trigger + "): SEH/unknown");
     }
 }
+
+// ─── Stage 3f-6: init-phase watchdog record ─────────────────────────────
+// Every phase of the init worker (instantiate / state-restore / prepare /
+// publish) calls INTO PLUGIN CODE, and a plugin can hang inside any of them
+// (the 3f-6 defect: getStateInformation of a retired instance stalled the
+// publish section forever — the worker never spoke again). A hang INSIDE the
+// worker is invisible to the worker itself, so the worker writes this record
+// at every phase transition and a separate 1 s watchdog thread READS it,
+// naming any single phase older than 60 s:
+//   "[plugin] init WATCHDOG phase=<name> instance=<id> <ms> ms"
+// LOG ONLY — no kill, no skip: the watchdog is forensics, not an executioner
+// (killing a thread holding JUCE/plugin locks would wedge the process worse
+// than the hang). One WATCHDOG line per phase occurrence (the `named` flag
+// resets at every transition); the mutex is held microseconds at transitions
+// and by the reader once per second — a worker hung INSIDE plugin code never
+// holds it, so the record stays readable exactly when it matters.
+struct InitPhaseRecord {
+    std::mutex mtx;
+    std::string phase;         // "instantiate" | "state-restore" | "prepare" | "publish"
+    std::string instanceId;    // "-" for the set-wide publish phase
+    std::chrono::steady_clock::time_point startedAt{};
+    bool active = false;
+    bool named = false;
+};
+InitPhaseRecord g_initPhase;
+class InitPhaseGuard {
+public:
+    InitPhaseGuard(const char* phase, const std::string& iid) {
+        std::lock_guard<std::mutex> lk(g_initPhase.mtx);
+        g_initPhase.phase = phase;
+        g_initPhase.instanceId = iid;
+        g_initPhase.startedAt = std::chrono::steady_clock::now();
+        g_initPhase.active = true;
+        g_initPhase.named = false;
+    }
+    ~InitPhaseGuard() {
+        std::lock_guard<std::mutex> lk(g_initPhase.mtx);
+        g_initPhase.active = false;
+    }
+    InitPhaseGuard(const InitPhaseGuard&) = delete;
+    InitPhaseGuard& operator=(const InitPhaseGuard&) = delete;
+};
 
 // ─── Stage 3c-regression: ASYNC plugin init ─────────────────────────────
 // loadHostedPlugin (findAllTypesForFile + createPluginInstance +
@@ -3780,13 +3838,41 @@ int main(int argc, char** argv) {
                     if (aged(*it)) { delete it->first; it = g_retiredScores.erase(it); }
                     else ++it;
                 }
+                // Stage 3f-6: a plugin whose retire capture is STILL pending on
+                // the message thread (queued, or mid-sleep inside a slow
+                // getStateInformation) must not be freed — the capture job
+                // dereferences it after the init worker's 3000 ms budget has
+                // already expired. Defer the free until the job's done flag
+                // lands; the 250 ms grace stays the floor, never a deadline
+                // that can cut a live capture short. Named ONCE per record.
+                std::vector<std::string> retireDeferredIds;
                 for (auto it = g_retiredPlugins.begin(); it != g_retiredPlugins.end();) {
                     if (aged(*it)) {
+                        bool capturePending = false;
+                        {
+                            std::lock_guard<std::mutex> clk(g_retireCaptureMutex);
+                            for (auto rcit = g_retireCaptures.begin(); rcit != g_retireCaptures.end();) {
+                                if (rcit->plugin != it->first) { ++rcit; continue; }
+                                if (rcit->done->load(std::memory_order_acquire)) {
+                                    rcit = g_retireCaptures.erase(rcit);   // job finished touching it
+                                    continue;
+                                }
+                                capturePending = true;
+                                if (!rcit->named) {
+                                    rcit->named = true;
+                                    retireDeferredIds.push_back(it->first->instanceId);
+                                }
+                                ++rcit;
+                            }
+                        }
+                        if (capturePending) { ++it; continue; }
                         if (it->first->instance) it->first->instance->releaseResources();
                         delete it->first;
                         it = g_retiredPlugins.erase(it);
                     } else ++it;
                 }
+                for (const auto& iid : retireDeferredIds)
+                    engineLog("[plugin] retire deferred — capture job still pending on the message thread instance=" + iid);
             }
             // Stage 3d-4 hotfix — pending-open watchdog (this janitor loop is
             // the only off-MM heartbeat the engine owns; zero new threads).
@@ -3850,7 +3936,14 @@ int main(int argc, char** argv) {
                 const PluginInitEntry& e = req.entries[i];
                 const auto te0 = std::chrono::steady_clock::now();
                 std::unique_ptr<HostedPlugin> h;
-                const std::string hostErr = loadHostedPlugin(e.pluginVar, e.instanceId, h, e.routing);
+                // Stage 3f-6: phase watchdog record — a plugin hanging inside
+                // createPluginInstance is named after 60 s by the watchdog
+                // thread (log only).
+                std::string hostErr;
+                {
+                    InitPhaseGuard pg("instantiate", e.instanceId);
+                    hostErr = loadHostedPlugin(e.pluginVar, e.instanceId, h, e.routing);
+                }
                 outcomes[i].initMs = std::chrono::duration_cast<std::chrono::milliseconds>(
                     std::chrono::steady_clock::now() - te0).count();
                 {
@@ -3891,6 +3984,7 @@ int main(int argc, char** argv) {
                     const size_t restoredBytes = mos.getDataSize();
                     if (decoded && restoredBytes > 0 && restoredBytes <= kMaxPluginStateBytes * 2) {
                         try {
+                            InitPhaseGuard pg("state-restore", e.instanceId);   // 3f-6 watchdog phase
                             h->instance->setStateInformation(mos.getData(), static_cast<int>(restoredBytes));
                             engineLog("[plugin] state restored " + std::to_string(restoredBytes) +
                                       " bytes (project embed) instance=" + e.instanceId);
@@ -3913,6 +4007,7 @@ int main(int argc, char** argv) {
                 const double devRate = g_engine.sampleRate.load();
                 const int devBuf = g_deviceBufferSize.load();
                 if (devRate > 0.0 && h->instance) {
+                    InitPhaseGuard pg("prepare", e.instanceId);   // 3f-6 watchdog phase
                     // Stage 3e-2: playhead re-asserted before the real-device
                     // prepare (see loadHostedPlugin).
                     h->instance->setPlayHead(&g_audioCallback.playHead);
@@ -3956,14 +4051,21 @@ int main(int argc, char** argv) {
                           "ms — instance set discarded | seq " + std::to_string(req.seq));
                 continue;
             }
-            // ─── Publish the new SET (Stage 3d-4) ───
+            // ─── Publish the new SET (Stage 3d-4; publish-safe since 3f-6) ───
             // Successful entries take their parse-assigned slots; a requested
             // id whose instantiate FAILED RETAINS its previous instance (moved
             // into the new set at the requested slot — slots always mirror the
             // request, so the just-published routing table stays truthful);
             // ids absent from the request retire (the group vanished from the
             // project). Replaced/retired instances: editors close BEFORE the
-            // swap, state captured after (alive in the 250ms retire grace).
+            // swap; the NEW set's loaded receipts go out IMMEDIATELY after the
+            // swap (3f-6 reorder — receipts must never wait behind the retired
+            // instances' state captures); the captures then run on the MESSAGE
+            // thread with a 3000 ms init-thread budget (the 3f-6 defect: a
+            // slow plugin getStateInformation on THIS thread stalled the
+            // publish section forever — no receipts, and every later load
+            // wedged behind "init started (async)").
+            InitPhaseGuard publishGuard("publish", "-");   // 3f-6 watchdog phase (set-wide)
             auto nextSet = std::make_shared<InstanceSet>();
             std::unordered_map<std::string, size_t> entryIdxById;
             for (size_t i = 0; i < req.entries.size(); ++i)
@@ -4002,22 +4104,32 @@ int main(int argc, char** argv) {
                 }
             }
             g_pluginLatencySamples.store(maxLat, std::memory_order_release);
+            const auto tPub = std::chrono::steady_clock::now();
+            const auto pubMs = [&tPub]() {
+                return std::chrono::duration_cast<std::chrono::milliseconds>(
+                    std::chrono::steady_clock::now() - tPub).count();
+            };
+            // Stage 3f-6 receipt: the publish section now SPEAKS — every step
+            // is preceded by a named, elapsed-stamped line, so a wedged
+            // publish is locatable in engine.log by its last receipt.
+            engineLog("[plugin] publish: swapping set | seq " + std::to_string(req.seq) +
+                      " retired=" + std::to_string(retiredNow.size()) +
+                      " elapsed=" + std::to_string(pubMs()) + "ms");
             // Stage 3d-1: the outgoing instances' editors must not outlive
             // them — close by id BEFORE the swap (scheduled on the pump thread,
             // well inside the retire grace; the audio callback never touches
             // editors).
             for (HostedPlugin* old : retiredNow) closeEditorAsync(old->instanceId);
             g_instances.store(std::move(nextSet), std::memory_order_acq_rel);
-            // Stage 3d-3: capture the OUTGOING instances' states (the user's
-            // patches — a reload must not lose them). Alive in the retire grace.
-            for (HostedPlugin* old : retiredNow) {
-                if (old->instance) captureAndBroadcastState(*old, "replace");
-                std::lock_guard<std::mutex> rlock(g_retireMutex);
-                g_retiredPlugins.push_back({old, std::chrono::steady_clock::now()});
-            }
-            // Per-instance loaded receipts (log + plugin_state, additive
-            // instanceId field). Retained-on-failure instances re-report too —
-            // the frontend's editor gate keys on plugin_state per instance.
+
+            // Stage 3f-6 REORDER: the NEW set's receipts go out FIRST —
+            // per-instance loaded receipts (log + plugin_state, additive
+            // instanceId field) and the 3e-1 capability handshake, all
+            // IMMEDIATELY after the swap and BEFORE any state capture of the
+            // retired instances. The frontend unblocks the moment the set is
+            // live; a 10-second capture can no longer starve them. Retained-
+            // on-failure instances re-report too — the frontend's editor gate
+            // keys on plugin_state per instance.
             const auto liveSet = g_instances.load(std::memory_order_acquire);
             for (const auto& e : req.entries) {
                 HostedPlugin* h = liveSet ? liveSet->byId(e.instanceId) : nullptr;
@@ -4053,6 +4165,112 @@ int main(int argc, char** argv) {
                               " classId=\"" + h->classId + "\"");
                 }
             }
+
+            // Stage 3f-6: capture the OUTGOING instances' states (the user's
+            // patches — a reload must not lose them) OFF the init thread.
+            // getStateInformation runs on the MESSAGE thread via callAsync
+            // (the same scheduling closeEditorAsync uses) while the init
+            // thread waits on the job's done flag with a 3000 ms budget — the
+            // init thread NEVER waits longer than that per retired instance.
+            // On budget expiry the capture is abandoned (the message-thread
+            // job may still complete later and broadcast its blob — harmless;
+            // the instance is only freed after the job's done flag lands, see
+            // g_retireCaptures), the TIMEOUT receipt names the instance, and
+            // the LAST EMBEDDED STATE stays authoritative (the frontend keeps
+            // its project blob). The instance then joins g_retiredPlugins
+            // exactly as before.
+            for (HostedPlugin* old : retiredNow) {
+                engineLog("[plugin] retire capture BEGIN instance=" + old->instanceId +
+                          " elapsed=" + std::to_string(pubMs()) + "ms");
+                if (old->instance != nullptr) {
+                    auto done = std::make_shared<std::atomic<bool>>(false);
+                    {
+                        std::lock_guard<std::mutex> clk(g_retireCaptureMutex);
+                        g_retireCaptures.push_back({old, done, false});
+                    }
+                    HostedPlugin* captured = old;   // lifetime guarded by the janitor's g_retireCaptures defer
+                    juce::MessageManager::callAsync([captured, done] {
+                        captureAndBroadcastState(*captured, "replace");
+                        done->store(true, std::memory_order_release);
+                    });
+                    const auto tc0 = std::chrono::steady_clock::now();
+                    bool finished = false;
+                    // The DONE check leads every iteration: a capture that
+                    // completed before shutdown must be reported as END, never
+                    // as "engine exiting" (the flag can land while this wait
+                    // is pending — node sends shutdown right after the loaded
+                    // receipts). g_should_exit only bounds the wait when the
+                    // job genuinely has not finished; the 3000 ms budget
+                    // remains the hard ceiling either way.
+                    while (true) {
+                        if (done->load(std::memory_order_acquire)) { finished = true; break; }
+                        if (g_should_exit.load()) break;
+                        const auto waitedMs = std::chrono::duration_cast<std::chrono::milliseconds>(
+                            std::chrono::steady_clock::now() - tc0).count();
+                        if (waitedMs >= 3000) break;
+                        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+                    }
+                    const long long capMs = std::chrono::duration_cast<std::chrono::milliseconds>(
+                        std::chrono::steady_clock::now() - tc0).count();
+                    if (finished) {
+                        // The job finished touching the instance — drop its
+                        // record so the janitor's 250 ms grace governs the free
+                        // exactly as before.
+                        std::lock_guard<std::mutex> clk(g_retireCaptureMutex);
+                        g_retireCaptures.erase(
+                            std::remove_if(g_retireCaptures.begin(), g_retireCaptures.end(),
+                                           [old](const PendingRetireCapture& rc) { return rc.plugin == old; }),
+                            g_retireCaptures.end());
+                        engineLog("[plugin] retire capture END instance=" + old->instanceId +
+                                  " " + std::to_string(capMs) + " ms");
+                    } else {
+                        engineLog("[plugin] retire capture TIMEOUT instance=" + old->instanceId +
+                                  " " + std::to_string(capMs) + " ms (3000 ms budget)"
+                                  + std::string(g_should_exit.load() ? " — engine exiting" : "") +
+                                  " — last embedded state stays authoritative");
+                    }
+                }
+                std::lock_guard<std::mutex> rlock(g_retireMutex);
+                g_retiredPlugins.push_back({old, std::chrono::steady_clock::now()});
+            }
+            engineLog("[plugin] publish: done | seq " + std::to_string(req.seq) +
+                      " retired=" + std::to_string(retiredNow.size()) +
+                      " elapsed=" + std::to_string(pubMs()) + "ms");
+        }
+    });
+
+    // ─── Stage 3f-6 — init-phase watchdog thread ────────────────────────────
+    // A hang INSIDE the init worker (plugin code: instantiate, state restore,
+    // prepare, or the publish section) is invisible to the worker itself —
+    // the worker IS the hang. This 1 s observer reads the g_initPhase record
+    // the worker writes at every phase transition and NAMES any single phase
+    // older than 60 s (log only — no kill, no skip: killing a thread that
+    // holds plugin/JUCE locks wedges the process harder than the hang). The
+    // receipt turns the user's symptom ("loaded never appears, later loads
+    // log init started and nothing more") into a located phase + instance.
+    std::thread plugin_init_watchdog([]() {
+        while (!g_should_exit.load()) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(1000));
+            if (g_should_exit.load()) break;
+            std::string phase, iid;
+            std::chrono::steady_clock::time_point startedAt{};
+            bool active = false, named = false;
+            {
+                std::lock_guard<std::mutex> lk(g_initPhase.mtx);
+                phase = g_initPhase.phase;
+                iid = g_initPhase.instanceId;
+                startedAt = g_initPhase.startedAt;
+                active = g_initPhase.active;
+                named = g_initPhase.named;
+            }
+            if (!active || named || phase.empty()) continue;
+            const long long ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                std::chrono::steady_clock::now() - startedAt).count();
+            if (ms < 60000) continue;
+            engineLog("[plugin] init WATCHDOG phase=" + phase + " instance=" + iid + " " +
+                      std::to_string(ms) + " ms");
+            std::lock_guard<std::mutex> lk(g_initPhase.mtx);
+            g_initPhase.named = true;   // one WATCHDOG line per phase occurrence
         }
     });
 
@@ -4197,6 +4415,9 @@ int main(int argc, char** argv) {
     server.stop();
     state_thread.join();
     plugin_init_thread.join();
+    // Stage 3f-6: the watchdog sleeps in 1 s slices and re-checks
+    // g_should_exit — join is bounded.
+    plugin_init_watchdog.join();
     // Stage 3f-2: the probe thread checks g_should_exit between its 250 ms
     // wait slices and kills any in-flight probe child — join is bounded.
     scan_probe_thread.join();

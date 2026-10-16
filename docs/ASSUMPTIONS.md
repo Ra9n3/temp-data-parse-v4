@@ -1651,3 +1651,89 @@ not-hosted-yet toast rather than becoming a dead button — the user keeps a
 named explanation instead of silence. (3) The 2s gate timeout is a safety
 net, not a tuning knob; on a healthy engine the playing=false state arrives
 in one or two state frames.
+
+## Stage 3f-6 — a reload that replaces live instances must publish (tag `publish-safe-v1`, engine 0.8.2)
+
+**The defect, named.** After "[plugin] prepared (async)" for every requested
+instance, the user's engine.log went silent: no "[plugin] loaded", no
+"state captured N bytes (replace)", and every later load logged
+"init started (async)" and nothing more. A first load with no live instances
+worked. The publish section ran `captureAndBroadcastState(*old, "replace")`
+— i.e. `getStateInformation` — ON THE INIT THREAD, and a plugin whose
+getStateInformation blocks (Falcon, BBCSO) blocked the WORKER: the set was
+already stored, but the receipts lived after the capture loop, so nothing
+was ever published to the frontend, and the single worker could never pick
+up a newer load. The fix moves the captures OFF the init thread and reorders
+the receipts ahead of them; the worker itself is never allowed to block
+longer than 3000 ms per retired instance.
+
+**Receipts first, captures second (the reorder).** The publish section now
+emits the per-instance "[plugin] loaded" log lines and the plugin_state
+"loaded" + plugin_capabilities messages IMMEDIATELY after
+`g_instances.store` — BEFORE any state capture. The frontend (and CI) keys
+on those receipts; a 10-second capture can no longer starve them. Every
+publish step also speaks in engine.log: "[plugin] publish: swapping set",
+"retire capture BEGIN/END/TIMEOUT instance=…", and "publish: done", each
+elapsed-stamped, so a wedged publish is locatable by its last receipt.
+
+**Where the capture runs, and what the 3000 ms budget means.** Each retired
+instance's getStateInformation is scheduled on the message thread
+(`MessageManager::callAsync`, the same scheduling closeEditorAsync uses)
+while the init thread waits on the job's done flag for at most 3000 ms.
+Expiry logs "retire capture TIMEOUT instance=…" and continues — the LAST
+EMBEDDED STATE stays authoritative (the frontend keeps its project blob; a
+too-large capture already behaved this way). Two boundaries are deliberate:
+(1) the budget bounds the INIT THREAD's wait, not the capture itself — a
+message-thread job that eventually completes still broadcasts its blob
+(harmless, and the state is not lost if the plugin finishes late); (2) the
+budget cannot unstick the message thread itself — a plugin stalled inside
+getStateInformation occupies the MM for as long as it stalls, exactly as in
+any host. That is the honest physics of the defect: the host's DUTY is to
+keep publishing and keep accepting loads, not to interrupt plugin code.
+
+**Instance lifetime vs. an outliving capture job.** A capture that outlives
+its 3000 ms budget may still be queued or mid-sleep when the retire grace
+(250 ms) would normally free the instance — the job would dereference freed
+memory. Each armed capture therefore pairs the instance with its done flag
+(`g_retireCaptures`), and the janitor's free is DEFERRED until the flag
+lands (named once per record: "retire deferred — capture job still pending
+on the message thread"). A capture that never runs (message thread wedged
+past shutdown) leaks the instance deliberately — process exit reclaims, the
+standing 3c teardown policy. Conversely, a capture that completed before the
+budget expired is reported as END — the done check leads every poll
+iteration, so a completed capture is never misreported by the engine-exiting
+shortcut.
+
+**The 60 s phase watchdog.** A hang INSIDE the init worker is invisible to
+the worker (it IS the hang), so a separate 1 s observer thread reads a phase
+record the worker writes at every transition (instantiate / state-restore /
+prepare / publish, with the instance id) and names any single phase older
+than 60 s: "[plugin] init WATCHDOG phase=<name> instance=<id> <ms> ms".
+Logging only — no kill, no skip: killing a thread that holds plugin/JUCE
+locks wedges the process harder than the hang, and the receipts exist to
+EXPLAIN, not to punish. The mutex is held microseconds at transitions, never
+inside plugin code, so the record stays readable exactly when it matters.
+
+**JUCE's creation-time state handshake (discovered locally, load-bearing for
+the CI design).** `createPluginInstance` called from a non-message thread
+round-trips through the message thread, and the VST3 component→controller
+state handshake calls getStateInformation on the NEW instance DURING
+creation. Consequences: (1) a slow getStateInformation can delay an
+INSTANTIATE too — the watchdog names that phase as well; (2) the fixture's
+slow-capture hook is gated on `preparedOnce` (set in prepareToPlay) so the
+probe stalls only already-prepared — i.e. retireable — instances, never the
+creation handshake of the set being published.
+
+**What CI proves and what only hands can.** The multi-instance test now runs
+a publish-safe probe: the marker file is created mid-session (the engine's
+env names it), a replace load retires TWO live slow instances, and the test
+asserts the NEW set's loaded receipts arrive < 5 s, that a FOLLOWING load is
+processed (post-fix it waits for the MM to drain the unkillable stalls —
+JUCE's createInstance also uses the MM), that the deferred captures'
+broadcasts all land (the drain proof), and that a post-drain load's capture
+completes (END, not TIMEOUT). engine.log is asserted for the publish,
+BEGIN, TIMEOUT and END receipts. The 10 s stall is a SIMULATION: the real
+Falcon/BBCSO behaviour — whether their getStateInformation blocks, for how
+long, and whether the patches survive a rapid replace — can only be verified
+by hand on real Windows with the shipped installer (stated in the commit
+message).

@@ -341,6 +341,14 @@ jobs:
           # binary under a DIFFERENT libraryGroup id — universality is the point.
           Write-Host "=== Test D2: multi-instance hosting (editors, per-instance state) ==="
           $env:SCORCH_TESTVST_LOG = "1"
+          # Stage 3f-6: the engine process's env names the slow-state marker
+          # file; the test script (same shell session, same env) creates and
+          # removes it mid-session to stall every PREPARED test-synth
+          # instance's getStateInformation while it exists (a being-created
+          # instance is not prepared yet, so JUCE's creation state handshake
+          # stays fast). Only D2 opts in — A/D/E engines run without it.
+          $env:SCORCH_TESTVST_SLOWSTATE_FILE = (Join-Path (Get-Location) "scorch-3f6-slowstate.marker")
+          Remove-Item $env:SCORCH_TESTVST_SLOWSTATE_FILE -ErrorAction SilentlyContinue
           $procD2 = Start-Process -FilePath "engine/build/scorch-engine.exe" -ArgumentList "--port","9383","--null-audio" -PassThru -NoNewWindow -RedirectStandardOutput "engine-d2-stdout.txt" -RedirectStandardError "engine-d2-stderr.txt"
           Start-Sleep -Seconds 3
           try {
@@ -363,11 +371,26 @@ jobs:
             $instCount = ($instNotes | Measure-Object).Count
             if ($instCount -lt 2) { throw "multi-instance plugin-side proof missing: expected notes from BOTH instances on ch=1, got $instCount" }
             Write-Host "Multi-instance plugin-side proof: $instCount ch=1 NOTE_ONs across TWO instances"
-            $procD2.WaitForExit(10000) | Out-Null
+            # Stage 3f-6: plugin-side proof that the slow-capture path was
+            # ACTUALLY taken — inst-a's capture job runs while the marker is
+            # armed and STALLS inside getStateInformation. (The LATER capture
+            # jobs queue behind that 10 s sleep and start after the test has
+            # disarmed the marker — the marker is checked at ENTRY — so their
+            # TIMEOUT receipts come from the init thread's 3000 ms budget
+            # expiring against a BUSY message thread, which is the exact
+            # defect shape: a slow capture starving the publish section.)
+            $slowCaps = (Select-String -Path "engine-d2-stdout.txt" -Pattern "\[testvst\] slow state capture: marker present").Count
+            if ($slowCaps -lt 1) { throw "3f-6: slow-capture marker path never taken — the fixture hook was not exercised" }
+            Write-Host "3f-6 slow-capture proof: $slowCaps stall(s) inside getStateInformation"
+            $procD2.WaitForExit(20000) | Out-Null
             if (-not $procD2.HasExited -or $procD2.ExitCode -ne 0) { throw "Engine D2 did not exit cleanly (code=$($procD2.ExitCode))" }
-            Write-Host "Engine D2 clean exit 0 (multi-instance hosting verified)"
+            Write-Host "Engine D2 clean exit 0 (multi-instance + publish-safe verified)"
           } finally {
             Stop-Process -Id $procD2.Id -Force -ErrorAction SilentlyContinue
+            # Stage 3f-6 cleanup: the marker must never leak into later tests
+            # (an armed marker would stall any capture that outlives D2).
+            Remove-Item $env:SCORCH_TESTVST_SLOWSTATE_FILE -ErrorAction SilentlyContinue
+            Remove-Item Env:\SCORCH_TESTVST_SLOWSTATE_FILE -ErrorAction SilentlyContinue
             Remove-Item Env:\SCORCH_TESTVST_LOG -ErrorAction SilentlyContinue
           }
 
@@ -424,6 +447,26 @@ jobs:
           if ($initReceipts -lt 2) { throw "engine.log missing async plugin-init receipts (got $initReceipts, need 2)" }
           $loadedReceipts = (Select-String -Path $engineLog -Pattern "\[plugin\] loaded name=").Count
           if ($loadedReceipts -lt 2) { throw "engine.log missing plugin-loaded receipts (got $loadedReceipts, need 2)" }
+          # Stage 3f-6 publish-safe receipts: the publish section now SPEAKS.
+          # Multi mode publishes 3 sets during the probe (seq 4/5/6) and test D
+          # publishes its own loads — lower bound 3 covers the probe alone.
+          $publishReceipts = (Select-String -Path $engineLog -Pattern "\[plugin\] publish: swapping set").Count
+          if ($publishReceipts -lt 3) { throw "engine.log missing 3f-6 publish receipts (got $publishReceipts, need >= 3)" }
+          # Exactly the 3 retire captures under the armed marker: inst-a and
+          # inst-b (seq 4) check the marker while it is deterministically
+          # present (their jobs run within seconds; the test disarms it only
+          # after their deferred broadcasts). inst-slow's capture (seq 5) runs
+          # a hair before the disarm lands — its TIMEOUT is near-certain but
+          # racing (µs between its marker check and the test's unlink), so the
+          # honest hard bound is 2.
+          $retireTimeouts = (Select-String -Path $engineLog -Pattern "\[plugin\] retire capture TIMEOUT instance=").Count
+          if ($retireTimeouts -lt 2) { throw "engine.log missing 3f-6 retire-capture TIMEOUT receipts (got $retireTimeouts, need >= 2)" }
+          $retireBegins = (Select-String -Path $engineLog -Pattern "\[plugin\] retire capture BEGIN instance=").Count
+          if ($retireBegins -lt 4) { throw "engine.log missing 3f-6 retire-capture BEGIN receipts (got $retireBegins, need >= 4)" }
+          # The post-disarm load (seq 6) retires inst-fast with NO marker —
+          # its capture completes within the budget (END receipt).
+          $retireEnds = (Select-String -Path $engineLog -Pattern "\[plugin\] retire capture END instance=").Count
+          if ($retireEnds -lt 1) { throw "engine.log missing 3f-6 retire-capture END receipt (got $retireEnds, need >= 1 — the fast path must still complete)" }
           $reuseReceipts = (Select-String -Path $engineLog -Pattern "\[plugin\] reuse while playing").Count
           if ($reuseReceipts -lt 1) { throw "engine.log missing the mid-play reuse receipt (same-plugin fast path)" }
           $rejectReceipts = (Select-String -Path $engineLog -Pattern "\[load\] REJECTED while playing").Count
