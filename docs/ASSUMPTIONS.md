@@ -1350,3 +1350,64 @@ connect recovery is already automatic, and the editor cross-process work is
 disproportionate. Revisit IF a real library demonstrates processBlock
 crashes in the user's workflow — the scan-worker child pattern and the
 multi-instance per-entry independence are the two halves to reuse.
+
+## Stage 3f-1 — fresh install must start empty (NSIS uninstall hygiene)
+
+The user's report: after uninstalling Scorch and reinstalling, the app came
+back with the OLD project, mix and logs. Root cause: Scorch's saved data
+lives outside the install directory, so the uninstaller (which only removes
+the install dir) never touches it:
+
+- `%LOCALAPPDATA%\com.scorch.app` — the WebView2 user-data folder. This is
+  where the webview's localStorage persists, i.e. the frontend's autosave
+  key `scorch.autosave.v1` and mix key `scorch.mix.v1`
+  (src/state/persistence.ts), plus any other WebView2 storage.
+- `%APPDATA%\scorch` — engine.log, error.log, and any engine-owned data.
+
+### The mechanism
+
+`bundle.targets` is now `["nsis"]` ONLY — the **msi target is dropped**.
+Uninstall hooks exist only for the NSIS bundler; an MSI could never honor
+the fresh-install contract, so shipping both installers meant one of them
+silently contradicted it. The MSI upload step is removed from desktop.yml;
+NSIS remains the Windows installer (as it has been since Stage 2).
+
+`src-tauri/installer-hooks.nsh` (wired via
+`bundle.windows.nsis.installerHooks`) defines `NSIS_HOOK_POSTUNINSTALL`,
+which Tauri's generated script inserts at the tail of the uninstall section
+(verified against the 2.9.x bundler template — `!ifmacrodef
+NSIS_HOOK_POSTUNINSTALL` → `!insertmacro`):
+
+- `RMDir /r "$LOCALAPPDATA\com.scorch.app"`
+- `RMDir /r "$APPDATA\scorch"`
+
+### The update guard
+
+The deletion must NOT run when the uninstall is the teardown step of an
+upgrade (a Tauri-plugin-updater update uninstalls the old version before
+installing the new one — wiping saved data there would destroy exactly what
+the update is supposed to preserve). Tauri's NSIS template declares
+`Var UpdateMode`, sets it from the `/UPDATE` command-line option, and the
+updater passes that flag — verified in the 2.9.x template source. The hook
+is therefore guarded with `${If} $UpdateMode != 1` (LogicLib is included by
+the generated script itself; its own code uses the same syntax).
+
+### What is deliberately NOT deleted
+
+`%APPDATA%\VST3`, `%COMMONPROGRAMFILES%\VST3`,
+`%LOCALAPPDATA%\Programs\Common\VST3`, and every other plugin/sample-library
+location are NEVER touched. The fresh-install contract covers SCORCH's own
+saved state only — a reinstall must still find the user's plugins.
+
+### CI proof and its honest limits
+
+desktop.yml gains a "Verify NSIS uninstall hook" step after the Tauri
+build: it locates the GENERATED `installer.nsi` (bundle output first, then a
+recursive fallback) and asserts three fragments — both `RMDir /r` delete
+paths and `$UpdateMode != 1`. This proves the shipped installer CARRIES the
+hook. What CI cannot prove: the runtime behaviour — that a real
+uninstall leaves both folders gone, that a reinstall starts empty, and that
+an update-mode uninstall really preserves them. Those are the user's by-hand
+acceptance steps on Windows (stated in the commit message). A `$UpdateMode`
+rename in a future Tauri bundler would fail the CI grep loudly rather than
+silently break the guard.

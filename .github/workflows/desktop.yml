@@ -429,8 +429,33 @@ jobs:
       - name: tsc --noEmit (gate)
         run: npx tsc --noEmit
 
-      - name: Tauri build (msi + nsis + raw exe)
+      # Stage 3f-1: NSIS ONLY (the fresh-install uninstall hook is NSIS-only;
+      # MSI cannot express it, so the msi target is dropped entirely).
+      - name: Tauri build (nsis + raw exe)
         run: npx tauri build
+
+      # Stage 3f-1 — the fresh-install uninstall hook MUST be present in the
+      # generated NSIS script: both delete paths ($LOCALAPPDATA\com.scorch.app
+      # and $APPDATA\scorch) and the $UpdateMode guard (an update-mode
+      # uninstall must NOT wipe saved data). The real uninstall/reinstall
+      # round-trip can only be verified BY HAND on Windows — CI proves the
+      # script carries the hook, not the runtime behaviour.
+      - name: Verify NSIS uninstall hook (fresh-install hygiene)
+        shell: pwsh
+        run: |
+          $nsi = Get-ChildItem -Path "src-tauri/target/release/bundle/nsis" -Filter "installer.nsi" -ErrorAction SilentlyContinue | Select-Object -First 1
+          if (-not $nsi) { $nsi = Get-ChildItem -Path "src-tauri/target" -Recurse -Filter "installer.nsi" -ErrorAction SilentlyContinue | Select-Object -First 1 }
+          if (-not $nsi) { throw "generated installer.nsi not found under src-tauri/target" }
+          Write-Host "Generated NSIS script: $($nsi.FullName)"
+          $text = Get-Content $nsi.FullName -Raw
+          foreach ($needle in @(
+            'RMDir /r "$LOCALAPPDATA\com.scorch.app"',
+            'RMDir /r "$APPDATA\scorch"',
+            '$UpdateMode != 1'
+          )) {
+            if (-not $text.Contains($needle)) { throw "installer.nsi missing fresh-install hook fragment: $needle" }
+          }
+          Write-Host "NSIS uninstall hook verified: both delete paths + UpdateMode guard present"
 
       - name: Create web-pack zip (manifest + dist/ at root)
         shell: pwsh
@@ -472,14 +497,6 @@ jobs:
         with:
           name: scorch-engine-windows-exe
           path: engine/build/scorch-engine.exe
-          if-no-files-found: error
-          retention-days: 14
-
-      - name: Upload MSI installer
-        uses: actions/upload-artifact@v4
-        with:
-          name: scorch-windows-msi
-          path: src-tauri/target/release/bundle/msi/*.msi
           if-no-files-found: error
           retention-days: 14
 
