@@ -1498,3 +1498,51 @@ delete-path/guard content in the hook file itself. A future bundler that
 inlines hooks would pass BOTH proofs; a bundler that stops emitting the
 `!include` fails the wiring proof loudly instead of silently shipping an
 unwired hook.
+
+## Stage 3f-3a — owned editor windows (tag `owned-editors-v1`)
+
+**The decision and its scope.** Editor windows are owned via
+`SetWindowLongPtrW(GWLP_HWNDPARENT, hostHwnd)` applied ONCE, immediately
+after `setVisible(true)`, on the message thread. Ownership (GWLP_HWNDPARENT)
+was chosen over `SetParent()` deliberately: an owned window keeps its own
+message loop, its own min/max/close boxes and its movability, while the
+owner relationship gives exactly the requested effects (no taskbar button,
+minimizes/restores/closes with the app, stays above it). `SetParent` would
+have made the editor a CHILD control — wrong input semantics, clipping to
+the client area, and a lifetime entanglement JUCE's DocumentWindow is not
+designed for. The owner is applied at creation only: a window opened BEFORE
+`setHostWindow` arrived (a sub-second race after connect) stays unowned for
+its lifetime and is logged as the no-host-hwnd skip; reopening fixes it.
+This is accepted as a known, named limitation rather than adding re-parent
+bookkeeping to the raise path.
+
+**Windows-only by construction.** The whole feature lives behind
+`#if defined(_WIN32)` in the engine and `#[cfg(windows)]` in the shell
+command; on every other target the no-op is compiled in and the frontend
+never sends the message (the invoke rejects, the failure is written to
+error.log, nothing else changes). The hwnd travels as a JSON number —
+validated engine-side as a positive integer within double's exact-integer
+range; HWNDs are pointer-sized (≤ 2^47 user-space on Win64), so the number
+round-trips losslessly.
+
+**What CI proves vs. what only a by-ear test can prove.** CI (Windows
+runner) proves: the `setHostWindow` → `hostWindowSet` echo round-trip; the
+`IsWindow` guard classes (missing/invalid logged, behaviour unchanged); and
+— via a REAL PowerShell WinForms window the runner spawns and keeps alive
+for the whole run — that the engine's editor open actually executed
+`SetWindowLongPtrW` successfully (exactly one `[editor] host-owner applied`
+receipt in host mode; exactly two missing-path skips in multi mode). CI
+CANNOT prove the visible semantics: no taskbar entry, minimize/restore with
+the app, always-above ordering, closing with the app, and the editor staying
+separately movable. Those need the shipped installer on real Windows by
+ear. The PowerShell holder is a hard dependency in host mode on win32 (the
+runner fails loudly naming the holder if it cannot acquire one) — same
+precedent as the editor phases themselves requiring an interactive session.
+
+**Version note (stage bookkeeping).** The 3f stage was planned with the
+engine bump in its (then-unnamed) last sub-stage; the spec truncation
+reordered delivery and the bump to 0.8.1 landed with 3f-2. 3f-3a and 3f-4
+therefore ship WITHOUT a further bump: the stage target "0.8.0 → 0.8.1" is
+already satisfied, the runner version asserts stay untouched, and no CI
+assertion changes meaning. If a distinct version for the pill-swap build is
+wanted, it is a one-line `kEngineVersion` change plus this note's update.

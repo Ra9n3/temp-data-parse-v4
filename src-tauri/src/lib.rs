@@ -82,6 +82,30 @@ fn vst3_paths() -> Vec<String> {
     dirs
 }
 
+/// Stage 3f-3a — the main window's HWND as a plain number. The frontend hands
+/// it to the engine ({"type":"setHostWindow","hwnd":<n>}) so engine-owned
+/// plugin editor windows can be made OWNED by the app window
+/// (SetWindowLongPtrW GWLP_HWNDPARENT engine-side): no taskbar entries,
+/// minimize/close with the app, z-ordered above it. Windows-only: other
+/// targets return Err and the frontend simply never sends the message (the
+/// engine keeps today's floating-window behaviour).
+#[tauri::command]
+fn main_window_hwnd(app: tauri::AppHandle) -> Result<u64, String> {
+    #[cfg(windows)]
+    {
+        let win = app
+            .get_webview_window("main")
+            .ok_or_else(|| "main window not found".to_string())?;
+        let h = win.hwnd().map_err(|e| format!("no hwnd: {e}"))?;
+        Ok(h.0 as u64)
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = app;
+        Err("main_window_hwnd is Windows-only".to_string())
+    }
+}
+
 fn web_root() -> Option<PathBuf> {
     Some(std::env::current_exe().ok()?.parent()?.join("web"))
 }
@@ -143,7 +167,13 @@ pub fn run() {
 
             resp(StatusCode::NOT_FOUND, b"not found".to_vec(), None)
         })
-        .invoke_handler(tauri::generate_handler![engine::get_engine_info, append_error_log, open_devtools, vst3_paths])
+        .invoke_handler(tauri::generate_handler![
+            engine::get_engine_info,
+            append_error_log,
+            open_devtools,
+            vst3_paths,
+            main_window_hwnd
+        ])
         .setup(|app| {
             if let Some(version) = current_version() {
                 if let Some(root) = web_root() {

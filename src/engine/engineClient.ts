@@ -702,6 +702,21 @@ export class EngineClient {
     }
   }
 
+  /**
+   * Stage 3f-3a: hand the engine the app's main-window HWND (Windows shells
+   * only) so engine-owned plugin editor windows are OWNED by the app — no
+   * taskbar entries, minimize/close with the app, z-ordered above it. The
+   * engine answers hostWindowSet (echo) or a bad_request error; both are
+   * fire-and-forget here. A client that never sends (browser dev,
+   * non-Windows, older shell) keeps today's floating-window behaviour
+   * engine-side — nothing else depends on this message.
+   */
+  sendHostWindow(hwnd: number): void {
+    if (this.ws && this.ws.readyState === WebSocket.OPEN) {
+      this.ws.send(JSON.stringify({ type: "setHostWindow", hwnd }));
+    }
+  }
+
   /** Stage 3d-1: close the editor window (idempotent engine-side). */
   closeEditor(instanceId = "hosted"): void {
     if (this.ws && this.ws.readyState === WebSocket.OPEN) {

@@ -1,7 +1,7 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
-  "description": "Capability for the main window",
+  "description": "Capability for the main window. Grants the core plugin permission set to the 'main' webview. Stage 3f-3a note: application-defined commands (main_window_hwnd, vst3_paths, append_error_log, open_devtools, get_engine_info) are NOT ACL-gated in Tauri v2 — they are registered via generate_handler and are invocable from every window listed here ('main'). There is no per-app-command permission identifier to 'allow'; inventing one fails the bundler's schema validation. The windows:['main'] scoping above IS the allow-list for the new main_window_hwnd command.",
   "windows": ["main"],
   "permissions": [
     "core:default"

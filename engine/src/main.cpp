@@ -599,6 +599,67 @@ void broadcastJson(const std::string& msg) {
         if (client) client->send(msg);
 }
 
+// ── Stage 3f-3a: editor windows belong to the app (owned, not top-level) ────
+// The frontend sends {"type":"setHostWindow","hwnd":<number>} once per fresh
+// engine session (the Tauri shell resolves its main window's HWND via the new
+// main_window_hwnd() command; browser dev and non-Windows shells never send
+// it). When a PluginEditorWindow is SHOWN on Windows, the engine sets its
+// OWNER to that window with SetWindowLongPtrW(GWLP_HWNDPARENT): no taskbar
+// button, minimizes/restores with the app, stays above it, dies with it.
+// This is OWNERSHIP, deliberately NOT SetParent() — the window stays a
+// separate, movable top-level popup. A missing or invalid hwnd keeps
+// today's behaviour and is LOGGED (spec point 4); nothing else depends on
+// this message ever arriving.
+static std::atomic<uintptr_t> g_hostHwnd{ 0 };
+
+// Defined next to handle_open_editor (protocol handlers); forward-declared so
+// the dispatch table can reference it regardless of definition order.
+void handle_set_host_window(const juce::var& json, ix::WebSocket& ws);
+
+#if defined(_WIN32)
+// One-shot ownership application. Runs on the message thread immediately
+// after the editor window is shown (the peer — and therefore the HWND —
+// exists). Every terminal path SPEAKS: applied, or skipped/FAILED naming the
+// exact class (no host hwnd / stale host hwnd / editor hwnd unavailable /
+// SetWindowLongPtr error). The Windows-CI runner drives the "applied" path
+// with a real PowerShell-WinForms window handle; desktop.yml greps the
+// receipts (see workflow Test E receipt block).
+static void applyHostWindowOwner(juce::DocumentWindow& win, const std::string& iid) {
+    auto hexOf = [](uintptr_t v) {
+        char buf[32];
+        std::snprintf(buf, sizeof(buf), "0x%llx", static_cast<unsigned long long>(v));
+        return std::string(buf);
+    };
+    const uintptr_t host = g_hostHwnd.load(std::memory_order_acquire);
+    if (host == 0) {
+        engineLog("[editor] host-owner skipped (no host hwnd) instance=" + iid);
+        return;
+    }
+    if (IsWindow(reinterpret_cast<HWND>(host)) == FALSE) {
+        engineLog("[editor] host-owner skipped (invalid host hwnd " + hexOf(host) + ") instance=" + iid);
+        return;
+    }
+    HWND editorHwnd = nullptr;
+    if (auto* peer = win.getPeer())
+        editorHwnd = reinterpret_cast<HWND>(peer->getNativeHandle());
+    if (editorHwnd == nullptr || IsWindow(editorHwnd) == FALSE) {
+        engineLog("[editor] host-owner skipped (editor hwnd unavailable) instance=" + iid);
+        return;
+    }
+    SetLastError(0);
+    const LONG_PTR prev = SetWindowLongPtrW(editorHwnd, GWLP_HWNDPARENT, static_cast<LONG_PTR>(host));
+    if (prev == 0 && GetLastError() != 0) {
+        engineLog("[editor] host-owner FAILED (SetWindowLongPtr err=" + std::to_string(GetLastError()) + ") instance=" + iid);
+        return;
+    }
+    engineLog("[editor] host-owner applied instance=" + iid + " hwnd=" + hexOf(host));
+}
+#else
+// Non-Windows: there is no HWND-ownership concept; behaviour unchanged by
+// design (spec point 4 keeps today's behaviour outside the shipped shell).
+static void applyHostWindowOwner(juce::DocumentWindow&, const std::string&) {}
+#endif
+
 class PluginEditorWindow : public juce::DocumentWindow {
 public:
     PluginEditorWindow(std::string instanceId, const juce::String& title)
@@ -695,6 +756,9 @@ void openEditorWindow(const std::string& iid, HostedPlugin* owner) {
     win->setBounds(juce::jmax(work.getX(), work.getCentreX() - cw / 2),
                    juce::jmax(work.getY(), work.getCentreY() - ch / 2), cw, ch);
     win->setVisible(true);
+    // Stage 3f-3a: the window is SHOWN — its HWND exists; hand ownership to
+    // the app's main window when one was announced via setHostWindow.
+    applyHostWindowOwner(*win, iid);
     clearPending();   // terminal: the window is up and receipted below
     {
         std::lock_guard<std::mutex> lock(g_editorMutex);
@@ -3349,6 +3413,35 @@ void handle_panic() {
 // {"type":"openEditor","instanceId"?} — validate on the WS thread, create on
 // the message thread (window work is illegal anywhere else). No live
 // instance is the editor_unavailable negative path (CI asserts it).
+
+// {"type":"setHostWindow","hwnd":<number>} — Stage 3f-3a. The shell frontend
+// sends its main window's HWND on connect (Tauri command main_window_hwnd());
+// the engine stores it and every SUBSEQUENTLY opened PluginEditorWindow on
+// Windows becomes OWNED by that window (applyHostWindowOwner above). The
+// reply echoes the accepted hwnd so thin clients (and the CI runner) can
+// assert the parse+store round-trip; the owner application itself is proven
+// by the engine.log receipt (desktop.yml grep). A malformed message is a
+// NAMED error, never a crash — and no other behaviour depends on this
+// message arriving (missing/invalid = today's floating-window behaviour).
+void handle_set_host_window(const juce::var& json, ix::WebSocket& ws) {
+    juce::DynamicObject* obj = json.getDynamicObject();
+    const double h = obj ? static_cast<double>(obj->getProperty("hwnd")) : 0.0;
+    // Windows HWNDs are pointer-sized; a frontend number must be a positive
+    // integer within double's exact-integer range (the shell resolves the
+    // real handle; 0/"undefined"/fractions are all malformed).
+    if (!(h >= 1.0) || h > 9.007199254740992e15 || h != std::floor(h)) {
+        ws.send(std::string("{\"type\":\"error\",\"code\":\"bad_request\",\"echo\":\"setHostWindow\","
+                            "\"detail\":\"hwnd must be a positive integer number\"}"));
+        engineLog("[editor] host window REJECTED (hwnd missing or not a positive integer)");
+        return;
+    }
+    g_hostHwnd.store(static_cast<uintptr_t>(h), std::memory_order_release);
+    char hex[32];
+    std::snprintf(hex, sizeof(hex), "0x%llx", static_cast<unsigned long long>(h));
+    engineLog(std::string("[editor] host window set hwnd=") + hex);
+    ws.send(std::string("{\"type\":\"hostWindowSet\",\"hwnd\":") + std::to_string(static_cast<long long>(h)) + "}");
+}
+
 void handle_open_editor(const juce::var& json, ix::WebSocket& ws) {
     // Stage 3d-4: instanceId now ADDRESSES a specific hosted instance (the
     // frontend sends the track's libraryGroup id); an empty/"hosted" id
@@ -3592,6 +3685,8 @@ int main(int argc, char** argv) {
                     handle_mix(parsed);
                 } else if (type == "dispatch_log") {
                     handle_dispatch_log(parsed, ws);
+                } else if (type == "setHostWindow") {
+                    handle_set_host_window(parsed, ws);
                 } else if (type == "openEditor") {
                     handle_open_editor(parsed, ws);
                 } else if (type == "closeEditor") {

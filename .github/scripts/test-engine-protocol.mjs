@@ -73,6 +73,13 @@
 //         RAISES the existing window (focused=true — ONE editor per
 //         instance), closeEditor closes cleanly. The fixture ships a
 //         deterministic 360x120 editor so a free plugin proves universality.
+//       Stage 3f-3a: OWNED editor windows — right after hello the runner sends
+//         {"type":"setHostWindow","hwnd":<real win32 holder HWND | 1>} (the
+//         frontend does this on connect via the shell's main_window_hwnd()),
+//         asserts the hostWindowSet ECHO, and Windows CI greps the
+//         "[editor] host-owner applied hwnd=0x…” engine.log receipt (the
+//         GWLP_HWNDPARENT owner application ran at editor open). Missing-hwnd
+//         behaviour is proven in MULTI mode, which sends nothing.
 //       Stage 3e-1: CAPABILITY HANDSHAKE — exactly one plugin_capabilities
 //         per plugin_state "loaded" (per instance), whose facts match the
 //         fixture (0 in / 2 out buses — main "Output" + aux "Aux Out",
@@ -101,6 +108,14 @@
 //     be NAMED (skipped=1, firstErrorIndex=index). Then a clean load is
 //     restored and the transport contract re-verified at scale (play → ticks
 //     advance → stop).
+
+// Stage 3f-3a runner-only imports: the Windows host-hwnd holder spawns a
+// PowerShell WinForms form and reads its HWND from a file (everything else
+// in this runner is dependency-free).
+import { spawn } from "node:child_process";
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
 
 const port = parseInt(process.argv[2] ?? "9378", 10);
 const mode = process.argv[3] ?? "null-audio";
@@ -226,6 +241,62 @@ let scaleAckOk = false, negArrayOk = false, negEventOk = false, restoreOk = fals
 let scalePlayOk = false, scaleTicksOk = false, scaleStopOk = false, scalePanicOk = false;
 let scaleFirstTick = 0, scaleLastTick = 0, scaleStateFrames = 0;
 
+// ─── Stage 3f-3a: the host-window handle (host mode) ────────────────────────
+// The real frontend sends {"type":"setHostWindow","hwnd":<n>} on connect (the
+// shell's main_window_hwnd() command). The runner mirrors that so the owner
+// application is CI-verifiable: on win32 it spawns a PowerShell WinForms form
+// and uses ITS real HWND — the engine's editor windows then get OWNED by a
+// real window, and the "[editor] host-owner applied hwnd=0x…” receipt (which
+// desktop.yml greps) proves SetWindowLongPtrW(GWLP_HWNDPARENT) actually ran.
+// On non-win32 the owner path is compile-excluded engine-side; hwnd=1 is sent
+// purely as the parse+store+echo proof. Multi mode deliberately sends
+// NOTHING — its editor opens exercise the spec's missing-hwnd path ("keep
+// today's behaviour and log it": "[editor] host-owner skipped (no host hwnd)").
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+let hostHwnd = null;            // number (host mode always resolves one or dies trying)
+let hostHwndSetOk = false;      // hostWindowSet echo received with the matching hwnd
+let hostHwndHolderProc = null;  // the PowerShell form process (killed at exit)
+if (mode === "host") {
+  if (process.platform === "win32") {
+    const hwndFile = path.join(os.tmpdir(), `scorch-runner-hwnd-${process.pid}-${Date.now()}.txt`);
+    // ShowDialog blocks (keeps the process — and the HWND — alive for the
+    // whole run); the Add_Shown handler writes the handle once it exists.
+    const psScript =
+      "Add-Type -AssemblyName System.Windows.Forms | Out-Null; " +
+      "$f = New-Object System.Windows.Forms.Form; " +
+      "$f.StartPosition = 'Manual'; $f.ShowInTaskbar = $false; " +
+      "$f.Add_Shown({ [IO.File]::WriteAllText($env:SCORCH_HWND_FILE, $f.Handle.ToString()) }); " +
+      "[void]$f.ShowDialog()";
+    hostHwndHolderProc = spawn(
+      "powershell.exe",
+      ["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-Command", psScript],
+      { env: { ...process.env, SCORCH_HWND_FILE: hwndFile }, stdio: "ignore" },
+    );
+    const deadline = Date.now() + 15000;
+    while (Date.now() < deadline) {
+      await sleep(250);
+      try {
+        const s = fs.readFileSync(hwndFile, "utf8").trim();
+        if (s) {
+          const n = Number(s);
+          if (Number.isFinite(n) && n >= 1) { hostHwnd = n; break; }
+        }
+      } catch { /* file not written yet */ }
+      if (hostHwndHolderProc.exitCode !== null) break;
+    }
+    if (hostHwnd === null) {
+      try { hostHwndHolderProc.kill(); } catch { /* already gone */ }
+      console.error("FAIL: 3f-3a could not acquire a real host HWND (PowerShell WinForms holder) — the owner-application proof cannot run on this Windows runner. The editor phases already depend on a working interactive session; this failure names the holder, not the engine.");
+      process.exit(1);
+    }
+    console.log(`[test] host-hwnd holder: ${hostHwnd} (0x${hostHwnd.toString(16)}) — setHostWindow will be sent (owner application receipt-verified in engine.log)`);
+    process.on("exit", () => { try { hostHwndHolderProc?.kill(); } catch { /* gone */ } });
+  } else {
+    hostHwnd = 1;   // parse+store+echo proof only — the owner apply is Windows-only engine-side
+    console.log("[test] non-win32: setHostWindow parse-proof hwnd=1 (owner application is compile-excluded here)");
+  }
+}
+
 const ws = new WebSocket(url);
 
 const fail = (msg) => {
@@ -241,7 +312,7 @@ const timeout = setTimeout(() => {
   } else if (mode === "scan") {
     console.error(`TIMEOUT at step ${step} (hello=${helloOk} scanSent=${scanSent} scanResult=${scanResultOk} aliveAfterCrash=${aliveAfterCrashOk} probes=${Object.keys(scanProbes).length}/3 asserted=${scanProbesAsserted} defaultScan=${defaultScanOk})`);
   } else if (mode === "host") {
-    console.error(`TIMEOUT at step ${step} phase=${hostPhase} (scan=${hostScanSent} pluginState=${hostPluginStateOk} editorNeg=${hostEditorNegOk} editorOpen=${hostEditorOpenOk} editorFocus=${hostEditorFocusOk} editorClose=${hostEditorCloseOk} stateCap=${hostStateCaptureOk} stateRestore=${hostStateRestoreOk} stateRT=${hostStateRoundtripOk} reloadAck=${hostReloadAckOk} reject=${hostRejectOk} stillPlaying=${hostPlayingAfterReject} stops=${hostStopTick1}/${hostStopTick2} peaks A/B/C=${hostPeakA.toFixed(3)}/${hostPeakB.toFixed(3)}/${hostPeakC.toFixed(3)} entries=${hostEntries.length})`);
+    console.error(`TIMEOUT at step ${step} phase=${hostPhase} (scan=${hostScanSent} hostHwnd=${hostHwndSetOk} pluginState=${hostPluginStateOk} editorNeg=${hostEditorNegOk} editorOpen=${hostEditorOpenOk} editorFocus=${hostEditorFocusOk} editorClose=${hostEditorCloseOk} stateCap=${hostStateCaptureOk} stateRestore=${hostStateRestoreOk} stateRT=${hostStateRoundtripOk} reloadAck=${hostReloadAckOk} reject=${hostRejectOk} stillPlaying=${hostPlayingAfterReject} stops=${hostStopTick1}/${hostStopTick2} peaks A/B/C=${hostPeakA.toFixed(3)}/${hostPeakB.toFixed(3)}/${hostPeakC.toFixed(3)} entries=${hostEntries.length})`);
   } else if (mode === "multi") {
     console.error(`TIMEOUT at step ${step} phase=${multiPhase} (scan=${multiScanPlugin ? "ok" : "none"} loaded=${[...multiLoaded].join(",")} reuse=${multiReuseOk} reject=${multiRejectOk} peak=${multiPeak.toFixed(3)} wideA=${multiWideA} wideB=${multiWideB} editors=${multiEdOpenB}/${multiEdFocusB}/${multiEdOpenA}/${multiEdCloseA}/${multiEdCloseB} headlessSkip=${multiHeadlessSkip} captures=${[...multiCapIds].join(",")} entries=${multiLedger.length})`);
   } else {
@@ -625,10 +696,21 @@ ws.addEventListener("message", (event) => {
       helloOk = true;
       if (msg.protocol !== 1) fail(`expected protocol 1, got ${msg.protocol}`);
       if (!fixtureDir) fail("host mode requires a fixture dir argument");
+      // Stage 3f-3a: mirror the frontend's connect-time setHostWindow BEFORE
+      // any editor work — even the negative path below runs under the same
+      // conditions the real shell creates (host hwnd already announced).
+      ws.send(JSON.stringify({ type: "setHostWindow", hwnd: hostHwnd }));
       // Stage 3d-1 NEGATIVE path FIRST: nothing is hosted yet — openEditor
       // must answer editor_unavailable (a NORMAL reply), not crash, not hang.
-      console.log("[test] hello OK — editor negative path first (no live instance)...");
+      console.log(`[test] hello OK — setHostWindow(hwnd=${hostHwnd}) sent — editor negative path first (no live instance)...`);
       ws.send(JSON.stringify({ type: "openEditor", instanceId: "hosted" }));
+    } else if (msg.type === "hostWindowSet" && !hostHwndSetOk) {
+      // Stage 3f-3a: the engine must ECHO the accepted hwnd (parse+store
+      // round-trip over the wire). The owner application itself is proven by
+      // the engine.log receipt (desktop.yml grep on Windows CI).
+      if (msg.hwnd !== hostHwnd) fail(`hostWindowSet echo must carry the hwnd back unchanged, got ${JSON.stringify(msg)}`);
+      hostHwndSetOk = true;
+      console.log(`[test] setHostWindow echoed (hwnd=${msg.hwnd}) — subsequent editor windows will be owned by it`);
     } else if (msg.type === "error" && msg.code === "editor_unavailable" && hostPhase === 0 && !hostScanSent) {
       hostEditorNegOk = true;
       console.log(`[test] phase N ✓ openEditor with no live instance → editor_unavailable (detail: "${msg.detail}") — scanning for the stand-in host plugin...`);
@@ -1386,7 +1468,7 @@ ws.addEventListener("close", () => {
     if (typeof c.numPrograms !== "number" || c.numPrograms < 0 || !Number.isInteger(c.numPrograms)) {
       fail(`capability record numPrograms must be a non-negative integer, got ${JSON.stringify(c.numPrograms)}`);
     }
-    allOk = helloOk && hostScanSent && hostPluginStateOk && hostPhase >= 13;
+    allOk = helloOk && hostScanSent && hostHwndSetOk && hostPluginStateOk && hostPhase >= 13;
     if (allOk) {
       console.log("");
       console.log("========================================");
@@ -1404,10 +1486,11 @@ ws.addEventListener("close", () => {
       console.log(hostHeadlessSkip
         ? "  editors: SKIPPED on this headless host (editor_unavailable tolerated; Windows CI proves the window path)"
         : "  editors: open → repeat RAISES (focused, one editor per instance) → clean close");
+      console.log(`  3f-3a owned editors: setHostWindow echoed (hwnd=${hostHwnd}) — Windows CI additionally greps the "[editor] host-owner applied hwnd=0x…” receipt`);
       console.log("========================================");
       process.exit(0);
     } else {
-      console.error(`FAILED: hello=${helloOk} scan=${hostScanSent} pluginState=${hostPluginStateOk} phase=${hostPhase} peaks=${hostPeakA.toFixed(3)}/${hostPeakB.toFixed(3)}/${hostPeakC.toFixed(3)} caps=${capsForHosted}/${loadedForHosted}`);
+      console.error(`FAILED: hello=${helloOk} scan=${hostScanSent} hostHwnd=${hostHwndSetOk} pluginState=${hostPluginStateOk} phase=${hostPhase} peaks=${hostPeakA.toFixed(3)}/${hostPeakB.toFixed(3)}/${hostPeakC.toFixed(3)} caps=${capsForHosted}/${loadedForHosted}`);
       process.exit(1);
     }
   } else if (mode === "scan") {

@@ -270,6 +270,22 @@ export default function App() {
       if (status === "ready" && prevStatusRef.current !== "ready") {
         lastLoadedRef.current = null;
         setHostedIds(new Set());   // new process: nothing is hosted yet
+        // Stage 3f-3a — editor windows belong to the app. ONCE per fresh
+        // engine session, hand the engine the main window's HWND: every
+        // subsequently opened plugin editor window becomes OWNED by the app
+        // (no taskbar entry, minimizes/closes with the app). The shell
+        // command is Windows-only — browser dev / non-Windows / older shells
+        // resolve nothing, nothing is sent, and the engine keeps today's
+        // floating-window behaviour. Sent BEFORE the auto-load so any editor
+        // the user opens after connect is already owned.
+        void (async () => {
+          const hwnd = await invoke<number>("main_window_hwnd").catch(() => null);
+          if (hwnd !== null && Number.isFinite(hwnd) && hwnd >= 1) {
+            client.sendHostWindow(hwnd);
+          } else {
+            writeErrorLog("engine", "main_window_hwnd unavailable — editor windows will keep today's floating behaviour");
+          }
+        })();
         // Stage 3d-4 hotfix — HOST ON CONNECT. The engine hosts plugins as
         // part of load, and load used to be sent ONLY from the play paths:
         // between app start and the first play the engine hosted NOTHING,

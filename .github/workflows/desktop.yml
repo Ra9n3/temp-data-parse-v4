@@ -463,7 +463,20 @@ jobs:
           if ($stateCaptured -lt 4) { throw "engine.log missing state-capture receipts (got $stateCaptured, need 4+)" }
           $stateRestored = (Select-String -Path $engineLog -Pattern "\[plugin\] state restored \d+ bytes").Count
           if ($stateRestored -ne 1) { throw "engine.log must show EXACTLY ONE state restore (the seq-6 diverged embed), got $stateRestored" }
-          Write-Host "engine.log receipt assertions passed (scale load, play, load-fail, async init, reuse, rolling-transport reject, audio config, prepare config, session peak, musical release, resume re-attacks, editor unavailable/open=x1/focus/close, state captured/restored all present)"
+          # Stage 3f-3a: OWNED editor windows — host mode sent the runner's
+          # real window handle (setHostWindow), so the parse+store receipt AND
+          # the owner-application receipt must both exist. Host mode opens
+          # EXACTLY ONE editor (the repeat request RAISES, never re-opens) →
+          # exactly ONE applied receipt. Multi mode sends NOTHING, so its two
+          # editor opens (inst-a + inst-b) must log the missing-hwnd skip
+          # (spec point 4: today's behaviour, but LOGGED).
+          $hostWindowSet = (Select-String -Path $engineLog -Pattern "\[editor\] host window set hwnd=0x").Count
+          if ($hostWindowSet -lt 1) { throw "3f-3a receipt missing: no '[editor] host window set hwnd=0x' in engine.log" }
+          $ownerApplied = (Select-String -Path $engineLog -Pattern "\[editor\] host-owner applied instance=\S+ hwnd=0x").Count
+          if ($ownerApplied -ne 1) { throw "3f-3a receipt wrong: host mode must apply the owner EXACTLY ONCE (one editor open; repeat raises), got $ownerApplied '[editor] host-owner applied' receipts" }
+          $ownerSkips = (Select-String -Path $engineLog -Pattern "\[editor\] host-owner skipped \(no host hwnd\)").Count
+          if ($ownerSkips -ne 2) { throw "3f-3a receipt missing: multi mode opens TWO editors (inst-a + inst-b) WITHOUT setHostWindow and must log '[editor] host-owner skipped (no host hwnd)' per open (got $ownerSkips, need 2)" }
+          Write-Host "engine.log receipt assertions passed (scale load, play, load-fail, async init, reuse, rolling-transport reject, audio config, prepare config, session peak, musical release, resume re-attacks, editor unavailable/open=x1/focus/close, state captured/restored, 3f-3a host-window set + owner applied + missing-path skips all present)"
 
       - run: npm ci
 
