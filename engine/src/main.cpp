@@ -75,6 +75,23 @@
 //         "state":"too_large" and NO data (the cap protects project JSON
 //         parseability; the frontend warns).
 //
+// Stage 3e-1 protocol additions (additive — CAPABILITY HANDSHAKE):
+//   server -> client: {"type":"plugin_capabilities","instanceId","name",
+//         "vendor","version","isInstrument","acceptsMidi","producesMidi",
+//         "isMidiEffect","hasEditor","numPrograms","latencySamples",
+//         "tailSeconds","supportsDoublePrecision","inputBuses","outputBuses",
+//         "classId","buses":[{input,index,name,channels,isMain,
+//         enabledByDefault,layoutChangeable},…]} — sent ONCE per instance,
+//         immediately after that instance's plugin_state "loaded". Built
+//         right after createPluginInstance succeeds, from the plugin's OWN
+//         defaults (before any host negotiation touches the buses).
+//   plugin_state "loaded" gains "classId" — the full VST3 class identifier
+//         string (PluginDescription::createIdentifierString()). load plugin
+//         matching PREFERS this string; the legacy numeric uid stays the
+//         fallback so saved projects still load. scan_result rows gain
+//         "classId" (and, when the scan worker can instantiate the plugin,
+//         a "capabilities" object with the same fields).
+//
 // Test synth: sine oscillator per note, voice allocation (steal oldest),
 // gain envelope (attack/release ~10ms). Every NoteOn must sound, every NoteOff
 // must stop. No VST3, no samples, no CC rendering. Loopback ONLY (127.0.0.1).
@@ -435,6 +452,15 @@ struct HostedPlugin {
     // The legacy single-plugin field maps to the reserved id "hosted".
     std::string instanceId;
     int slot = 0;   // wide-channel namespace owner (0..kMaxInstances-1)
+    // Stage 3e-1 — capability handshake: the full VST3 class identifier
+    // string (PluginDescription::createIdentifierString()) and the
+    // PRE-SERIALIZED capability fields captured at load time (before any
+    // host bus negotiation). The fragment carries every field of the
+    // plugin_capabilities message EXCEPT the {"type":…,"instanceId":…}
+    // wrapper — the worker/reuse paths wrap it per recipient. Immutable after
+    // publication like the rest of the identity block.
+    std::string classId;
+    std::string capabilitiesFields;
 };
 // Immutable slot-ordered set published behind ONE atomic shared_ptr (same
 // publication pattern as RoutingTable/ScoreSnapshot — the audio callback
@@ -1716,10 +1742,17 @@ std::vector<std::string> defaultVst3Dirs() {
 // records the failure and continues. Deliberately NO catch(...): a crashing
 // plugin must actually take this process down (that is the crash-isolation
 // contract the CI test proves); graceful load failures return zero types.
+// Defined with the hosting code below (Stage 3e-1): the capability-record
+// builder both the WS handshake and the scan rows share.
+std::string buildCapabilityFields(juce::AudioPluginInstance& inst,
+                                  const juce::PluginDescription& desc);
+
 int runScanWorker(const std::string& path) {
     juce::VST3PluginFormat format;
     juce::OwnedArray<juce::PluginDescription> types;
     format.findAllTypesForFile(types, juce::String(path));
+    juce::AudioPluginFormatManager mgr;
+    mgr.addDefaultFormats();
     std::cout << "SCORCH_SCAN_BEGIN\n";
     for (const auto* t : types) {
         const juce::String displayName =
@@ -1729,14 +1762,33 @@ int runScanWorker(const std::string& path) {
                   << "\",\"version\":\"" << escape_json(t->version.toStdString())
                   << "\",\"uid\":\"" << escape_json(juce::String(t->uniqueId).toStdString())
                   << "\",\"isInstrument\":" << (t->isInstrument ? "true" : "false")
-                  << ",\"path\":\"" << escape_json(path) << "\"}\n";
+                  // Stage 3e-1: the full VST3 class identifier string — the
+                  // rebind key the host prefers when loading by this row.
+                  << ",\"classId\":\"" << escape_json(t->createIdentifierString().toStdString())
+                  << "\",\"path\":\"" << escape_json(path) << "\"";
+        // Stage 3e-1: best-effort capability record — instantiate the class
+        // and query its real buses/program/latency surface. Failure degrades
+        // gracefully (row ships without capabilities); a CRASH here still
+        // kills this worker (the isolation contract, unchanged).
+        juce::String instErr;
+        auto inst = mgr.createPluginInstance(*t, 44100.0, 512, instErr);
+        if (inst != nullptr) {
+            // Same capture ordering as loadHostedPlugin (3e-1): the module
+            // reports its real latency only after a prepare.
+            inst->prepareToPlay(44100.0, 512);
+            std::cout << ",\"capabilities\":{" << buildCapabilityFields(*inst, *t) << "}";
+        } else {
+            std::cout << ",\"capabilitiesError\":\"" << escape_json(instErr.toStdString()) << "\"";
+        }
+        std::cout << "}\n";
     }
     std::cout << "SCORCH_SCAN_END" << std::endl;
     return 0;
 }
 
 // Out-of-process directory scan. Each *.vst3 entry (bundle dir or file) is
-// scanned by a child copy of this exe with a hard 15s timeout; crashes and
+// scanned by a child copy of this exe with a hard 45s timeout (3e-1: the
+// worker also instantiates for the capability record); crashes and
 // hangs become per-file "failed" entries — the engine and the scan survive.
 void handle_scan(const juce::var& json, ix::WebSocket& ws) {
     juce::DynamicObject* obj = json.getDynamicObject();
@@ -1792,10 +1844,15 @@ void handle_scan(const juce::var& json, ix::WebSocket& ws) {
                 ++failedCount;
                 continue;
             }
-            if (!child.waitForProcessToFinish(15000)) {
+            if (!child.waitForProcessToFinish(45000)) {
+                // Stage 3e-1: 45s (was 15s) — the worker now ALSO
+                // instantiates each type for the capability record, and a
+                // cold first-instantiate of a large library is exactly the
+                // multi-second class the async-init receipts documented.
+                // Crashes still die instantly; hangs still bounded.
                 child.kill();
                 if (!failedJson.empty()) failedJson += ",";
-                failedJson += std::string("{\"path\":\"") + escape_json(path) + "\",\"error\":\"scanner timeout after 15s\"}";
+                failedJson += std::string("{\"path\":\"") + escape_json(path) + "\",\"error\":\"scanner timeout after 45s\"}";
                 ++failedCount;
                 continue;
             }
@@ -1856,6 +1913,64 @@ void handle_scan(const juce::var& json, ix::WebSocket& ws) {
 //   transport stop is PANIC: all voices die immediately (hosted plugin gets
 //   a CC120 All-Sound-Off flush on all 16 channels).
 
+// ─── Stage 3e-1 — CAPABILITY HANDSHAKE ──────────────────────────────────────
+// Build the capability record from a LIVE instance + its description. Called
+// right after createPluginInstance succeeds, BEFORE any host negotiation
+// (setPlayConfigDetails / bus enabling) — the record documents the plugin's
+// OWN defaults, which is exactly what "enabledByDefault" means. Returns the
+// JSON fields WITHOUT the {"type":…,"instanceId":…} wrapper (both the WS
+// message and the scan-row "capabilities" object wrap it differently).
+// layoutChangeable is probed honestly: the bus can change layout iff some
+// OTHER channel count is supported (bounded probe — load-time only, never
+// on the audio thread).
+std::string buildCapabilityFields(juce::AudioPluginInstance& inst,
+                                  const juce::PluginDescription& desc) {
+    auto boolStr = [](bool b) { return b ? "true" : "false"; };
+    std::string buses;
+    int inputBuses = 0, outputBuses = 0;
+    char tailBuf[32];
+    std::snprintf(tailBuf, sizeof(tailBuf), "%.6g", inst.getTailLengthSeconds());
+    for (int dir = 0; dir < 2; ++dir) {
+        const bool isInput = dir == 0;
+        const int n = inst.getBusCount(isInput);
+        if (isInput) inputBuses = n; else outputBuses = n;
+        for (int i = 0; i < n; ++i) {
+            const auto* bus = inst.getBus(isInput, i);
+            if (bus == nullptr) continue;
+            bool layoutChangeable = false;
+            for (int ch = 1; ch <= 16 && !layoutChangeable; ++ch)
+                if (ch != bus->getNumberOfChannels() && bus->isNumberOfChannelsSupported(ch))
+                    layoutChangeable = true;
+            if (!buses.empty()) buses += ",";
+            buses += std::string("{\"input\":") + boolStr(isInput) +
+                     ",\"index\":" + std::to_string(i) +
+                     ",\"name\":\"" + escape_json(bus->getName().toStdString()) + "\"" +
+                     ",\"channels\":" + std::to_string(bus->getNumberOfChannels()) +
+                     ",\"isMain\":" + boolStr(bus->isMain()) +
+                     ",\"enabledByDefault\":" + boolStr(bus->isEnabledByDefault()) +
+                     ",\"layoutChangeable\":" + boolStr(layoutChangeable) + "}";
+        }
+    }
+    std::string s;
+    s += "\"name\":\"" + escape_json(desc.name.toStdString()) + "\"";
+    s += ",\"vendor\":\"" + escape_json(desc.manufacturerName.toStdString()) + "\"";
+    s += ",\"version\":\"" + escape_json(desc.version.toStdString()) + "\"";
+    s += ",\"isInstrument\":" + std::string(boolStr(desc.isInstrument));
+    s += ",\"acceptsMidi\":" + std::string(boolStr(inst.acceptsMidi()));
+    s += ",\"producesMidi\":" + std::string(boolStr(inst.producesMidi()));
+    s += ",\"isMidiEffect\":" + std::string(boolStr(inst.isMidiEffect()));
+    s += ",\"hasEditor\":" + std::string(boolStr(inst.hasEditor()));
+    s += ",\"numPrograms\":" + std::to_string(inst.getNumPrograms());
+    s += ",\"latencySamples\":" + std::to_string(inst.getLatencySamples());
+    s += ",\"tailSeconds\":" + std::string(tailBuf);
+    s += ",\"supportsDoublePrecision\":" + std::string(boolStr(inst.supportsDoublePrecisionProcessing()));
+    s += ",\"inputBuses\":" + std::to_string(inputBuses);
+    s += ",\"outputBuses\":" + std::to_string(outputBuses);
+    s += ",\"classId\":\"" + escape_json(desc.createIdentifierString().toStdString()) + "\"";
+    s += ",\"buses\":[" + buses + "]";
+    return s;
+}
+
 // Host a VST3 by id/path (Stage 3c-2; 3d-4: one INSTANCE of possibly many —
 // identity = the frontend's libraryGroup id, "hosted" for the legacy field).
 // Returns "" on success, else a human-readable detail.
@@ -1874,11 +1989,19 @@ std::string loadHostedPlugin(const juce::var& pluginVar, const std::string& inst
         juce::OwnedArray<juce::PluginDescription> types;
         vst3.findAllTypesForFile(types, juce::String(path));
         if (types.isEmpty()) return "no plugin types found at " + path;
+        // Stage 3e-1 — plugin matching PREFERS the full VST3 class identifier
+        // string (PluginDescription::createIdentifierString()): stable per
+        // class, carries name+format+uid, and survives uid renumbering. The
+        // legacy numeric uid stays the fallback so saved projects (and scan
+        // results, which still carry the numeric uid) keep loading.
         const juce::PluginDescription* chosen = nullptr;
         if (!uid.empty()) {
-            const long long wantUid = std::atoll(uid.c_str());
-            for (const auto* t : types) {
-                if (static_cast<long long>(t->uniqueId) == wantUid) { chosen = t; break; }
+            for (const auto* t : types)
+                if (t->createIdentifierString() == juce::String(uid)) { chosen = t; break; }
+            if (chosen == nullptr) {
+                const long long wantUid = std::atoll(uid.c_str());
+                for (const auto* t : types)
+                    if (static_cast<long long>(t->uniqueId) == wantUid) { chosen = t; break; }
             }
             if (chosen == nullptr) return "uid " + uid + " not found at " + path;
         } else {
@@ -1903,6 +2026,14 @@ std::string loadHostedPlugin(const juce::var& pluginVar, const std::string& inst
                   chosen->name.toStdString() + "\")");
         inst->prepareToPlay(44100.0, 512);
         inst->setNonRealtime(false);
+        // Stage 3e-1 — capture the capability record after the create-time
+        // prepare: a VST3 module reports its REAL latency only once its
+        // wrapper has prepared (empirical: right after createPluginInstance
+        // the same fixture read 0). Bus facts stay plugin-owned here —
+        // enabledByDefault/isMain are construction-time flags no host call
+        // touches, and NO enable/disable has been issued (the 3e-3
+        // enable-all runs later, on every bus, deliberately after capture).
+        const std::string capsFields = buildCapabilityFields(*inst, *chosen);
         auto hosted = std::make_unique<HostedPlugin>();
         hosted->instance = std::move(inst);
         hosted->name = chosen->name.toStdString();
@@ -1911,6 +2042,8 @@ std::string loadHostedPlugin(const juce::var& pluginVar, const std::string& inst
         hosted->uid = uid;
         hosted->path = path;
         hosted->instanceId = instanceId;
+        hosted->classId = chosen->createIdentifierString().toStdString();
+        hosted->capabilitiesFields = capsFields;
         out = std::move(hosted);
         return "";
     } catch (const std::exception& e) {
@@ -1922,11 +2055,15 @@ std::string loadHostedPlugin(const juce::var& pluginVar, const std::string& inst
 
 void sendPluginState(ix::WebSocket& ws, const char* state, const std::string& name,
                      const std::string& vendor, double latencyMs, const std::string& detail,
-                     const std::string& channelsJson, const std::string& instanceId = "") {
+                     const std::string& channelsJson, const std::string& instanceId = "",
+                     const std::string& classId = "") {
     std::string msg = std::string("{\"type\":\"plugin_state\",\"state\":\"") + state + "\"";
     if (!instanceId.empty()) msg += ",\"instanceId\":\"" + escape_json(instanceId) + "\"";
     if (!name.empty()) msg += ",\"name\":\"" + escape_json(name) + "\"";
     if (!vendor.empty()) msg += ",\"vendor\":\"" + escape_json(vendor) + "\"";
+    // Stage 3e-1: the full VST3 class identifier string rides every "loaded"
+    // receipt (the rebind key that prefers identifier matching on reload).
+    if (!classId.empty()) msg += ",\"classId\":\"" + escape_json(classId) + "\"";
     if (latencyMs >= 0) {
         char buf[32];
         std::snprintf(buf, sizeof(buf), "%.2f", latencyMs);
@@ -2385,7 +2522,14 @@ void handle_load(const juce::var& json, ix::WebSocket& ws, size_t byteSize) {
                     if (h == nullptr) continue;
                     const double latMs = (h->latencySamples + 512.0) / 44100.0 * 1000.0;
                     sendPluginState(ws, "loaded", h->name, h->vendor, latMs, "",
-                                    chansJsonPerInst[r.instanceId], r.instanceId);
+                                    chansJsonPerInst[r.instanceId], r.instanceId, h->classId);
+                    // Stage 3e-1: capabilities ride the reuse receipt too —
+                    // the record is immutable on the instance, so the
+                    // pre-serialized fields are re-wrapped (no plugin calls).
+                    if (!h->capabilitiesFields.empty()) {
+                        ws.send(std::string("{\"type\":\"plugin_capabilities\",\"instanceId\":\"") +
+                                escape_json(h->instanceId) + "\"," + h->capabilitiesFields + "}");
+                    }
                     engineLog("[plugin] reuse while playing — no re-instantiate | seq " +
                               std::to_string(seq) + " instance=" + r.instanceId +
                               " channels=[" + chansJsonPerInst[r.instanceId] + "]");
@@ -3297,9 +3441,22 @@ int main(int argc, char** argv) {
                 const std::string ps = std::string("{\"type\":\"plugin_state\",\"state\":\"loaded\",\"instanceId\":\"") +
                     escape_json(h->instanceId) + "\",\"name\":\"" + escape_json(h->name) +
                     "\",\"vendor\":\"" + escape_json(h->vendor) +
+                    "\",\"classId\":\"" + escape_json(h->classId) +
                     "\",\"latencyMs\":" + latBuf + ",\"channels\":[" + e.channelsJson + "]}";
                 for (auto& client : server.getClients())
                     if (client) client->send(ps);
+                // Stage 3e-1 — CAPABILITY HANDSHAKE: exactly one
+                // plugin_capabilities per instance, IMMEDIATELY after its
+                // plugin_state "loaded". The fields were captured at
+                // instantiate time (pre-serialized on the instance).
+                if (!h->capabilitiesFields.empty()) {
+                    const std::string caps = std::string("{\"type\":\"plugin_capabilities\",\"instanceId\":\"") +
+                        escape_json(h->instanceId) + "\"," + h->capabilitiesFields + "}";
+                    for (auto& client : server.getClients())
+                        if (client) client->send(caps);
+                    engineLog("[plugin] capabilities sent instance=" + h->instanceId +
+                              " classId=\"" + h->classId + "\"");
+                }
             }
         }
     });

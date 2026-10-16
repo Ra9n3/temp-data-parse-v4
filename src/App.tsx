@@ -5,7 +5,7 @@ import dorianFixture from "./fixtures/dorian-16bars.json";
 import { TopBar } from "./components/TopBar";
 import { Arranger } from "./components/Arranger";
 import { GenerationSettingsPanel } from "./components/GenerationSettingsPanel";
-import { EngineClient, type EngineLoadMeta, type EngineStatus, type EditorEventMessage, type LoadFailure, type PluginSavedStateMessage, type PluginStateMessage, type ScanResultMessage } from "./engine/engineClient";
+import { EngineClient, formatPluginInfo, type EngineLoadMeta, type EngineStatus, type EditorEventMessage, type LoadFailure, type PluginCapabilitiesMessage, type PluginSavedStateMessage, type PluginStateMessage, type ScanResultMessage } from "./engine/engineClient";
 import { buildEngineStream, resolveEngineChannelView } from "./engine/engineStream";
 import { PPQ, projectEndTick, tickToBar } from "./shared/schema";
 import {
@@ -146,6 +146,9 @@ export default function App() {
   const [generationSettingsOpen, setGenerationSettingsOpen] = useState(false);
   const generationSettings = project.generationSettings ?? createDefaultProject().generationSettings!;
   const [pluginLabels, setPluginLabels] = useState<Record<string, string>>({});
+  // Stage 3e-1: capability records per instance (libraryGroup) id — feeds the
+  // track-pill's read-only Plugin info tooltip.
+  const [pluginCaps, setPluginCaps] = useState<Record<string, PluginCapabilitiesMessage>>({});
   const [vstOpen, setVstOpen] = useState(false);
   const [vstTrackId, setVstTrackId] = useState<string | null>(null);
   const [vstState, setVstState] = useState<PluginScanState>("not_scanned");
@@ -406,6 +409,12 @@ export default function App() {
         toast("ok", "sound setup saved with the project");
       }
     });
+    // Stage 3e-1: capability handshake — store per instance (keyed by the
+    // libraryGroup id) for the track-pill's read-only Plugin info panel.
+    client.onPluginCapabilities((msg: PluginCapabilitiesMessage) => {
+      if (disposed) return;
+      setPluginCaps((prev) => ({ ...prev, [msg.instanceId]: msg }));
+    });
     // Stage 3d-1 → 3d-4: editor window lifecycle (engine-owned popups). The
     // per-INSTANCE open set flips each track-header pill into its focus
     // affordance; close arrives from the protocol OR the window's X button.
@@ -602,6 +611,18 @@ export default function App() {
     }
     return ids;
   }, [project, editorOpenIds]);
+
+  // Stage 3e-1: per-track read-only "Plugin info" text (the pill's hover
+  // tooltip). Derived from the stored capability record of the track's
+  // libraryGroup (= the hosted instance id). Empty = not hosted yet.
+  const pluginInfoByTrack = useMemo(() => {
+    const out: Record<string, string> = {};
+    for (const t of project.tracks) {
+      const caps = t.libraryGroupId ? pluginCaps[t.libraryGroupId] : undefined;
+      if (caps) out[t.id] = formatPluginInfo(caps);
+    }
+    return out;
+  }, [project, pluginCaps]);
 
   const enginePlay = useCallback(() => {
     const client = engineClientRef.current;
@@ -962,6 +983,7 @@ export default function App() {
         pixelsPerTick={ppt}
         playheadTick={effectivePlayheadTick}
         pluginLabels={pluginLabels}
+        pluginInfoByTrack={pluginInfoByTrack}
         engineChannels={resolvedEngineChannels}
         onEngineChannel={handleEngineChannel}
         audioBuffer={audioBuffer}

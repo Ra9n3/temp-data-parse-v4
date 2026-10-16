@@ -6,6 +6,10 @@ import { cn } from "../utils/cn";
 interface Props {
   track: Track;
   pluginLabel: string;
+  /** Stage 3e-1 — the hosted plugin's read-only capability summary (from
+   * the engine's plugin_capabilities record). Rendered on the pill's
+   * existing hover tooltip (its read-only surface — no new UI). */
+  pluginInfo?: string;
   onMute: () => void;
   onSolo: () => void;
   onLock: () => void;
@@ -30,6 +34,7 @@ interface Props {
 export function TrackHeader({
   track,
   pluginLabel,
+  pluginInfo,
   onMute,
   onSolo,
   onLock,
@@ -71,7 +76,7 @@ export function TrackHeader({
               onClick={vstDisabled ? undefined : (onOpenEditor ?? onOpenVst)}
               disabled={vstDisabled}
               title={
-                vstDisabled
+                (vstDisabled
                   ? "VST hosting is for instrument tracks"
                   : onOpenEditor
                     ? editorOpen
@@ -79,7 +84,10 @@ export function TrackHeader({
                       : `Open the ${pluginLabel} editor (choose sounds, tweak settings)`
                     : pluginLabel === "No plugin"
                       ? "Assign a VST3 (preview browser)"
-                      : pluginLabel
+                      : pluginLabel)
+                // Stage 3e-1 — the read-only "Plugin info" panel (engine
+                // capability record) rides the pill's existing tooltip.
+                + (pluginInfo ? `\n\n${pluginInfo}` : "")
               }
               className={cn(
                 "mt-1 inline-flex max-w-full items-center gap-1.5 rounded-md px-1.5 py-0.5 text-[11px] font-medium ring-1",

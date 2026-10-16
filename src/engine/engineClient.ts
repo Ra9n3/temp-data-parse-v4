@@ -103,7 +103,9 @@ export interface ScanResultMessage {
 /** Stage 3c-2 — hosting outcome. "loaded" carries the real name/vendor/latency
  * and the hosted channels; "error" carries the detail and means ALL tracks
  * fell back to the engine's built-in test synth (the app never dead-ends).
- * Stage 3d-4: one receipt PER INSTANCE — instanceId addresses it. */
+ * Stage 3d-4: one receipt PER INSTANCE — instanceId addresses it.
+ * Stage 3e-1: "loaded" also carries classId — the full VST3 class identifier
+ * string the engine PREFERS when matching a load to a plugin binary. */
 export interface PluginStateMessage {
   type: "plugin_state";
   state: "loaded" | "error";
@@ -111,11 +113,85 @@ export interface PluginStateMessage {
   instanceId?: string;
   name?: string;
   vendor?: string;
+  /** Stage 3e-1: PluginDescription::createIdentifierString() — the preferred
+   * load-matching key (numeric uid remains the fallback). */
+  classId?: string;
   /** Total reported latency (plugin + device), milliseconds. */
   latencyMs?: number;
   /** The hosted channels (sorted) — THIS instance's 1–16 namespace. */
   channels?: number[];
   detail?: string;
+}
+
+/** Stage 3e-1 — one bus of the hosted plugin (input or output), captured at
+ * instantiate time BEFORE any host negotiation: channels/isMain are the
+ * plugin's own defaults, and enabledByDefault means the PLUGIN's default
+ * (not the host's negotiated state). layoutChangeable is probed honestly —
+ * some OTHER channel count is supported. */
+export interface PluginBusInfo {
+  input: boolean;
+  index: number;
+  name: string;
+  channels: number;
+  isMain: boolean;
+  enabledByDefault: boolean;
+  layoutChangeable: boolean;
+}
+
+/** Stage 3e-1 — the capability handshake: exactly one message per hosted
+ * instance, sent immediately after its plugin_state "loaded". Read-only
+ * facts about the hosted binary, captured right after createPluginInstance
+ * (before bus negotiation). Drives the pill's read-only Plugin info panel. */
+export interface PluginCapabilitiesMessage {
+  type: "plugin_capabilities";
+  instanceId: string;
+  name: string;
+  vendor: string;
+  version: string;
+  isInstrument: boolean;
+  acceptsMidi: boolean;
+  producesMidi: boolean;
+  isMidiEffect: boolean;
+  hasEditor: boolean;
+  numPrograms: number;
+  latencySamples: number;
+  tailSeconds: number;
+  supportsDoublePrecision: boolean;
+  inputBuses: number;
+  outputBuses: number;
+  /** PluginDescription::createIdentifierString() — same value plugin_state
+   * "loaded" carries (the preferred load-matching key). */
+  classId: string;
+  buses: PluginBusInfo[];
+}
+
+/** Stage 3e-1 — format a capability record as the read-only "Plugin info"
+ * text shown on the track pill's hover tooltip (its existing read-only
+ * surface — no new UI; see ASSUMPTIONS.md 3e-1). Deterministic, pure. */
+export function formatPluginInfo(c: PluginCapabilitiesMessage): string {
+  const lines: string[] = [];
+  lines.push(`Plugin info — ${c.name}`);
+  if (c.vendor) lines.push(`vendor: ${c.vendor}`);
+  if (c.version) lines.push(`version: ${c.version}`);
+  const flags: string[] = [];
+  if (c.isInstrument) flags.push("instrument");
+  if (c.acceptsMidi) flags.push("accepts MIDI");
+  if (c.producesMidi) flags.push("produces MIDI");
+  if (c.isMidiEffect) flags.push("MIDI effect");
+  if (c.hasEditor) flags.push("editor");
+  if (c.supportsDoublePrecision) flags.push("64-bit");
+  if (flags.length) lines.push(`type: ${flags.join(", ")}`);
+  lines.push(`programs: ${c.numPrograms} · latency: ${c.latencySamples} samples · tail: ${Number(c.tailSeconds.toFixed(3))}s`);
+  lines.push(`buses: ${c.inputBuses} in / ${c.outputBuses} out`);
+  for (const b of c.buses) {
+    const attrs: string[] = [];
+    if (b.isMain) attrs.push("main");
+    attrs.push(b.enabledByDefault ? "enabled" : "disabled by default");
+    if (b.layoutChangeable) attrs.push("layout changeable");
+    lines.push(`  ${b.input ? "in" : "out"}${b.index}: "${b.name}" ${b.channels}ch (${attrs.join(", ")})`);
+  }
+  if (c.classId) lines.push(`class: ${c.classId}`);
+  return lines.join("\n");
 }
 
 /** Stage 3d-1 — the hosted plugin's editor window is up. A repeat openEditor
@@ -156,7 +232,7 @@ export interface PluginSavedStateMessage {
   state?: "too_large";
 }
 
-type EngineMessage = HelloMessage | PongMessage | ErrorMessage | StateMessage | ScanResultMessage | PluginStateMessage | LoadAckMessage | EditorEventMessage | PluginSavedStateMessage;
+type EngineMessage = HelloMessage | PongMessage | ErrorMessage | StateMessage | ScanResultMessage | PluginStateMessage | LoadAckMessage | EditorEventMessage | PluginSavedStateMessage | PluginCapabilitiesMessage;
 
 // Deterministic backoff sequence (seconds): 1, 2, 4, 8, 16 — no jitter.
 const BACKOFF_SEQUENCE = [1, 2, 4, 8, 16] as const;
@@ -225,6 +301,10 @@ export class EngineClient {
   private onEditorChange: ((msg: EditorEventMessage) => void) | null = null;
   // Stage 3d-3: captured plugin state blobs (project-JSON embed).
   private onPluginSavedStateChange: ((msg: PluginSavedStateMessage) => void) | null = null;
+  // Stage 3e-1: capability records, STORED per instanceId (the pill's Plugin
+  // info panel reads them synchronously) and pushed to the app via callback.
+  private capabilities = new Map<string, PluginCapabilitiesMessage>();
+  private onPluginCapabilitiesChange: ((msg: PluginCapabilitiesMessage) => void) | null = null;
   private onErrorChange: ((code: string, echo: string, detail: string) => void) | null = null;
   // Stage 3c-hotfix: the in-flight load awaiting its loadAck (single slot —
   // a newer load supersedes an older one; see load()).
@@ -279,6 +359,18 @@ export class EngineClient {
   /** Stage 3d-3: register a callback for captured plugin state blobs. */
   onPluginSavedState(cb: (msg: PluginSavedStateMessage) => void): void {
     this.onPluginSavedStateChange = cb;
+  }
+
+  /** Stage 3e-1: register a callback for plugin capability records (one per
+   * hosted instance, right after its loaded receipt). */
+  onPluginCapabilities(cb: (msg: PluginCapabilitiesMessage) => void): void {
+    this.onPluginCapabilitiesChange = cb;
+  }
+
+  /** Stage 3e-1: the stored capability record for a hosted instance (the
+   * legacy id "hosted" for single-plugin loads). Undefined = not hosted yet. */
+  getPluginCapabilities(instanceId: string): PluginCapabilitiesMessage | undefined {
+    return this.capabilities.get(instanceId);
   }
 
   /**
@@ -343,6 +435,12 @@ export class EngineClient {
           // Stage 3d-3: the engine captured the plugin's state — the app
           // embeds it in the project JSON (LibraryGroup.pluginState).
           this.onPluginSavedStateChange?.(msg);
+        } else if (msg.type === "plugin_capabilities") {
+          // Stage 3e-1: capability handshake — store per instance (the
+          // reserved legacy id "hosted" for shapeless receipts) and push.
+          const iid = msg.instanceId || "hosted";
+          this.capabilities.set(iid, msg);
+          this.onPluginCapabilitiesChange?.(msg);
         } else if (msg.type === "loadAck") {
           // Stage 3c-hotfix: the engine's load receipt. Resolve the pending load.
           if (this.pendingLoad && (msg.seq === this.pendingLoad.seq || msg.seq === 0)) {

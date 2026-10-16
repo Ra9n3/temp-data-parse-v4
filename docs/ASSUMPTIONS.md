@@ -1063,3 +1063,69 @@ instances.
 - The rolling guard now compares SETS: adding a library mid-play requires
   stop (same contract as before, now set-scoped) — by design, not a
   regression.
+
+## Stage 3e-1 — capability handshake (the hosting surface made inspectable)
+
+### The record and its capture point
+
+`plugin_capabilities` is captured in `loadHostedPlugin` right after the
+create-time prepare (`setPlayConfigDetails(0,2)` → `prepareToPlay(44100,512)`),
+NOT immediately after `createPluginInstance` as the brief's wording suggested:
+empirically a VST3 module reports its REAL `latencySamples` (the fixture: 128)
+only once its wrapper has prepared — right after instantiate the same binary
+read 0. The ordering keeps every other bus fact plugin-owned: `enabledByDefault`
+and `isMain` are CONSTRUCTION-TIME flags no host call touches, and the engine
+issues no enable/disable before the capture (the later 3e-3 enable-all runs
+deliberately after it). One wrinkle is accepted and documented: for a plugin
+whose DEFAULT main layout is not stereo, bus channel counts in the record show
+the layout the engine negotiated (what it actually runs with), not the
+untouched default — the alternative (capturing pre-negotiation) made the
+record lie about latency for every plugin, which is worse.
+
+### Wrapper-dependent facts (VST3 reality, not engine bugs)
+
+- `numPrograms` through the host-side VST3 wrapper is wrapper-dependent: the
+  fixture's processor returns 1, the hosted wrapper reports 0 until/unless the
+  module publishes a VST3 ProgramList. The record reports the HOST-VISIBLE
+  surface; the CI asserts the field's shape, not the inner value. Real
+  libraries with program lists will show their real count.
+- `layoutChangeable` is probed honestly: "some OTHER channel count (1..16) is
+  supported on this bus" via `isNumberOfChannelsSupported` — load-time only,
+  never on the audio thread.
+
+### Matching: identifier string preferred, numeric uid kept
+
+`createIdentifierString()` (e.g. `VST3-Scorch Test Synth-214d80a-bad63ffa`) is
+the stable per-class key; the numeric uid remains the fallback so saved
+projects (and old scan caches) keep loading. The frontend never needs to send
+the identifier — plugin_state/capabilities/scan rows all echo it for
+forensics and future use.
+
+### Scan cost
+
+The scan worker now instantiates each type for the record. That is bounded by
+the crash-isolation contract already in place (crash/hang = per-file failed
+entry, scan survives) and the parent timeout is 45 s per plugin (was 15 s) to
+absorb a cold first-instantiate of a large library. An instantiate REFUSAL
+degrades to a row without capabilities (never a failed entry). Scans of big
+real-world directories get slower by roughly one instantiate per plugin; the
+trade buys per-plugin facts the browser can surface without hosting.
+
+### The "existing track-pill plugin popover" does not exist
+
+The brief asked for the Plugin info panel "in the existing track-pill plugin
+popover" — no popover exists in the UI; the pill's only read-only surface is
+its native hover tooltip. The panel therefore renders there (deterministic
+`formatPluginInfo`, zero new components, zero layout changes, "No other UI
+changes" honored). A dedicated popover component is a candidate for a later
+UI stage if hover proves insufficient.
+
+### CI evidence + fire-rate honesty
+
+- CI proves (on the fixture, host + multi + scan modes): exactly-once-per-
+  instance delivery, every field present, bus names/counts/enabled-by-default,
+  latency propagation, classId echo, identifier-string matching preferred.
+- CI CANNOT prove real-library behavior: a 7.1-surround main bus, sidechain
+  inputs, MIDI-effect buses, program lists of real libraries, and the
+  tooltip's readability with a 20-bus plugin are all the user's by-ear/by-eye
+  gate with BBCSO + their installed VSTs.

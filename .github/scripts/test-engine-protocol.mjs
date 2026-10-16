@@ -62,6 +62,13 @@
 //         RAISES the existing window (focused=true — ONE editor per
 //         instance), closeEditor closes cleanly. The fixture ships a
 //         deterministic 360x120 editor so a free plugin proves universality.
+//       Stage 3e-1: CAPABILITY HANDSHAKE — exactly one plugin_capabilities
+//         per plugin_state "loaded" (per instance), whose facts match the
+//         fixture (0 in / ≥1 out buses, main out "Output" stereo,
+//         enabled-by-default, latency 128, instrument + accepts-MIDI +
+//         editor + 1 program); plugin_state carries classId and a reload
+//         whose uid IS the class identifier string MATCHES (the preferred
+//         key, phase R). Scan rows carry classId + capabilities too.
 //       Stage 3d-3: state persistence — captureState of the DEFAULT state is
 //         byte-EXACT (the fixture's state is one raw float32 masterScale,
 //         4 bytes = 1.0f); a re-host WITH an embedded state (masterScale
@@ -138,6 +145,10 @@ let multiStateOk = 0, multiLoaded = new Set(), multiReuseOk = 0, multiRejectOk =
 let multiPeak = 0, multiLedger = [], multiWideA = false, multiWideB = false;
 let multiEdOpenB = false, multiEdFocusB = false, multiEdOpenA = false, multiEdCloseA = false, multiEdCloseB = false;
 let multiCapIds = new Set(), multiHeadlessSkip = false;
+// Stage 3e-1: capability handshake per instance (loaded receipts and
+// capabilities must match 1:1 for BOTH instances — initial load + reuse).
+const multiCapsCount = {};
+const multiLoadedCount = {};
 
 // Events chosen so a note IS sounding when the test stops (tick ~600): the
 // stop-panic kill count in the engine's stdout ("voices killed (n=…)") is then
@@ -238,6 +249,14 @@ let hostStateS0 = "", hostStateS1 = "";
 const hostStatePlayStates = [];
 const hostStatePlayStates2 = [];
 let hostValidUid = "", hostValidPath = "", hostValidName = "";
+// Stage 3e-1: capability-handshake collection — EXACTLY ONE plugin_capabilities
+// per plugin_state "loaded" receipt (per instance), and the record's facts
+// must match the free test VST3 (main out bus "Output", stereo, latency 128,
+// instrument, accepts MIDI, editor, no inputs).
+const hostCapsCount = {};   // instanceId → plugin_capabilities messages
+const hostLoadedCount = {}; // instanceId → plugin_state loaded receipts
+let hostFirstCaps = null;   // first capability record (fixture facts, close-time assert)
+let hostClassId = "";       // the VST3 class identifier echoed by plugin_state
 let hostReloadAckOk = false, hostRejectOk = false, hostPlayingAfterReject = false;
 const hostEntries = [];   // accumulated dispatch ledger entries
 const hostStates = [];    // {tick, peak} while playing (tick-correlated)
@@ -407,6 +426,14 @@ ws.addEventListener("message", (event) => {
 
   if (mode === "multi") {
     // ── Stage 3d-4: MULTI-INSTANCE hosting proof (see header docs) ──
+    // Stage 3e-1 collection: per-instance capability handshake counts.
+    if (msg.type === "plugin_state" && msg.state === "loaded") {
+      const iid = msg.instanceId || "hosted";
+      multiLoadedCount[iid] = (multiLoadedCount[iid] ?? 0) + 1;
+    } else if (msg.type === "plugin_capabilities") {
+      const iid = msg.instanceId || "hosted";
+      multiCapsCount[iid] = (multiCapsCount[iid] ?? 0) + 1;
+    }
     if (msg.type === "hello" && multiPhase === 0) {
       if (msg.protocol !== 1) fail(`expected protocol 1, got ${msg.protocol}`);
       if (msg.engineVersion !== "0.7.1") fail(`expected 0.7.1, got ${msg.engineVersion}`);
@@ -540,6 +567,17 @@ ws.addEventListener("message", (event) => {
     // COLLECT-then-ASSERT: state peaks are correlated to dispatch-ledger
     // markers by ENGINE TICK (never by arrival time), so runner-speed-dependent
     // message latency cannot skew the unmuted/muted windows.
+    // Stage 3e-1 collection runs across ALL phases (loaded receipts happen
+    // in phases 1/F/N/P and the classId reload; capabilities ride each).
+    if (msg.type === "plugin_state" && msg.state === "loaded") {
+      const iid = msg.instanceId || "hosted";
+      hostLoadedCount[iid] = (hostLoadedCount[iid] ?? 0) + 1;
+      if (msg.classId) hostClassId = msg.classId;
+    } else if (msg.type === "plugin_capabilities") {
+      const iid = msg.instanceId || "hosted";
+      hostCapsCount[iid] = (hostCapsCount[iid] ?? 0) + 1;
+      if (!hostFirstCaps) hostFirstCaps = msg;
+    }
     if (msg.type === "hello" && !hostScanSent) {
       helloOk = true;
       if (msg.protocol !== 1) fail(`expected protocol 1, got ${msg.protocol}`);
@@ -762,27 +800,40 @@ ws.addEventListener("message", (event) => {
     } else if (msg.type === "pluginSavedState" && hostPhase === 22) {
       if (msg.data !== hostStateS1) fail("capture→restore→capture must be byte-IDENTICAL (the project embed survives a restart)");
       hostStateRoundtripOk = true;
-      console.log("[test] phase Q ✓ capture→restore→capture byte-IDENTICAL — editor phases (3d-1: window work, proven on CI's desktop)");
+      console.log("[test] phase Q ✓ capture→restore→capture byte-IDENTICAL — Stage 3e-1: re-hosting by VST3 CLASS ID (identifier-string matching, seq 7)");
+      if (!hostClassId) fail("plugin_state 'loaded' carried no classId — the capability handshake key is missing");
       hostPhase = 23;
+      ws.send(JSON.stringify({
+        type: "load", seq: 7, events: HOST_EVENTS, meta: HOST_META,
+        channels: { t1: 1, t2: 2 },
+        plugin: { uid: hostClassId, path: hostValidPath, name: hostValidName },
+      }));
+    } else if (msg.type === "plugin_state" && hostPhase === 23 && msg.state === "loaded") {
+      // Stage 3e-1: the load's uid was the FULL class identifier string —
+      // the PREFERRED matching key. The engine must resolve it to the same
+      // class (echoed classId) without the numeric-uid fallback.
+      if (msg.classId !== hostClassId) fail(`classId reload must echo the same classId (got "${msg.classId}", want "${hostClassId}")`);
+      console.log(`[test] phase R ✓ load by class identifier string MATCHED ("${hostClassId}") — editor phases (3d-1: window work, proven on CI's desktop)`);
+      hostPhase = 24;
       ws.send(JSON.stringify({ type: "openEditor", instanceId: "hosted" }));
-    } else if (msg.type === "editorOpened" && hostPhase === 23) {
+    } else if (msg.type === "editorOpened" && hostPhase === 24) {
       if (msg.focused === true) fail(`first openEditor must OPEN (not focus): ${JSON.stringify(msg)}`);
       if (!msg.width || msg.width <= 0 || !msg.height || msg.height <= 0) fail(`editorOpened lacks real geometry: ${JSON.stringify(msg)}`);
       hostEditorOpenOk = true;
       console.log(`[test] phase J ✓ editor OPENED "${msg.name}" ${msg.width}x${msg.height} — repeat request must RAISE, not double-open`);
-      hostPhase = 24;
+      hostPhase = 25;
       ws.send(JSON.stringify({ type: "openEditor", instanceId: "hosted" }));
-    } else if (msg.type === "editorOpened" && hostPhase === 24) {
+    } else if (msg.type === "editorOpened" && hostPhase === 25) {
       if (msg.focused !== true) fail(`repeat openEditor must re-echo editorOpened with focused=true (one editor per instance), got ${JSON.stringify(msg)}`);
       hostEditorFocusOk = true;
       console.log("[test] phase K ✓ repeat openEditor focused the existing window (ONE editor per instance) — closing");
-      hostPhase = 25;
+      hostPhase = 26;
       ws.send(JSON.stringify({ type: "closeEditor", instanceId: "hosted" }));
-    } else if (msg.type === "editorClosed" && hostPhase === 25) {
+    } else if (msg.type === "editorClosed" && hostPhase === 26) {
       hostEditorCloseOk = true;
       console.log("[test] phase L ✓ editor CLOSED cleanly (protocol close; the X button and plugin unload converge on the same path) — shutdown");
       finishAndShutdown();
-    } else if (msg.type === "error" && msg.code === "editor_unavailable" && hostPhase === 23 && !hostEditorOpenOk) {
+    } else if (msg.type === "error" && msg.code === "editor_unavailable" && hostPhase === 24 && !hostEditorOpenOk) {
       // Headless tolerance — SAME contract as multi M-7: a display-less host
       // (this box, disconnected RDP) cannot create a window; the engine's
       // display guard answers editor_unavailable("no display …") and the
@@ -818,7 +869,17 @@ ws.addEventListener("message", (event) => {
       if (valid.vendor !== "Scorch Audio") fail(`vendor mismatch: ${valid.vendor}`);
       if (valid.isInstrument !== true) fail("test synth must report isInstrument=true");
       if (!valid.uid) fail("scan_result entries must carry a uid");
-      console.log(`[test] valid plugin found: "${valid.name}" vendor="${valid.vendor}" uid=${valid.uid} ✓`);
+      // Stage 3e-1: scan rows carry the full class identifier string AND —
+      // when the worker could instantiate — the capability record.
+      if (!valid.classId) fail("scan_result rows must carry classId (the VST3 class identifier string, 3e-1)");
+      if (!valid.capabilities || typeof valid.capabilities.outputBuses !== "number" || valid.capabilities.outputBuses < 1) {
+        fail(`scan_result rows must carry a capabilities record with an output bus (3e-1): ${JSON.stringify(valid.capabilities ?? null)}`);
+      }
+      const scanMainOut = (valid.capabilities.buses ?? []).find((b) => !b.input && b.isMain);
+      if (!scanMainOut || scanMainOut.name !== "Output" || scanMainOut.channels !== 2) {
+        fail(`scan capabilities: main out bus must be "Output" 2ch, got ${JSON.stringify(scanMainOut ?? null)}`);
+      }
+      console.log(`[test] valid plugin found: "${valid.name}" vendor="${valid.vendor}" uid=${valid.uid} classId="${valid.classId}" caps(out=${valid.capabilities.outputBuses}) ✓`);
       // 2. The crash dummy must appear as a failed entry (its worker died).
       const crashFail = failed.find((f) => f.path.includes("CrashDummy"));
       if (!crashFail) fail(`crash dummy not recorded as failed — crash isolation broken (failed: ${JSON.stringify(failed)})`);
@@ -1120,9 +1181,13 @@ ws.addEventListener("close", () => {
       process.exit(1);
     }
   } else if (mode === "multi") {
+    // Stage 3e-1: both instances must have received capabilities, exactly
+    // once per loaded receipt (initial load + mid-play reuse = 2 each).
+    const capsOk = ["inst-a", "inst-b"].every((iid) =>
+      (multiCapsCount[iid] ?? 0) > 0 && multiCapsCount[iid] === (multiLoadedCount[iid] ?? 0));
     const editorOk = multiHeadlessSkip || (multiEdOpenB && multiEdFocusB && multiEdOpenA && multiEdCloseA && multiEdCloseB);
     allOk = multiStateOk === 2 && multiReuseOk === 2 && multiRejectOk &&
-            multiWideA && multiWideB && multiPeak > 1.0 && multiCapIds.size === 2 && editorOk;
+            multiWideA && multiWideB && multiPeak > 1.0 && multiCapIds.size === 2 && capsOk && editorOk;
     if (allOk) {
       console.log("");
       console.log("========================================");
@@ -1136,13 +1201,39 @@ ws.addEventListener("close", () => {
         ? "  editors: SKIPPED on this headless host (editor_unavailable tolerated; Windows CI proves the window path)"
         : "  editors: inst-b opens → repeat raises (focused) → inst-a opens a SECOND SIMULTANEOUS window → per-id closes");
       console.log("  captureState → one pluginSavedState PER INSTANCE (distinct instanceIds)");
+      console.log(`  3e-1 capability handshake: one plugin_capabilities per loaded receipt per instance (${JSON.stringify(multiCapsCount)})`);
       console.log("========================================");
       process.exit(0);
     } else {
-      console.error(`FAILED: loaded=${[...multiLoaded].join(",")} reuse=${multiReuseOk} reject=${multiRejectOk} wideA=${multiWideA} wideB=${multiWideB} peak=${multiPeak.toFixed(3)} caps=${[...multiCapIds].join(",")} editors=${multiEdOpenB}/${multiEdFocusB}/${multiEdOpenA}/${multiEdCloseA}/${multiEdCloseB} headlessSkip=${multiHeadlessSkip}`);
+      console.error(`FAILED: loaded=${[...multiLoaded].join(",")} reuse=${multiReuseOk} reject=${multiRejectOk} wideA=${multiWideA} wideB=${multiWideB} peak=${multiPeak.toFixed(3)} caps=${[...multiCapIds].join(",")} capsCount=${JSON.stringify(multiCapsCount)} editors=${multiEdOpenB}/${multiEdFocusB}/${multiEdOpenA}/${multiEdCloseA}/${multiEdCloseB} headlessSkip=${multiHeadlessSkip}`);
       process.exit(1);
     }
   } else if (mode === "host") {
+    // ── Stage 3e-1 capability-handshake asserts (close time, full stream) ──
+    if (!hostFirstCaps) fail("no plugin_capabilities received — the capability handshake never happened");
+    const capsForHosted = hostCapsCount["hosted"] ?? 0;
+    const loadedForHosted = hostLoadedCount["hosted"] ?? 0;
+    if (capsForHosted !== loadedForHosted) fail(`plugin_capabilities arrived ${capsForHosted}× but plugin_state loaded ${loadedForHosted}× for instance "hosted" — the handshake must be EXACTLY ONCE per instance`);
+    const c = hostFirstCaps;
+    if (c.inputBuses !== 0) fail(`capability record: inputBuses ${c.inputBuses} ≠ 0 (the test plugin has no input buses)`);
+    if (c.outputBuses < 1) fail(`capability record: outputBuses ${c.outputBuses} — the test plugin has a stereo main out`);
+    if ((c.buses ?? []).length !== c.inputBuses + c.outputBuses) fail("capability record: buses[] length must equal inputBuses + outputBuses (every bus reported)");
+    const mainOut = (c.buses ?? []).find((b) => !b.input && b.isMain);
+    if (!mainOut) fail("capability record: no main OUTPUT bus entry");
+    if (mainOut.name !== "Output") fail(`capability record: main out bus name "${mainOut.name}" ≠ "Output"`);
+    if (mainOut.channels !== 2) fail(`capability record: main out channels ${mainOut.channels} ≠ 2 (stereo)`);
+    if (mainOut.enabledByDefault !== true) fail("capability record: the test plugin's main out must be enabled by default");
+    if (!c.classId || c.classId !== hostClassId) fail(`capability record classId must be non-empty and equal the plugin_state classId (got "${c.classId}", want "${hostClassId}")`);
+    if (c.latencySamples !== 128) fail(`capability record latencySamples ${c.latencySamples} ≠ the fixture's reported 128`);
+    if (c.isInstrument !== true || c.acceptsMidi !== true || c.producesMidi !== false || c.hasEditor !== true) {
+      fail(`capability record identity flags wrong: ${JSON.stringify({ isInstrument: c.isInstrument, acceptsMidi: c.acceptsMidi, producesMidi: c.producesMidi, hasEditor: c.hasEditor })}`);
+    }
+    // numPrograms through the VST3 host wrapper is wrapper-dependent (JUCE-built
+    // modules report 0 until they publish a ProgramList) — assert SHAPE, not the
+    // inner value (documented in ASSUMPTIONS.md 3e-1).
+    if (typeof c.numPrograms !== "number" || c.numPrograms < 0 || !Number.isInteger(c.numPrograms)) {
+      fail(`capability record numPrograms must be a non-negative integer, got ${JSON.stringify(c.numPrograms)}`);
+    }
     allOk = helloOk && hostScanSent && hostPluginStateOk && hostPhase >= 13;
     if (allOk) {
       console.log("");
@@ -1156,13 +1247,14 @@ ws.addEventListener("close", () => {
       console.log('  muted-window note never dispatched; unmute restores sound');
       console.log(`  MUSICAL stops at ticks ${hostStopTick1}/${hostStopTick2}: release marker + exact held-note offs, NO CC120`);
       console.log(`  RESUME: gentle re-attacks (vel 80) + redundant CC#32 SUPPRESSED (k=6) + genuine change SENT`);
+      console.log(`  3e-1 handshake: plugin_capabilities ×${capsForHosted} == plugin_state loaded ×${loadedForHosted} ("hosted"); main out "Output" 2ch; classId echo + identifier-string reload MATCHED`);
       console.log(hostHeadlessSkip
         ? "  editors: SKIPPED on this headless host (editor_unavailable tolerated; Windows CI proves the window path)"
         : "  editors: open → repeat RAISES (focused, one editor per instance) → clean close");
       console.log("========================================");
       process.exit(0);
     } else {
-      console.error(`FAILED: hello=${helloOk} scan=${hostScanSent} pluginState=${hostPluginStateOk} phase=${hostPhase} peaks=${hostPeakA.toFixed(3)}/${hostPeakB.toFixed(3)}/${hostPeakC.toFixed(3)}`);
+      console.error(`FAILED: hello=${helloOk} scan=${hostScanSent} pluginState=${hostPluginStateOk} phase=${hostPhase} peaks=${hostPeakA.toFixed(3)}/${hostPeakB.toFixed(3)}/${hostPeakC.toFixed(3)} caps=${capsForHosted}/${loadedForHosted}`);
       process.exit(1);
     }
   } else if (mode === "scan") {

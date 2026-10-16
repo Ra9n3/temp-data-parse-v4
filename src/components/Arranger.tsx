@@ -47,6 +47,9 @@ interface Props {
   pixelsPerTick: number;
   playheadTick: number;
   pluginLabels: Record<string, string>;
+  // Stage 3e-1 — per-track read-only "Plugin info" text (from the hosted
+  // instance's capability record); rendered on the pill's hover tooltip.
+  pluginInfoByTrack: Record<string, string>;
   audioBuffer: AudioBuffer | null;
   audioName: string;
   selectedTrackId: string | null;
@@ -203,6 +206,7 @@ export function Arranger(props: Props) {
     pixelsPerTick: ppt,
     playheadTick,
     pluginLabels,
+    pluginInfoByTrack,
     engineChannels,
     onEngineChannel,
     audioBuffer,
@@ -403,6 +407,7 @@ export function Arranger(props: Props) {
             tpBar={tpBar}
             tpb={tpb}
             pluginLabel={track.role === "audio" ? audioName || "Load audio" : (pluginLabels[track.id] ?? "No plugin")}
+            pluginInfo={track.role === "audio" ? undefined : pluginInfoByTrack[track.id]}
             audioBuffer={audioBuffer}
             selected={selectedTrackId === track.id}
             selSection={selSection}
@@ -498,6 +503,8 @@ function TrackRow(props: {
   tpBar: number;
   tpb: number;
   pluginLabel: string;
+  /** Stage 3e-1 — the track's read-only Plugin info text (pill tooltip). */
+  pluginInfo?: string;
   audioBuffer: AudioBuffer | null;
   selected: boolean;
   selSection: string | null;
@@ -537,6 +544,7 @@ function TrackRow(props: {
       >
         <TrackHeader
           track={track}
+          pluginInfo={props.pluginInfo}
           pluginLabel={props.pluginLabel}
           onMute={props.onToggleMute}
           onSolo={props.onToggleSolo}
