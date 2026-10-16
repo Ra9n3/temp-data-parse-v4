@@ -2025,11 +2025,18 @@ int runScanWorker(const std::string& path) {
 // code / 90 s timeout) and reports capabilitiesError itself.
 // The ScopedJuceInitialiser_GUI: a probe child is a fresh process that does
 // no other JUCE GUI work; if no initialiser is alive (the normal case here),
-// create one as the FIRST statement. SharedResourcePointer makes that
-// idempotent — if a future caller already holds one, this refs it instead of
-// double-initialising.
+// create one as the FIRST statement — deliberately LEAKED (never destroyed).
+// Why leaked: the initialiser's static destruction at process exit races the
+// VST3 module-handle cache (which FreeLibrary()s the plugin DLL from its own
+// atexit statics) — Windows CI measured exactly that death (exit 0xC0000374
+// heap corruption on the synth probe's SUCCESS path, ~477 ms in, while the
+// engine process — whose initialiser stays alive at exit — shuts down clean).
+// A short-lived child gains nothing from an ordered teardown; the OS reaps
+// the address space. The function-local static keeps the "create only if
+// none is alive" contract idempotent without a SharedResourcePointer (whose
+// static destruction was precisely the crashing step).
 int runProbeWorker(const std::string& path, const std::string& classId) {
-    static juce::SharedResourcePointer<juce::ScopedJuceInitialiser_GUI> juceInit;
+    static juce::ScopedJuceInitialiser_GUI* const juceInit = new juce::ScopedJuceInitialiser_GUI();
     (void) juceInit;
     juce::VST3PluginFormat format;
     juce::OwnedArray<juce::PluginDescription> types;
