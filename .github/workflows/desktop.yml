@@ -267,6 +267,16 @@ jobs:
             $pluginLoaded = Select-String -Path "engine-d-stdout.txt" -Pattern "\[engine\] plugin loaded: name=Scorch Test Synth"
             if (-not $pluginLoaded) { throw "plugin-loaded proof missing from engine stdout" }
             foreach ($l in $pluginLoaded.Line) { Write-Host "Hosting proof: $l" }
+            # Stage 3e-2: TRANSPORT PLAYHEAD proof — the hosted plugin SEES the
+            # engine's AudioPlayHead: bpm must equal the project bpm (120, the
+            # load's meta.bpm) and ppq must INCREASE while the transport rolls.
+            $phLines = Select-String -Path "engine-d-stdout.txt" -Pattern "\[testvst\] playhead .*playing=1"
+            if (($phLines | Measure-Object).Count -lt 2) { throw "playhead proof missing: need >=2 playhead lines while playing, got $(($phLines | Measure-Object).Count)" }
+            $bpmVals = @($phLines | ForEach-Object { if ($_.Line -match "bpm=([0-9.]+)") { [double]$Matches[1] } })
+            if (($bpmVals | Where-Object { [Math]::Abs($_ - 120.0) -gt 0.01 }).Count -gt 0) { throw "playhead bpm mismatch: got $($bpmVals -join ',') != project bpm 120" }
+            $ppqVals = @($phLines | ForEach-Object { if ($_.Line -match "ppq=([0-9.-]+)") { [double]$Matches[1] } })
+            if ($ppqVals.Count -lt 2 -or -not ($ppqVals[-1] -gt $ppqVals[0])) { throw "playhead ppq not increasing while playing: $($ppqVals -join ',')" }
+            Write-Host "Playhead proof: bpm $($bpmVals[0]) == project bpm 120; ppq $($ppqVals[0]) -> $($ppqVals[-1]) increases while playing"
             $procD.WaitForExit(10000) | Out-Null
             if (-not $procD.HasExited -or $procD.ExitCode -ne 0) { throw "Engine D did not exit cleanly (code=$($procD.ExitCode))" }
             Write-Host "Engine D clean exit 0 (hosting + routing + gating verified)"

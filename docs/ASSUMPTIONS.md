@@ -1129,3 +1129,45 @@ UI stage if hover proves insufficient.
   inputs, MIDI-effect buses, program lists of real libraries, and the
   tooltip's readability with a 20-bus plugin are all the user's by-ear/by-eye
   gate with BBCSO + their installed VSTs.
+
+## Stage 3e-2 — transport playhead (the plugin finally sees the transport)
+
+### Design
+
+`EnginePlayHead` overrides this pinned JUCE's PURE virtual `getPosition()`
+(the vendored 8.x also carries the deprecated `getCurrentPosition` wrapper —
+the override targets the pure virtual). The audio callback publishes at the
+top of the playing branch (before any plugin runs) and at the end of the
+stopped branch: relaxed atomics only, no allocation, no lock — plugins call
+`getPosition()` on the audio thread and get a stack-built `PositionInfo`.
+
+`timeInSamples` is the TIMELINE sample of the buffer start
+(`round(playStartTick · spt) + startSample`): a deterministic mapping of the
+tick position to samples under the current (single) tempo. It is NOT the raw
+`samplesProcessed` counter (that resets on every play/seek — plugins expect a
+monotonic timeline position).
+
+### What is NOT implemented (and why)
+
+- Tempo MAPS: the project model carries ONE bpm (frontend `EngineLoadMeta`);
+  the brief's "tempo active at the current tick" degenerates to that tempo.
+  The per-buffer publish point is where a tempo map would resolve — additive,
+  no protocol change.
+- isLooping is constant false (the engine has no loop region — the 3b stop
+  contract is position-kept, not looping).
+- The playhead reports position at BUFFER START (the standard host
+  convention); bar-start math uses the project time signature (n·4/d
+  quarters per bar).
+
+### CI evidence + fire-rate honesty
+
+- CI (Test D greps) proves: the plugin's `getPlayHead()` is wired (non-null),
+  bpm == the load's meta.bpm (120), ppq strictly increasing while playing,
+  bar-start and time-signature fields carried. The fixture logs are
+  deterministic (block-count throttle).
+- By-ear only: actual tempo-synced behavior inside REAL libraries (LFO
+  tempo-sync, arpeggiators) — CI proves the data, ears prove the music.
+- Empirical trap recorded for future stages: the VST3 bundle does NOT relink
+  when only the plugin-side shared code changes unless the old .so is removed
+  first (the 3d-1 "stale fixture" lesson, second sighting — now understood as
+  a JUCE CMake bundle-relink quirk, not a copy mistake).

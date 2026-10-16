@@ -232,6 +232,11 @@ struct ScoreSnapshot {
     double bpm = 120.0;
     int ppqn = 960;
     int64_t endTick = 0;
+    // Stage 3e-2: the project's time signature rides the score snapshot —
+    // the playhead publishes it (sanitized at parse: numerator 1..99,
+    // denominator a power-of-two 1..64; otherwise the 4/4 default).
+    int tsNumerator = 4;
+    int tsDenominator = 4;
 };
 std::atomic<ScoreSnapshot*> g_score{nullptr};
 
@@ -812,6 +817,59 @@ std::atomic<uint64_t> g_ledgerRead{0};
 std::atomic<bool> g_dispatchLog{false};
 std::atomic<float> g_lastPeak{0.0f};
 
+// ─── Stage 3e-2 — TRANSPORT INFO (PLAYHEAD) ────────────────────────────────
+// The host-side playhead every hosted instance sees via getPlayHead(). Owned
+// by the audio callback (one stable address for the process lifetime); the
+// audio thread PUBLISHES each buffer's position through relaxed atomics and
+// getCurrentPosition (called by plugins, on the audio thread) only READS
+// them and fills a stack PositionInfo — no lock, no allocation, on either
+// side. bpm/time-signature come from the immutable score snapshot (the
+// project data the frontend sends in load.meta; the project model has ONE
+// tempo today, so "the tempo active at the current tick" degenerates to it
+// — a future tempo map slots in at the per-buffer publish point without a
+// protocol change). isLooping is constant false: the engine has no loop
+// region (3b contract: stop = position kept, no looping).
+class EnginePlayHead : public juce::AudioPlayHead {
+public:
+    void publish(bool isPlaying, int64_t timeInSamplesVal, double bpmVal,
+                 double ppqVal, double ppqBarVal, int tsNum, int tsDen) {
+        playing.store(isPlaying, std::memory_order_relaxed);
+        timeInSamples.store(timeInSamplesVal, std::memory_order_relaxed);
+        bpm.store(bpmVal, std::memory_order_relaxed);
+        ppqPosition.store(ppqVal, std::memory_order_relaxed);
+        ppqLastBar.store(ppqBarVal, std::memory_order_relaxed);
+        tsNumerator.store(tsNum, std::memory_order_relaxed);
+        tsDenominator.store(tsDen, std::memory_order_relaxed);
+    }
+
+    // The PURE virtual of this JUCE (8.x pinned): getPosition(). Builds a
+    // stack PositionInfo from the atomics — no lock, no allocation. Plugins
+    // may call this on the audio thread (they already are, in processBlock).
+    juce::Optional<PositionInfo> getPosition() const override {
+        PositionInfo info;
+        info.setTimeInSamples(timeInSamples.load(std::memory_order_relaxed));
+        info.setBpm(bpm.load(std::memory_order_relaxed));
+        info.setPpqPosition(ppqPosition.load(std::memory_order_relaxed));
+        info.setPpqPositionOfLastBarStart(ppqLastBar.load(std::memory_order_relaxed));
+        juce::AudioPlayHead::TimeSignature sig{};
+        sig.numerator = tsNumerator.load(std::memory_order_relaxed);
+        sig.denominator = tsDenominator.load(std::memory_order_relaxed);
+        info.setTimeSignature(sig);
+        info.setIsPlaying(playing.load(std::memory_order_relaxed));
+        info.setIsLooping(false);
+        return juce::Optional<PositionInfo>(std::move(info));
+    }
+
+private:
+    std::atomic<bool> playing{false};
+    std::atomic<int64_t> timeInSamples{0};
+    std::atomic<double> bpm{120.0};
+    std::atomic<double> ppqPosition{0.0};
+    std::atomic<double> ppqLastBar{0.0};
+    std::atomic<int> tsNumerator{4};
+    std::atomic<int> tsDenominator{4};
+};
+
 // ─── Audio callback ─────────────────────────────────────────────────────────
 class EngineAudioCallback : public juce::AudioIODeviceCallback {
 public:
@@ -988,6 +1046,28 @@ public:
             g_lastPeak.store(peak, std::memory_order_relaxed);
             recountVoices();
             recountHeldNotes();
+            // Stage 3e-2: publish the STOPPED position — the playhead stays
+            // truthful while the transport is stopped (plugins probing
+            // getPlayHead() between takes see the remembered position, not
+            // a frozen rolling one). Same lock-free publish as below.
+            {
+                ScoreSnapshot* sSnap = score;
+                const double bpmNow = sSnap ? sSnap->bpm : 120.0;
+                const int ppqnNow = sSnap ? sSnap->ppqn : 960;
+                const double sptStop =
+                    g_engine.sampleRate.load() * 60.0 / (bpmNow * static_cast<double>(ppqnNow));
+                const double spqStop =
+                    g_engine.sampleRate.load() * 60.0 / bpmNow;   // samples per quarter
+                const int64_t tlSample = static_cast<int64_t>(std::llround(
+                    static_cast<double>(g_engine.lastTick.load()) * sptStop));
+                const double ppqNow = spqStop > 0.0
+                    ? static_cast<double>(tlSample) / spqStop : 0.0;
+                const int num = sSnap ? sSnap->tsNumerator : 4;
+                const int den = sSnap ? sSnap->tsDenominator : 4;
+                const double barQ = static_cast<double>(num) * 4.0 / static_cast<double>(den);
+                playHead.publish(false, tlSample, bpmNow, ppqNow,
+                                 std::floor(ppqNow / barQ) * barQ, num, den);
+            }
             return;
         }
 
@@ -1003,6 +1083,24 @@ public:
         const size_t eventCount = score ? score->events.size() : 0;
         int64_t startSample = g_engine.samplesProcessed.load();
         int64_t playStartTick = g_engine.playStartTick.load();
+
+        // Stage 3e-2: publish THIS buffer's transport position before any
+        // plugin runs — bpm/time-signature from the immutable snapshot (the
+        // one tempo active today; a future tempo map resolves per buffer
+        // here), ppq/bar-start derived from the timeline sample. Pure
+        // atomics — no lock, no allocation, realtime-safe.
+        {
+            const double bpmNow = score ? score->bpm : 120.0;
+            const int num = score ? score->tsNumerator : 4;
+            const int den = score ? score->tsDenominator : 4;
+            const double spq = g_engine.sampleRate.load() * 60.0 / bpmNow;
+            const int64_t tlSample = static_cast<int64_t>(std::llround(
+                static_cast<double>(playStartTick) * spt)) + startSample;
+            const double ppqNow = static_cast<double>(tlSample) / spq;
+            const double barQ = static_cast<double>(num) * 4.0 / static_cast<double>(den);
+            playHead.publish(true, tlSample, bpmNow, ppqNow,
+                             std::floor(ppqNow / barQ) * barQ, num, den);
+        }
 
         // Routing-only plugin test (shared by the skip and dispatch walks and
         // by dispatchTo). F4: plugin-routed events dispatch EARLIER by the
@@ -1197,6 +1295,10 @@ public:
                 HostedPlugin* h = set->slots[slot];
                 if (h == nullptr || !h->instance) continue;
                 auto* p = h->instance.get();
+                // Stage 3e-2: keep the playhead attached across every
+                // re-prepare (setPlayHead persists, but re-assert it — cheap
+                // and proof against wrapper resets). Member of THIS callback.
+                p->setPlayHead(&playHead);
                 p->setPlayConfigDetails(0, 2, device->getCurrentSampleRate(),
                                         device->getCurrentBufferSizeSamples());
                 p->prepareToPlay(device->getCurrentSampleRate(),
@@ -1230,6 +1332,15 @@ private:
     // Stage 3d-4: ONE reusable MidiBuffer PER SLOT (same steady-state
     // no-alloc contract) — each instance receives only its own events.
     juce::MidiBuffer instMidi[kMaxInstances];
+
+public:
+    // Stage 3e-2: the playhead every hosted instance sees. One stable address
+    // (g_audioCallback is a namespace-level global); loadHostedPlugin and the
+    // worker prepare paths hand &playHead to every instance. Public — the
+    // hosting code lives outside this class.
+    EnginePlayHead playHead;
+
+private:
 
     void ensureScratch(size_t numSamples) {
         if (synthScratch.size() < numSamples) synthScratch.resize(numSamples, 0.0f);
@@ -2012,6 +2123,11 @@ std::string loadHostedPlugin(const juce::var& pluginVar, const std::string& inst
         juce::String err;
         auto inst = mgr.createPluginInstance(*chosen, 44100.0, 512, err);
         if (inst == nullptr) return "createPluginInstance failed: " + err.toStdString();
+        // Stage 3e-2 — the instance gets the engine's playhead BEFORE any
+        // prepare (plugins cache the pointer; the audio callback publishes
+        // positions through it every buffer). One stable address: the
+        // namespace-level g_audioCallback's member.
+        inst->setPlayHead(&g_audioCallback.playHead);
         // Activate the stereo output bus into the graph (nominal rate/size;
         // audioDeviceAboutToStart re-prepares for the REAL device).
         inst->setPlayConfigDetails(0, 2, 44100.0, 512);
@@ -2323,16 +2439,35 @@ void handle_load(const juce::var& json, ix::WebSocket& ws, size_t byteSize) {
     double bpm = 120.0;
     int ppqn = 960;
     int64_t endTick = 0;
+    // Stage 3e-2: the project's time signature (the frontend already sends it
+    // in load.meta) — sanitized, and the playhead publishes it. A malformed
+    // signature is NOT a load failure (it cannot break scheduling); the
+    // default 4/4 stands and the receipt names the substitution.
+    int tsNum = 4, tsDen = 4;
+    bool tsProvidedBad = false;
     if (metaVar.getDynamicObject()) {
         bpm = metaVar.getDynamicObject()->getProperty("bpm");
         ppqn = metaVar.getDynamicObject()->getProperty("ppqn");
         endTick = static_cast<int64_t>(static_cast<double>(metaVar.getDynamicObject()->getProperty("endTick")));
+        juce::DynamicObject* tsObj = metaVar.getDynamicObject()->getProperty("timeSignature").getDynamicObject();
+        if (tsObj != nullptr) {
+            const int n = static_cast<int>(static_cast<double>(tsObj->getProperty("numerator")));
+            const int d = static_cast<int>(static_cast<double>(tsObj->getProperty("denominator")));
+            static constexpr int kAllowedDen[] = { 1, 2, 4, 8, 16, 32, 64 };
+            const bool denOk = std::find(std::begin(kAllowedDen), std::end(kAllowedDen), d) != std::end(kAllowedDen);
+            if (n >= 1 && n <= 99 && denOk) { tsNum = n; tsDen = d; }
+            else tsProvidedBad = true;
+        }
     }
     // Stage 3c-hotfix: non-finite / non-positive tempo degenerates
     // samplesPerTick() (inf / zero) — events would load but NEVER dispatch:
     // the other silent-empty-score path. Same treatment: hard fail, name it.
     if (!std::isfinite(bpm) || bpm <= 0.0) loadFail = loadFail.empty() ? "meta.bpm is not finite/positive" : loadFail;
     if (ppqn <= 0) loadFail = loadFail.empty() ? "meta.ppqn is not positive" : loadFail;
+    if (tsProvidedBad) {
+        engineLog("[load] meta.timeSignature malformed — the playhead publishes 4/4 (non-fatal; scheduling unaffected)");
+        std::cout << "[engine] load: timeSignature malformed, playhead publishes 4/4" << std::endl;
+    }
 
     if (!loadFail.empty()) {
         engineLog("[load-fail] " + loadFail + " | received " + std::to_string(byteSize) +
@@ -2408,6 +2543,8 @@ void handle_load(const juce::var& json, ix::WebSocket& ws, size_t byteSize) {
         snap->bpm = bpm;
         snap->ppqn = ppqn;
         snap->endTick = endTick;
+        snap->tsNumerator = tsNum;
+        snap->tsDenominator = tsDen;
         ScoreSnapshot* old = g_score.exchange(snap, std::memory_order_acq_rel);
         if (old) {
             std::lock_guard<std::mutex> rlock(g_retireMutex);
@@ -2732,6 +2869,8 @@ size_t publishScoreWithReattacks(int64_t startTick) {
     snap->bpm = cur->bpm;
     snap->ppqn = cur->ppqn;
     snap->endTick = cur->endTick;
+    snap->tsNumerator = cur->tsNumerator;
+    snap->tsDenominator = cur->tsDenominator;
     ScoreSnapshot* old = g_score.exchange(snap, std::memory_order_acq_rel);
     if (old) {
         std::lock_guard<std::mutex> rlock(g_retireMutex);
@@ -3336,6 +3475,9 @@ int main(int argc, char** argv) {
                 const double devRate = g_engine.sampleRate.load();
                 const int devBuf = g_deviceBufferSize.load();
                 if (devRate > 0.0 && h->instance) {
+                    // Stage 3e-2: playhead re-asserted before the real-device
+                    // prepare (see loadHostedPlugin).
+                    h->instance->setPlayHead(&g_audioCallback.playHead);
                     h->instance->setPlayConfigDetails(0, 2, devRate, devBuf);
                     h->instance->prepareToPlay(devRate, devBuf);
                 }

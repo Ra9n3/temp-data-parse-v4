@@ -15,6 +15,11 @@
 //     logged to stdout as "[testvst] s=<abs sample> ch=<n> k=<kind> d1=.. d2=.."
 //     — the end-to-end proof that the ENGINE routed events to the plugin on
 //     the expected channels.
+// Stage 3e-2: the fixture also probes the HOST's playhead every block and
+//     logs (same env gate; throttled — the first block + ~1/s while playing):
+//     "[testvst] playhead s=<timeInSamples> bpm=<x> ppq=<y> bar=<z> ts=<n>/<d>
+//     playing=<0|1>" — CI asserts bpm == the project bpm and ppq INCREASES
+//     while playing (the engine's AudioPlayHead contract, end to end).
 // Stage 3d-1: the fixture SHIPS an editor (deterministic 360x120) so CI can
 // prove the openEditor/closeEditor contract on a free plugin. No state yet
 // (3d-3), no RNG: same input ⇒ same output.
@@ -82,6 +87,46 @@ public:
             }
             if (v.releasing && v.env <= 0.0f) v.active = false;
         }
+
+        // Stage 3e-2 — playhead observability: read the host's PositionInfo
+        // and log it, throttled to the FIRST block + ~1/s while playing
+        // (block-count arithmetic — deterministic, no RNG, no allocation).
+        maybeLogPlayhead();
+    }
+
+    void maybeLogPlayhead() {
+        static const bool enabled = std::getenv("SCORCH_TESTVST_LOG") != nullptr;
+        if (!enabled) return;
+        auto* ph = getPlayHead();
+        if (ph == nullptr) {
+            if (blockStart == 0) {
+                std::fprintf(stdout, "[testvst] playhead none (host supplied no AudioPlayHead)\n");
+                std::fflush(stdout);
+            }
+            return;
+        }
+        const auto pos = ph->getPosition();
+        if (!pos.hasValue()) {
+            if (blockStart == 0) {
+                std::fprintf(stdout, "[testvst] playhead absent (host returned nullopt)\n");
+                std::fflush(stdout);
+            }
+            return;
+        }
+        const bool playingNow = pos->getIsPlaying();
+        const bool timeToLog = blockStart == 0
+            || (playingNow && blockStart - lastPlayheadLogAt >= static_cast<long long>(sampleRate));
+        if (!timeToLog) return;
+        lastPlayheadLogAt = blockStart;
+        const double bpm = pos->getBpm().orFallback(-1.0);
+        const double ppq = pos->getPpqPosition().orFallback(-1.0);
+        const double bar = pos->getPpqPositionOfLastBarStart().orFallback(-1.0);
+        int tsNum = 0, tsDen = 0;
+        if (const auto sig = pos->getTimeSignature()) { tsNum = sig->numerator; tsDen = sig->denominator; }
+        const long long tis = pos->getTimeInSamples().orFallback(-1);
+        std::fprintf(stdout, "[testvst] playhead s=%lld bpm=%.2f ppq=%.3f bar=%.3f ts=%d/%d playing=%d\n",
+                     static_cast<long long>(tis), bpm, ppq, bar, tsNum, tsDen, playingNow ? 1 : 0);
+        std::fflush(stdout);
     }
 
     // ── Boilerplate (editor since 3d-1; state arrives in 3d-3; no tail) ────
@@ -211,4 +256,5 @@ private:
     int cc11[17] = {};  // [1..16]
     double sampleRate = 44100.0;
     long long blockStart = 0;
+    long long lastPlayheadLogAt = -(1LL << 40);  // 3e-2 throttle (first playing block logs immediately)
 };
