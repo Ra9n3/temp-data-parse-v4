@@ -230,6 +230,7 @@ let scanSent = false, scanResultOk = false, aliveAfterCrashOk = false, defaultSc
 let hostScanSent = false, hostPluginStateOk = false, hostPhase = 0;
 // Stage 3d-1: editor-window contract flags.
 let hostEditorNegOk = false, hostEditorOpenOk = false, hostEditorFocusOk = false, hostEditorCloseOk = false;
+let hostHeadlessSkip = false;   // editor_unavailable("no display") tolerated like multi M-7
 // Stage 3d-3: state-persistence flags + the playing-peak windows for the
 // "state actually APPLIED" proofs. S0 = default capture, S1 = diverged.
 let hostStateCaptureOk = false, hostStateRestoreOk = false, hostStateRoundtripOk = false;
@@ -408,9 +409,9 @@ ws.addEventListener("message", (event) => {
     // ── Stage 3d-4: MULTI-INSTANCE hosting proof (see header docs) ──
     if (msg.type === "hello" && multiPhase === 0) {
       if (msg.protocol !== 1) fail(`expected protocol 1, got ${msg.protocol}`);
-      if (msg.engineVersion !== "0.7.0") fail(`expected 0.7.0, got ${msg.engineVersion}`);
+      if (msg.engineVersion !== "0.7.1") fail(`expected 0.7.1, got ${msg.engineVersion}`);
       if (!fixtureDir) fail("multi mode requires a fixture dir argument");
-      console.log("[test] hello OK (0.7.0) — scanning for the stand-in host plugin...");
+      console.log("[test] hello OK (0.7.1) — scanning for the stand-in host plugin...");
       multiPhase = 1;
       ws.send(JSON.stringify({ type: "scan", dirs: [fixtureDir] }));
     } else if (msg.type === "scan_result" && multiPhase === 1) {
@@ -781,6 +782,16 @@ ws.addEventListener("message", (event) => {
       hostEditorCloseOk = true;
       console.log("[test] phase L ✓ editor CLOSED cleanly (protocol close; the X button and plugin unload converge on the same path) — shutdown");
       finishAndShutdown();
+    } else if (msg.type === "error" && msg.code === "editor_unavailable" && hostPhase === 23 && !hostEditorOpenOk) {
+      // Headless tolerance — SAME contract as multi M-7: a display-less host
+      // (this box, disconnected RDP) cannot create a window; the engine's
+      // display guard answers editor_unavailable("no display …") and the
+      // runner skips J/K/L. Windows CI has a real display and proves the
+      // real open/raise/close path — this branch never fires there.
+      if (!/no display/i.test(msg.detail ?? "")) fail(`host: unexpected editor_unavailable detail: ${msg.detail}`);
+      hostHeadlessSkip = true;
+      console.log(`[test] phase J (headless) editor_unavailable tolerated ("${msg.detail}") — Windows CI proves the window path`);
+      finishAndShutdown();
     } else if (msg.type === "error" && hostPluginStateOk && !hostRejectOk) {
       fail(`host mode: unexpected error mid-test: ${msg.code} ${msg.detail ?? ""}`);
     }
@@ -837,7 +848,7 @@ ws.addEventListener("message", (event) => {
     if (msg.type === "hello" && !helloOk) {
       helloOk = true;
       if (msg.protocol !== 1) fail(`expected protocol 1, got ${msg.protocol}`);
-      if (msg.engineVersion !== "0.7.0") fail(`expected 0.7.0, got ${msg.engineVersion}`);
+      if (msg.engineVersion !== "0.7.1") fail(`expected 0.7.1, got ${msg.engineVersion}`);
       // Stage 3c close-out: the dispatch ledger streams what the engine
       // ACTUALLY dispatched — the replay-burst and re-attack asserts read it.
       ws.send(JSON.stringify({ type: "dispatch_log", enable: true }));
@@ -1145,6 +1156,9 @@ ws.addEventListener("close", () => {
       console.log('  muted-window note never dispatched; unmute restores sound');
       console.log(`  MUSICAL stops at ticks ${hostStopTick1}/${hostStopTick2}: release marker + exact held-note offs, NO CC120`);
       console.log(`  RESUME: gentle re-attacks (vel 80) + redundant CC#32 SUPPRESSED (k=6) + genuine change SENT`);
+      console.log(hostHeadlessSkip
+        ? "  editors: SKIPPED on this headless host (editor_unavailable tolerated; Windows CI proves the window path)"
+        : "  editors: open → repeat RAISES (focused, one editor per instance) → clean close");
       console.log("========================================");
       process.exit(0);
     } else {

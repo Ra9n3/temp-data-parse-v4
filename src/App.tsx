@@ -203,10 +203,21 @@ export default function App() {
   // (engine-owned popups; one editor per INSTANCE — the set keys are the
   // instance ids, and a track's pill lights up when ITS instance is open).
   const [editorOpenIds, setEditorOpenIds] = useState<Set<string>>(() => new Set());
+  // Stage 3d-4 hotfix: which instances the engine has CONFIRMED hosting this
+  // session (per-instance plugin_state "loaded" receipts). The pill gate
+  // reads this instead of firing openEditor at an instance that does not
+  // exist yet — the exact "editor unavailable — no hosted plugin instance"
+  // wall the user hit between app start and first play.
+  const [hostedIds, setHostedIds] = useState<Set<string>>(() => new Set());
+  // Latest project value for imperative callbacks (status transition, engine
+  // receipts) that outlive renders and must read the CURRENT project.
+  const projectRef = useRef<Project | null>(null);
   // Chord v2 — the editing chord id is LIFTED here (was local to the Arranger
   // lane) so the top-bar panel and the in-lane editor share one source of
   // truth: creation/retarget/Esc/delete all stay in sync. No schema change.
   const [editingChordId, setEditingChordId] = useState<string | null>(null);
+  // Keep projectRef current after every render (lint-clean ref sync).
+  useEffect(() => { projectRef.current = project; }, [project]);
   const [audioBuffer, setAudioBuffer] = useState<AudioBuffer | null>(null);
   const [audioName, setAudioName] = useState("");
   const [harness, setHarness] = useState<string | null>(null);
@@ -255,6 +266,54 @@ export default function App() {
       // the 5s ping also reports "ready" and must NOT invalidate the cache.
       if (status === "ready" && prevStatusRef.current !== "ready") {
         lastLoadedRef.current = null;
+        setHostedIds(new Set());   // new process: nothing is hosted yet
+        // Stage 3d-4 hotfix — HOST ON CONNECT. The engine hosts plugins as
+        // part of load, and load used to be sent ONLY from the play paths:
+        // between app start and the first play the engine hosted NOTHING,
+        // so every plugin pill died with "editor unavailable — no hosted
+        // plugin instance" (user evidence: 11 refusals across two sessions,
+        // one of which never loaded because the user never pressed play).
+        // It also broke the persistence promise in practice — reopen
+        // restored the UI but not the hosting, and the natural first action
+        // (click a pill, pick a patch) was exactly the one that failed.
+        // Load the CURRENT project immediately (no play, no transport).
+        // The play paths keep their confirmed-load identity check: if this
+        // auto-load is still the current project, play goes straight to
+        // runEnginePlay; if the user edits first, play sends a fresh load
+        // (the engine worker supersedes in-flight loads by design).
+        const p = projectRef.current;
+        // A fully empty project (fresh install — no events AND no plugin
+        // bindings) needs no hosting — skip the load and keep the first
+        // startup clean; the play path loads when there is something to load.
+        if (p) {
+          const stream = buildEngineStream(p);
+          if (stream.events.length > 0 || stream.plugins.length > 0) {
+            const meta: EngineLoadMeta = {
+              bpm: p.bpm,
+              ppqn: PPQ,
+              timeSignature: p.timeSignature,
+              endTick: projectEndTick(p),
+            };
+            void client.load(stream.events, meta, {
+              routing: stream.routing,
+              plugins: stream.plugins,
+            }).then((receipt) => {
+              if (receipt.skipped > 0) {
+                writeErrorLog("engineAutoLoad", `startup load incomplete: ${receipt.loaded}/${receipt.received} loaded, ${receipt.skipped} skipped`);
+              }
+              client.mix(
+                p.tracks.filter((t) => t.muted).map((t) => t.id),
+                p.tracks.filter((t) => t.soloed).map((t) => t.id),
+              );
+              lastLoadedRef.current = p; // confirmed load — play fast-path eligible
+            }).catch((failure: LoadFailure) => {
+              // Visible but NOT play-path: the user's first play retries the
+              // load itself and owns the web-synth fallback decision.
+              writeErrorLog("engineAutoLoad", `startup load failed: ${failure.reason}`);
+              toast("error", `engine load failed — press play to retry (${failure.reason})`);
+            });
+          }
+        }
       }
       prevStatusRef.current = status;
     });
@@ -284,6 +343,15 @@ export default function App() {
       if (disposed) return;
       setPluginState(result);
       if (result.state === "loaded") {
+        // Stage 3d-4 hotfix: per-instance hosting truth — the pill gate
+        // checks THIS set instead of firing openEditor at an instance the
+        // engine has not confirmed. Legacy receipts without instanceId
+        // record the reserved id "hosted".
+        setHostedIds((prev) => {
+          const next = new Set(prev);
+          next.add(result.instanceId ?? "hosted");
+          return next;
+        });
         toast("ok", `${result.name ?? "Plugin"} hosted (latency ${result.latencyMs?.toFixed(1) ?? "?"}ms, channels ${(result.channels ?? []).join(",")})`);
       } else {
         // Stage 3d-3: a plugin the project references but the machine lacks
@@ -495,12 +563,24 @@ export default function App() {
     const t = project.tracks.find((tr) => tr.id === trackId);
     const g = t ? project.libraryGroups.find((lg) => lg.id === t.libraryGroupId) : undefined;
     if (g?.pluginId && g?.pluginPath) {
+      // Stage 3d-4 hotfix: HONEST gate. Firing openEditor at an instance the
+      // engine has not confirmed produced the misleading "editor unavailable
+      // for this plugin — no hosted plugin instance" wall; the truth is one
+      // of two transient/visible states, so name THAT instead.
+      if (engineStatus !== "ready") {
+        toast("info", "audio engine not ready yet — its editor opens when the engine connects");
+        return;
+      }
+      if (!hostedIds.has(g.id)) {
+        toast("info", "plugin not hosted yet — still initializing, or its load failed (see the hosting message)");
+        return;
+      }
       engineClientRef.current?.openEditor(g.id);
     } else {
       setVstTrackId(trackId);
       setVstOpen(true);
     }
-  }, [project]);
+  }, [project, engineStatus, hostedIds, toast]);
 
   // Stage 3d-4 derived sets for the Arranger pills: which tracks have a
   // plugin-bound group (editor affordance) and which of their instances

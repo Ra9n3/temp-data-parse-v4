@@ -142,7 +142,7 @@
 
 namespace {
 
-constexpr const char* kEngineVersion = "0.7.0";
+constexpr const char* kEngineVersion = "0.7.1";
 constexpr int kProtocolVersion = 1;
 constexpr int kDefaultPort = 9377;
 constexpr int kMaxVoices = 64;
@@ -475,6 +475,29 @@ std::atomic<int> g_pluginLatencySamples{0};
 class PluginEditorWindow;
 std::mutex g_editorMutex;                                        // guards the map only
 std::unordered_map<std::string, PluginEditorWindow*> g_editors;  // instanceId → window
+
+// Stage 3d-4 hotfix — pending-open forensic record. An ACCEPTED openEditor
+// used to have exactly one receipt-less death path: openEditorWindow's first
+// guard silently returned when the instance was gone by the time the message
+// thread ran the job (user evidence: "open requested" then 101s of silence —
+// no opened, no refused, nothing). Worse, if a plugin's createEditor() never
+// returns (UI wedge), NOTHING can ever speak because the message thread is
+// the thing that's blocked. This record is written at accept (WS thread),
+// marked started/cleared at every terminal path (message thread), and READ by
+// the init worker's janitor loop (100ms cadence, zero new threads) which
+// NAMES a pending open that survives >10s — distinguishing "message-thread
+// job never ran (MM wedged elsewhere)" from "createEditor() has not
+// returned (plugin UI wedge)". Log-only forensics: no protocol change.
+struct PendingEditorOpen {
+    std::string iid;
+    std::chrono::steady_clock::time_point queuedAt{};
+    std::chrono::steady_clock::time_point startedAt{};   // default = MM job not yet run
+};
+std::mutex g_pendingEditorMutex;
+bool g_pendingEditorActive = false;
+bool g_pendingEditorNamed = false;   // one named receipt per pending epoch
+PendingEditorOpen g_pendingEditorOpen;
+
 // Defined further down (JSON helpers + close converge point); forward-declared
 // so the window class and open path can reference them.
 std::string escape_json(const std::string& s);
@@ -510,8 +533,34 @@ public:
 
 // Message-thread side of open. A plugin may ship no editor — createEditor()
 // returning null is the editor_unavailable path, a NORMAL reply.
+// Stage 3d-4 hotfix: `owner` is resolved by the CALLER from the CURRENT
+// instance set at message-thread run time — this function never trusts a
+// pointer captured on another thread. Every terminal path now SPEAKS (the
+// old first-guard silent return was the one receipt-less death of an
+// accepted open) and clears the pending-open record the watchdog reads.
 void openEditorWindow(const std::string& iid, HostedPlugin* owner) {
-    if (owner == nullptr || !owner->instance) return;
+    auto clearPending = [&iid]() {
+        std::lock_guard<std::mutex> pl(g_pendingEditorMutex);
+        if (g_pendingEditorActive && g_pendingEditorOpen.iid == iid) {
+            g_pendingEditorActive = false;
+            g_pendingEditorNamed = false;
+        }
+    };
+    {   // mark the MM job as STARTED (watchdog distinguishes queued-forever
+        // from createEditor-never-returns)
+        std::lock_guard<std::mutex> pl(g_pendingEditorMutex);
+        if (g_pendingEditorActive && g_pendingEditorOpen.iid == iid)
+            g_pendingEditorOpen.startedAt = std::chrono::steady_clock::now();
+    }
+    if (owner == nullptr || !owner->instance) {
+        clearPending();
+        // NAMED abandon — the instance retired between the WS-thread accept
+        // and this message-thread run. The user must never see a silent
+        // nothing after an accepted "open requested" again.
+        broadcastJson(std::string("{\"type\":\"error\",\"code\":\"editor_unavailable\",\"echo\":\"openEditor\",\"detail\":\"instance retired before the editor window opened\"}"));
+        engineLog("[editor] open abandoned — instance not live at message-thread run (requested id \"" + iid + "\")");
+        return;
+    }
     // Re-check on the message thread: two queued openEditor requests must
     // yield ONE window (second request raises).
     {
@@ -522,11 +571,13 @@ void openEditorWindow(const std::string& iid, HostedPlugin* owner) {
                           escape_json(iid) + "\",\"name\":\"" + escape_json(owner->name) +
                           "\",\"focused\":true}");
             engineLog("[editor] focus existing instance=" + iid + " (race re-check)");
+            clearPending();
             return;
         }
     }
     auto* ed = owner->instance->createEditor();
     if (ed == nullptr) {
+        clearPending();
         broadcastJson(std::string("{\"type\":\"error\",\"code\":\"editor_unavailable\",\"echo\":\"openEditor\",\"detail\":\"") +
                       escape_json(owner->name) + " ships no editor window\"}");
         engineLog("[editor] unavailable — createEditor() returned null (" + owner->name + ")");
@@ -539,6 +590,7 @@ void openEditorWindow(const std::string& iid, HostedPlugin* owner) {
     // display-less Linux box.)
     const juce::Displays::Display* disp = juce::Desktop::getInstance().getDisplays().getPrimaryDisplay();
     if (disp == nullptr) {
+        clearPending();
         delete ed;   // we own the orphan editor component — release it
         broadcastJson(std::string("{\"type\":\"error\",\"code\":\"editor_unavailable\",\"echo\":\"openEditor\",\"detail\":\"no display available for an editor window\"}"));
         engineLog("[editor] unavailable — no display (headless host)");
@@ -558,6 +610,7 @@ void openEditorWindow(const std::string& iid, HostedPlugin* owner) {
     win->setBounds(juce::jmax(work.getX(), work.getCentreX() - cw / 2),
                    juce::jmax(work.getY(), work.getCentreY() - ch / 2), cw, ch);
     win->setVisible(true);
+    clearPending();   // terminal: the window is up and receipted below
     {
         std::lock_guard<std::mutex> lock(g_editorMutex);
         g_editors[iid] = win;
@@ -2727,7 +2780,25 @@ void handle_open_editor(const juce::var& json, ix::WebSocket& ws) {
         engineLog("[editor] focus existing instance=" + iid);
         return;
     }
-    juce::MessageManager::callAsync([iid, live] { openEditorWindow(iid, live); });
+    // Stage 3d-4 hotfix: the lambda NO LONGER captures the raw `live`
+    // pointer. HostedPlugin objects live inside raw-pointer-slotted
+    // InstanceSets and are freed by the worker's retire path after a 250ms
+    // grace — a set replacement in the request→run window could dangle the
+    // capture (the silent-death family the user hit). The job instead
+    // re-resolves by id from the CURRENT set at message-thread run time —
+    // this codebase's standard resolve-from-current-load pattern — and the
+    // abandon receipt in openEditorWindow names any retirement.
+    {
+        std::lock_guard<std::mutex> pl(g_pendingEditorMutex);
+        g_pendingEditorOpen = PendingEditorOpen{ iid, std::chrono::steady_clock::now(), {} };
+        g_pendingEditorActive = true;
+        g_pendingEditorNamed = false;
+    }
+    juce::MessageManager::callAsync([iid] {
+        std::shared_ptr<const InstanceSet> cur = g_instances.load(std::memory_order_acquire);
+        HostedPlugin* h = cur ? cur->byId(iid) : nullptr;
+        openEditorWindow(iid, h);
+    });
     engineLog("[editor] open requested instance=" + iid + " plugin=" + live->name);
 }
 
@@ -3003,6 +3074,30 @@ int main(int argc, char** argv) {
                         delete it->first;
                         it = g_retiredPlugins.erase(it);
                     } else ++it;
+                }
+            }
+            // Stage 3d-4 hotfix — pending-open watchdog (this janitor loop is
+            // the only off-MM heartbeat the engine owns; zero new threads).
+            // An accepted openEditor that stays pending >10s is NAMED once:
+            // either its message-thread job never started (MM wedged
+            // elsewhere) or createEditor() has not returned (plugin UI
+            // wedge — the only editor step a plugin can hang). Without this
+            // the log shows "open requested" followed by eternal silence —
+            // exactly the user's v0.7.0 evidence.
+            {
+                std::lock_guard<std::mutex> pl(g_pendingEditorMutex);
+                if (g_pendingEditorActive && !g_pendingEditorNamed) {
+                    const auto since = std::chrono::duration_cast<std::chrono::milliseconds>(
+                        std::chrono::steady_clock::now() - g_pendingEditorOpen.queuedAt).count();
+                    if (since >= 10000) {
+                        g_pendingEditorNamed = true;
+                        const bool started = g_pendingEditorOpen.startedAt.time_since_epoch().count() != 0;
+                        engineLog(std::string("[editor] open pending >10s instance=") +
+                                  g_pendingEditorOpen.iid +
+                                  (started
+                                       ? " — createEditor() has not returned; message thread blocked inside plugin editor creation"
+                                       : " — message-thread job has not started; message thread appears wedged"));
+                    }
                 }
             }
             PluginInitRequest req;
