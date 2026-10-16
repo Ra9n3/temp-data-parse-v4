@@ -50,6 +50,10 @@ interface Props {
   // Stage 3e-1 — per-track read-only "Plugin info" text (from the hosted
   // instance's capability record); rendered on the pill's hover tooltip.
   pluginInfoByTrack: Record<string, string>;
+  // Stage 3f-5 — plugin-bound tracks whose instance the engine has not
+  // confirmed yet (no plugin_state "loaded"/"error" receipt this session,
+  // engine ready): their pills show "loading…" until the receipt lands.
+  pluginLoadingTrackIds?: Set<string>;
   audioBuffer: AudioBuffer | null;
   audioName: string;
   selectedTrackId: string | null;
@@ -212,6 +216,7 @@ export function Arranger(props: Props) {
     playheadTick,
     pluginLabels,
     pluginInfoByTrack,
+    pluginLoadingTrackIds,
     engineChannels,
     onEngineChannel,
     audioBuffer,
@@ -414,6 +419,7 @@ export function Arranger(props: Props) {
             tpb={tpb}
             pluginLabel={track.role === "audio" ? audioName || "Load audio" : (pluginLabels[track.id] ?? "No plugin")}
             pluginInfo={track.role === "audio" ? undefined : pluginInfoByTrack[track.id]}
+            pluginLoading={track.role !== "audio" && (pluginLoadingTrackIds?.has(track.id) ?? false)}
             audioBuffer={audioBuffer}
             selected={selectedTrackId === track.id}
             selSection={selSection}
@@ -533,6 +539,8 @@ function TrackRow(props: {
   editorOpen?: boolean;
   // Stage 3f-4 — open the swap picker (bound tracks only, gated upstream).
   onSwapPlugin?: () => void;
+  // Stage 3f-5 — this track's instance is mid-hosting (pill reads "loading…").
+  pluginLoading?: boolean;
   onLoadAudio: () => void;
   onSelectTrack: () => void;
   onOpenPianoRoll: () => void;
@@ -566,6 +574,7 @@ function TrackRow(props: {
           onOpenEditor={props.onOpenEditor}
           editorOpen={props.editorOpen}
           onSwapPlugin={props.onSwapPlugin}
+          pluginLoading={props.pluginLoading}
           onLoadAudio={props.onLoadAudio}
           engineChannelResolved={props.engineChannelResolved}
           engineChannelExplicit={props.engineChannelExplicit}

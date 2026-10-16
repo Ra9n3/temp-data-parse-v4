@@ -5,7 +5,7 @@ import dorianFixture from "./fixtures/dorian-16bars.json";
 import { TopBar } from "./components/TopBar";
 import { Arranger } from "./components/Arranger";
 import { GenerationSettingsPanel } from "./components/GenerationSettingsPanel";
-import { EngineClient, formatPluginInfo, mergeScanProbe, type EngineLoadMeta, type EngineStatus, type EditorEventMessage, type LoadFailure, type PluginCapabilitiesMessage, type PluginSavedStateMessage, type PluginStateMessage, type ScanResultMessage, type ScannedPlugin } from "./engine/engineClient";
+import { EngineClient, createStoppedGate, formatPluginInfo, mergeScanProbe, planAssignmentLoad, pluginSetSignature, type EngineLoadMeta, type EngineStatus, type EditorEventMessage, type LoadFailure, type PluginCapabilitiesMessage, type PluginSavedStateMessage, type PluginStateMessage, type ScanResultMessage, type ScannedPlugin, type StoppedGate } from "./engine/engineClient";
 import { buildEngineStream, resolveEngineChannelView } from "./engine/engineStream";
 import { PPQ, projectEndTick, tickToBar } from "./shared/schema";
 import {
@@ -213,6 +213,16 @@ export default function App() {
   // exist yet — the exact "editor unavailable — no hosted plugin instance"
   // wall the user hit between app start and first play.
   const [hostedIds, setHostedIds] = useState<Set<string>>(() => new Set());
+  // Stage 3f-5 — instances the engine NAMED as failed this session (the
+  // plugin_state "error" receipt carries the instanceId). Their pills must
+  // not show "loading…" forever; the error toast already carries the
+  // engine's detail text. Reset alongside hostedIds on a fresh session.
+  const [hostingErroredIds, setHostingErroredIds] = useState<Set<string>>(() => new Set());
+  // Stage 3f-5 — the stop→load gate for assignments made while the transport
+  // plays: the load queues here and releases on the engine's OWN playing=false
+  // state message (see queueAssignmentLoad + the onState handler below).
+  const stoppedGateRef = useRef<StoppedGate | null>(null);
+  if (!stoppedGateRef.current) stoppedGateRef.current = createStoppedGate();
   // Latest project value for imperative callbacks (status transition, engine
   // receipts) that outlive renders and must read the CURRENT project.
   const projectRef = useRef<Project | null>(null);
@@ -274,6 +284,7 @@ export default function App() {
       if (status === "ready" && prevStatusRef.current !== "ready") {
         lastLoadedRef.current = null;
         setHostedIds(new Set());   // new process: nothing is hosted yet
+        setHostingErroredIds(new Set());   // 3f-5: no failure receipts either
         // Stage 3f-3a — editor windows belong to the app. ONCE per fresh
         // engine session, hand the engine the main window's HWND: every
         // subsequently opened plugin editor window becomes OWNED by the app
@@ -346,6 +357,12 @@ export default function App() {
       engineTickRef.current = tick; // resume source of truth (see enginePlay)
       setEnginePlaying(playing);
       setEnginePlayheadTick(tick);
+      // Stage 3f-5 — release queued assign-while-playing loads on the engine's
+      // OWN playing=false state: the proof that the transport can no longer
+      // load_reject them (a plugin-set load mid-play is rejected BY DESIGN).
+      // The gate is idempotent per batch; each queued load also carries a
+      // bounded timeout, so a lost state message only delays it.
+      if (!playing) stoppedGateRef.current?.release();
     });
     // Stage 3b-fix: engine rejected a transport play because lazy audio init
     // found no device. Revert the optimistic playing flag (play never started)
@@ -384,6 +401,14 @@ export default function App() {
         });
         toast("ok", `${result.name ?? "Plugin"} hosted (latency ${result.latencyMs?.toFixed(1) ?? "?"}ms, channels ${(result.channels ?? []).join(",")})`);
       } else {
+        // Stage 3f-5 — the error receipt NAMES the instance: its pill must
+        // stop showing "loading…" (hostingErroredIds) instead of spinning
+        // forever. The toast below already surfaces the engine's detail text.
+        setHostingErroredIds((prev) => {
+          const next = new Set(prev);
+          next.add(result.instanceId ?? "hosted");
+          return next;
+        });
         // Stage 3d-3: a plugin the project references but the machine lacks
         // is a NAMED, non-breaking case — the track rides the test synth
         // and the project keeps its embedded state for the next install.
@@ -736,6 +761,22 @@ export default function App() {
     }
     return ids;
   }, [project, editorOpenIds]);
+  // Stage 3f-5 — pills mid-hosting: a plugin-bound track whose instance the
+  // engine has NEITHER confirmed loaded NOR named as failed, while the engine
+  // is ready, shows "loading…" (existing hosting receipts only — no new
+  // engine messages). When plugin_state "loaded" arrives the hostedIds gate
+  // makes the pill clickable (its editor opens); on "error" the receipt
+  // lands in hostingErroredIds, the pill drops back to its label and the
+  // toast carries the engine's error text.
+  const loadingTrackIds = useMemo(() => {
+    const ids = new Set<string>();
+    if (engineStatus !== "ready") return ids;
+    for (const t of project.tracks) {
+      const g = project.libraryGroups.find((lg) => lg.id === t.libraryGroupId);
+      if (g?.pluginId && g?.pluginPath && !hostedIds.has(g.id) && !hostingErroredIds.has(g.id)) ids.add(t.id);
+    }
+    return ids;
+  }, [project, engineStatus, hostedIds, hostingErroredIds]);
 
   // Stage 3e-1: per-track read-only "Plugin info" text (the pill's hover
   // tooltip). Derived from the stored capability record of the track's
@@ -847,6 +888,49 @@ export default function App() {
     }
   }, [engineDrive, playback]);
 
+  // Stage 3f-5 — host on assign. Called by BOTH assignment handlers after
+  // the project update, ONLY when the new group actually carries a hosting
+  // binding (pluginId + pluginPath — mock browser rows have no path). The
+  // decision is the suite-pinned pure planAssignmentLoad:
+  //   engine not ready → named info toast, NOTHING else — no doomed load
+  //     (host-on-connect picks the assignment up when the engine arrives);
+  //   transport rolling → stop FIRST, then load ONLY after the engine's OWN
+  //     playing=false state message. A plugin-set load on a rolling transport
+  //     is load_rejected BY DESIGN (3c) — sending one produced the two red
+  //     toasts this stage fixes. The queued load never fires while playing.
+  //   stopped → the existing sendSwapLoad immediately (exactly one load).
+  // The NEW project object rides every branch (sendSwapLoad(p) sends THAT
+  // object and caches it as the confirmed load on ack). Declared AFTER
+  // engineStop (its stop-then-load branch calls it).
+  const queueAssignmentLoad = useCallback(
+    (name: string, next: Project) => {
+      const plan = planAssignmentLoad(engineStatus === "ready", effectivePlaying);
+      if (plan === "defer-to-connect") {
+        toast("info", "audio engine not ready — the plugin loads when it connects");
+        return;
+      }
+      if (plan === "stop-then-load") {
+        toast("info", `Transport stopped to load ${name}`);
+        engineStop();
+        if (engineDrive) {
+          // Engine-driven: engineStop() sent the transport stop; release on
+          // the engine's OWN playing=false state message (the onState handler
+          // releases the gate). Bounded timeout inside the gate covers a lost
+          // state frame — the load may be delayed, never wedged.
+          stoppedGateRef.current?.queue(() => sendSwapLoad(next));
+        } else {
+          // Webview-synth-driven: engineStop() above was a synchronous
+          // playback.stop() and the ENGINE transport was never rolling —
+          // its held state is already playing=false, the load is safe now.
+          sendSwapLoad(next);
+        }
+        return;
+      }
+      sendSwapLoad(next);
+    },
+    [engineStatus, effectivePlaying, engineDrive, engineStop, sendSwapLoad, toast],
+  );
+
   const engineSeek = useCallback((tick: number) => {
     const t = Math.max(0, Math.round(tick));
     if (engineDrive) {
@@ -893,6 +977,14 @@ export default function App() {
   useEffect(() => {
     if (enginePlaying && engineClientRef.current?.getStatus() === "ready") {
       if (lastLoadedRef.current === project) return; // already confirmed by loadAck
+      // Stage 3f-5 — a plugin-SET difference (any group's id/pluginId/
+      // pluginPath) against the last CONFIRMED load means a hosting change:
+      // the engine load_rejects plugin-set loads on a rolling transport, and
+      // this effect sending one only produced the SECOND red toast (the
+      // assignment handler already owns the flow: stop → engine's own
+      // playing=false → load). Skip SILENTLY — no red toast. Note/mix-only
+      // edits keep the same signature and reload exactly as before.
+      if (lastLoadedRef.current && pluginSetSignature(lastLoadedRef.current.libraryGroups) !== pluginSetSignature(project.libraryGroups)) return;
       const client = engineClientRef.current;
       const stream = buildEngineStream(project);
       const meta: EngineLoadMeta = {
@@ -1109,6 +1201,10 @@ export default function App() {
         playheadTick={effectivePlayheadTick}
         pluginLabels={pluginLabels}
         pluginInfoByTrack={pluginInfoByTrack}
+        // Stage 3f-5 — pills mid-hosting show "loading…" until the engine's
+        // plugin_state receipt confirms the instance (loaded → clickable,
+        // error → label + toast).
+        pluginLoadingTrackIds={loadingTrackIds}
         engineChannels={resolvedEngineChannels}
         onEngineChannel={handleEngineChannel}
         audioBuffer={audioBuffer}
@@ -1255,13 +1351,20 @@ export default function App() {
             ...(pluginPath ? { pluginPath } : {}),
             ...(profileId ? { profileId } : {}),
           };
-          commit({
+          // Stage 3f-5 — hoist the NEW project object: the same object goes to
+          // commit AND to the host-on-assign load (sending the OLD project
+          // would load a score without the plugin just assigned).
+          const next: Project = {
             ...project,
             libraryGroups: [...project.libraryGroups, g],
             tracks: project.tracks.map((t) => (t.id === vstTrackId ? { ...t, libraryGroupId: g.id } : t)),
-          });
+          };
+          commit(next);
           setPluginLabels((p) => ({ ...p, [vstTrackId]: name }));
           toast("ok", `Assigned ${name}${profileId ? " (expression map bound — tracks route to its engine channels)" : ""}`);
+          // Stage 3f-5 — host the plugin THE MOMENT it is assigned (mock
+          // browser rows carry no pluginPath — nothing to host there).
+          if (g.pluginId && g.pluginPath) queueAssignmentLoad(name, next);
         }}
         onPickProfile={(profileId, name) => {
           if (!vstTrackId) return;
@@ -1281,13 +1384,19 @@ export default function App() {
             profileId,
             ...(needsBbcso && match ? { pluginPath: match.path } : {}),
           };
-          commit({
+          // Stage 3f-5 — hoist the NEW project object (commit + host-on-assign
+          // load share the SAME object).
+          const next: Project = {
             ...project,
             libraryGroups: [...project.libraryGroups, g],
             tracks: project.tracks.map((t) => (t.id === vstTrackId ? { ...t, libraryGroupId: g.id } : t)),
-          });
+          };
+          commit(next);
           setPluginLabels((p) => ({ ...p, [vstTrackId]: name }));
           toast("ok", `Assigned ${name} (expression map)${needsBbcso && match ? " + hosted plugin" : ""}`);
+          // Stage 3f-5 — host when this assignment actually binds a scanned
+          // binary (needsBbcso && match ⇔ pluginId && pluginPath here).
+          if (g.pluginId && g.pluginPath) queueAssignmentLoad(name, next);
         }}
       />
       {(() => {

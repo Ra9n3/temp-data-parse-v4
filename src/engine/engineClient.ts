@@ -171,6 +171,75 @@ export function swapPickerRows(plugins: ScannedPlugin[], query: string): Scanned
   });
 }
 
+/** Stage 3f-5 — the HOSTING fingerprint of a project: every library group's
+ * id + pluginId + pluginPath, in project order. This is the plugin set the
+ * engine instantiates at load. Note edits, mix edits, renames and state
+ * embeds all produce the SAME signature (they may still reload mid-play);
+ * a DIFFERENT signature against the last confirmed load means a hosting
+ * change, which the engine load_rejects on a rolling transport — the
+ * assign-while-playing path must stop first (see planAssignmentLoad). PURE. */
+export function pluginSetSignature(
+  groups: ReadonlyArray<{ id: string; pluginId: string | null; pluginPath?: string }>,
+): string {
+  return groups.map((g) => `${g.id}:${g.pluginId ?? ""}:${g.pluginPath ?? ""}`).join("|");
+}
+
+/** Stage 3f-5 — the host-on-assign decision (PURE, suite-pinned). An
+ * assignment may only become a load when the engine is ready; and while the
+ * transport rolls, the engine REJECTS plugin-set loads by design (3c
+ * rolling-transport guard) — so playing ⇒ stop first, load after the
+ * engine's own playing=false state. "defer-to-connect" sends nothing: the
+ * ready-transition's host-on-connect auto-load picks the assignment up the
+ * moment the engine arrives. */
+export type AssignmentLoadPlan = "load" | "stop-then-load" | "defer-to-connect";
+export function planAssignmentLoad(engineReady: boolean, transportPlaying: boolean): AssignmentLoadPlan {
+  if (!engineReady) return "defer-to-connect";
+  return transportPlaying ? "stop-then-load" : "load";
+}
+
+/** Stage 3f-5 — the stop→load release gate. An assignment made while the
+ * transport plays queues its load here instead of sending it; the queue
+ * releases on the engine's OWN playing=false state message — the proof the
+ * transport can no longer load_reject the queued load. Contract: release()
+ * is idempotent PER BATCH (the 30Hz state stream must never double-fire a
+ * queued load) and every queued callback carries a bounded timeout, so a
+ * lost state message can only DELAY the load, never wedge the assignment. */
+export interface StoppedGate {
+  /** Callbacks queued and not yet released. */
+  readonly pending: number;
+  /** Queue one load continuation; it runs exactly once — on the next
+   * release(), or after timeoutMs if no release ever comes. */
+  queue(run: () => void, timeoutMs?: number): void;
+  /** Release everything queued (the playing=false state arrived). Returns
+   * how many callbacks fired; a second release fires none. */
+  release(): number;
+}
+export function createStoppedGate(): StoppedGate {
+  const waiters: Array<() => void> = [];
+  return {
+    get pending() {
+      return waiters.length;
+    },
+    queue(run: () => void, timeoutMs = 2000): void {
+      let done = false;
+      const once = () => {
+        if (done) return;
+        done = true;
+        const i = waiters.indexOf(once);
+        if (i >= 0) waiters.splice(i, 1);
+        run();
+      };
+      waiters.push(once);
+      setTimeout(once, timeoutMs);
+    },
+    release(): number {
+      const n = waiters.length;
+      waiters.slice().forEach((w) => w());
+      return n;
+    },
+  };
+}
+
 /** Stage 3c-2 — hosting outcome. "loaded" carries the real name/vendor/latency
  * and the hosted channels; "error" carries the detail and means ALL tracks
  * fell back to the engine's built-in test synth (the app never dead-ends).

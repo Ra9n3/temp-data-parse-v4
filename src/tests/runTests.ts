@@ -44,7 +44,7 @@ import { consolidateSustains } from "../generation/sustain";
 import { cc7ForWeight, acousticWeightForTrack, DEFAULT_BALANCE_CONFIG } from "../generation/balance";
 import { builtInProfileById, vst3EventAdapter } from "../plugins/expressionMaps";
 import { buildEngineStream, resolveInstanceRouting } from "../engine/engineStream";
-import { mergeScanProbe, swapPickerRows, type ScannedPlugin } from "../engine/engineClient";
+import { createStoppedGate, mergeScanProbe, planAssignmentLoad, pluginSetSignature, swapPickerRows, type ScannedPlugin } from "../engine/engineClient";
 import userProjectJson from "../fixtures/user-project.json";
 import { mulberry32 } from "../generation/prng";
 import { snapshotDigest } from "../generation/efgGolden";
@@ -1103,6 +1103,60 @@ export function runUnitTests(): TestResult[] {
       const annotated: ScannedPlugin[] = [{ name: "Sick Synth", vendor: "V", uid: "uid-9", path: "/p/9.vst3", classId: "c9", isInstrument: true, capabilitiesError: "probe timeout after 90s" }];
       assert(swapPickerRows(annotated, "").length === 1, "probed-failed rows stay listed in the picker");
       return "instruments-first sort + case-insensitive name/vendor search; pure, deterministic; probe-failed rows stay listed";
+    }),
+    timed("Stage 3f-5: host-on-assign — exactly-one-load contract (plan + stopped-gate + plugin-set signature)", () => {
+      // The decision table (planAssignmentLoad): no engine → NEVER send a
+      // load (host-on-connect picks the assignment up when the engine
+      // arrives); stopped → send now; playing → stop first, never a
+      // mid-play plugin-set load (the engine load_rejects it by design).
+      assert(planAssignmentLoad(false, false) === "defer-to-connect" && planAssignmentLoad(false, true) === "defer-to-connect", "engine not ready → defer-to-connect (zero loads) whether stopped or playing");
+      assert(planAssignmentLoad(true, false) === "load", "engine ready + stopped → immediate load");
+      assert(planAssignmentLoad(true, true) === "stop-then-load", "engine ready + playing → stop FIRST, load after playing=false");
+      // Exactly-one-load, COUNTED: an assignment made while playing queues
+      // behind the stopped-gate — zero loads BEFORE the engine's playing=false
+      // state, EXACTLY ONE after, and later state frames must not double-fire
+      // (the gate is idempotent per batch — the state stream runs at 30Hz).
+      // (Counts are read through closure getters: a let/object-literal read
+      // site keeps its initializer's literal narrowing and false-flags the
+      // post-release comparison — the increment happens inside a closure.)
+      let loads = 0;
+      const bumpLoad = () => { loads++; };
+      const loadsSoFar = () => loads;
+      const gate = createStoppedGate();
+      gate.queue(bumpLoad);
+      assert(loadsSoFar() === 0 && gate.pending === 1, "queued while playing: ZERO loads sent before the stop");
+      assert(gate.release() === 1, "the engine's playing=false releases the queue");
+      assert(loadsSoFar() === 1, "exactly ONE load after stop");
+      assert(gate.release() === 0 && loadsSoFar() === 1, "a second release (another state frame) fires NOTHING — no double load");
+      // Two assignments while playing queue two loads; the single release
+      // fires each EXACTLY once (the engine worker is latest-wins; both
+      // continuations must survive the shared gate).
+      let loads2 = 0;
+      const bumpLoad2 = () => { loads2++; };
+      const loads2SoFar = () => loads2;
+      const gate2 = createStoppedGate();
+      gate2.queue(bumpLoad2);
+      gate2.queue(bumpLoad2);
+      assert(gate2.pending === 2 && loads2SoFar() === 0, "two assignments while playing: two queued, zero sent");
+      gate2.release();
+      assert(loads2SoFar() === 2, "one release fires each queued load exactly once");
+      // The plugin-set signature: ONLY id + pluginId + pluginPath are hosting
+      // changes. Note/mix/name edits keep the signature (they still reload
+      // mid-play); any binding change breaks it (the mid-play effect must
+      // skip silently instead of red-toasting).
+      const groups: Array<{ id: string; pluginId: string | null; pluginPath?: string }> = [
+        { id: "g1", pluginId: "uid-a", pluginPath: "/p/a.vst3" },
+        { id: "g2", pluginId: null },
+      ];
+      const base = pluginSetSignature(groups);
+      assert(base === "g1:uid-a:/p/a.vst3|g2::", "the fingerprint covers EVERY group's id + pluginId + pluginPath");
+      assert(pluginSetSignature(groups.slice()) === base, "pure + order-stable for identical groups");
+      const renamed = groups.map((g) => ({ ...g, name: "renamed", pluginState: "blob" }));
+      assert(pluginSetSignature(renamed) === base, "labels/state are INVISIBLE to the fingerprint (note/name edits still reload mid-play)");
+      assert(pluginSetSignature([{ id: "g1", pluginId: "uid-b", pluginPath: "/p/a.vst3" }]) !== pluginSetSignature([{ id: "g1", pluginId: "uid-a", pluginPath: "/p/a.vst3" }]), "a pluginId change IS a hosting change");
+      assert(pluginSetSignature([{ id: "g1", pluginId: "uid-a", pluginPath: "/p/b.vst3" }]) !== pluginSetSignature([{ id: "g1", pluginId: "uid-a", pluginPath: "/p/a.vst3" }]), "a pluginPath change IS a hosting change");
+      assert(pluginSetSignature([{ id: "g1", pluginId: null }]) !== pluginSetSignature([{ id: "g1", pluginId: "uid-a", pluginPath: "/p/a.vst3" }]), "removing the binding IS a hosting change");
+      return "not-ready→0 loads; stopped→1; playing→0 before stop and exactly 1 after; release idempotent at 30Hz; signature = id+pluginId+pluginPath only";
     }),
   ];
 }

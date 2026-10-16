@@ -1341,7 +1341,7 @@ Costs, honestly:
 - **What it buys**: a plugin crash degrades to ONE silent instance + a
   named receipt (no more engine death from processBlock), a wedged editor
   can be killed without restarting the engine, and a misbehaving library's
-  memory/	handle leaks are contained. That is the full extent — it does NOT
+  memory/       handle leaks are contained. That is the full extent — it does NOT
   make plugins sound better or load faster.
 
 Recommendation: DEFER. The in-process model's crash exposure is real but
@@ -1586,3 +1586,68 @@ commit()-tracked (undoable with the score edit itself) — an undo of the
 swap restores the binding but NOT the discarded blob (the blob was captured
 from the retired instance's live state; undo cannot resurrect engine-side
 audio state). Documented as the price of the promised semantics.
+
+## Stage 3f-5 — host a plugin the moment it is assigned (tag `host-on-assign-v1`)
+
+**The decision, not the message.** The spec's core rule is "never send a
+plugin-set load while playing" — the engine already enforces that with
+load_rejected (3c rolling-transport guard), so this stage is entirely about
+WHEN the frontend sends. The decision is a pure, suite-pinned function
+(`planAssignmentLoad`): engine not ready ⇒ defer (info toast only — the
+ready-transition's host-on-connect auto-load already loads the CURRENT
+project, so the deferred assignment is picked up the moment the engine
+arrives); transport rolling ⇒ stop first, then load; stopped ⇒ load now.
+The 3f-4 replace/remove handlers keep their direct `sendSwapLoad` call —
+they already route through the same path and the spec scoped this stage to
+the ASSIGNMENT handlers — but they inherit the mid-play silent-skip guard
+below, which is the part that kills the double-red-toast report.
+
+**The stop→load synchronization.** "Wait for the engine's state message with
+playing=false" is implemented as a release gate (`createStoppedGate`) rather
+than a promise-per-assignment: the 30Hz state stream may deliver SEVERAL
+playing=false frames after a stop, and the gate's release is idempotent per
+batch (one queued load fires exactly once no matter how many stopped frames
+arrive — suite-pinned). Two documented behaviours: (1) the engine-driven
+case queues the load behind the gate; the webview-synth-driven case
+(engineDrive=false, engine connected but idle) sends immediately, because
+the ENGINE transport was never rolling — its held state is already
+playing=false and waiting would only add latency; (2) every queued
+continuation carries a bounded 2s timeout, so a lost state frame can DELAY
+the load but never wedge the assignment (worst case the engine is still
+rolling and honestly load_rejects — the existing red toast, which is the
+truthful outcome for that race, not a silent drop).
+
+**The mid-play silent skip is fingerprint-scoped.** The reload effect skips
+ONLY when the plugin-set fingerprint (every group's id + pluginId +
+pluginPath) differs between the project and the last CONFIRMED load. A
+signature change with a null last-loaded (fresh session, no confirmed load
+yet while enginePlaying — unreachable in practice since enginePlaying
+requires an acked load) keeps today's behaviour. The spec's "skip silently"
+therefore does NOT suppress reloads for note/mix/name edits — those keep
+the same signature and reload mid-play exactly as the 3c contract pins
+(CI-proven in null-audio mode).
+
+**Step 5 mapping (existing receipts, no new messages).** "While a plugin is
+loading" = plugin-bound group + engine ready + instance NEITHER in
+hostedIds (plugin_state loaded) NOR in the new hostingErroredIds
+(plugin_state error, keyed by the receipt's instanceId, reset per engine
+session alongside hostedIds). "The pill becomes clickable" on loaded is the
+PRE-EXISTING hostedIds gate (3d-4) — no change needed. "With error, show
+the engine's error text in a toast" is the PRE-EXISTING 3c-2/3d-3 error
+toast (`… failed to load — falling back to test synth: <engine detail>`);
+what IS new is that an errored instance's pill stops showing "loading…"
+(without hostingErroredIds it would spin forever, since the hosted gate
+never opens for a failed load) and drops back to its label. Clicking a
+not-yet-hosted or errored pill keeps the existing honest info toasts.
+
+**Scope decisions.** (1) The 3f-4 swap/remove actions are NOT routed through
+queueAssignmentLoad in this stage: they predate it, already send at most one
+load per confirm, and while-playing swaps hit the same engine guard — their
+mid-play failure path is the existing honest red toast; routing them through
+stop-then-load is a natural follow-up if by-ear testing shows swaps while
+playing matter. (2) The "loading…" pill state is presentation-only
+(animate-pulse + text); the pill stays clickable with its honest
+not-hosted-yet toast rather than becoming a dead button — the user keeps a
+named explanation instead of silence. (3) The 2s gate timeout is a safety
+net, not a tuning knob; on a healthy engine the playing=false state arrives
+in one or two state frames.

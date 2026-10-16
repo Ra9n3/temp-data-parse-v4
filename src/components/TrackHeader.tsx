@@ -23,6 +23,12 @@ interface Props {
   /** Stage 3f-4 — open the SWAP picker for this track's plugin (only
    * rendered for plugin-bound tracks; the caller owns the dialog). */
   onSwapPlugin?: () => void;
+  /** Stage 3f-5 — this track's plugin instance is mid-hosting (the engine
+   * has not sent its plugin_state receipt yet): the pill reads "loading…"
+   * and pulses. plugin_state "loaded" → the pill becomes clickable (its
+   * editor opens); "error" → the label returns and the toast carries the
+   * engine's error text. No new engine messages — derived receipts only. */
+  pluginLoading?: boolean;
   onLoadAudio?: () => void;
   /** Stage 3c-3 — resolved engine channel (explicit or first-come auto),
    * undefined = test synth. */
@@ -45,6 +51,7 @@ export function TrackHeader({
   onOpenEditor,
   editorOpen,
   onSwapPlugin,
+  pluginLoading,
   onLoadAudio,
   engineChannelResolved,
   engineChannelExplicit,
@@ -82,13 +89,15 @@ export function TrackHeader({
               title={
                 (vstDisabled
                   ? "VST hosting is for instrument tracks"
-                  : onOpenEditor
-                    ? editorOpen
-                      ? `${pluginLabel} editor is open — click to focus it`
-                      : `Open the ${pluginLabel} editor (choose sounds, tweak settings)`
-                    : pluginLabel === "No plugin"
-                      ? "Assign a VST3 (preview browser)"
-                      : pluginLabel)
+                  : pluginLoading
+                    ? `Hosting ${pluginLabel} — the editor opens when the engine confirms the load`
+                    : onOpenEditor
+                      ? editorOpen
+                        ? `${pluginLabel} editor is open — click to focus it`
+                        : `Open the ${pluginLabel} editor (choose sounds, tweak settings)`
+                      : pluginLabel === "No plugin"
+                        ? "Assign a VST3 (preview browser)"
+                        : pluginLabel)
                 // Stage 3e-1 — the read-only "Plugin info" panel (engine
                 // capability record) rides the pill's existing tooltip.
                 + (pluginInfo ? `\n\n${pluginInfo}` : "")
@@ -97,13 +106,15 @@ export function TrackHeader({
                 "mt-1 inline-flex max-w-full items-center gap-1.5 rounded-md px-1.5 py-0.5 text-[11px] font-medium ring-1",
                 vstDisabled
                   ? "cursor-not-allowed bg-white/5 text-stone-500 ring-white/10"
-                  : editorOpen && onOpenEditor
-                    ? "bg-orange-500/35 text-orange-100 ring-orange-300/50 hover:bg-orange-500/45"
-                    : "bg-orange-500/20 text-orange-200 ring-orange-400/30 hover:bg-orange-500/30",
+                  : pluginLoading
+                    ? "animate-pulse bg-orange-500/15 text-orange-200/80 ring-orange-400/20"
+                    : editorOpen && onOpenEditor
+                      ? "bg-orange-500/35 text-orange-100 ring-orange-300/50 hover:bg-orange-500/45"
+                      : "bg-orange-500/20 text-orange-200 ring-orange-400/30 hover:bg-orange-500/30",
               )}
             >
               <Ph name="plug" className="h-3 w-3 shrink-0" />
-              <span className="truncate">{vstDisabled ? "—" : onOpenEditor ? `${pluginLabel} · editor` : pluginLabel}</span>
+              <span className="truncate">{vstDisabled ? "—" : pluginLoading ? "loading…" : onOpenEditor ? `${pluginLabel} · editor` : pluginLabel}</span>
             </button>
           )}
           {/* Stage 3f-4 — the pill's SWAP affordance: plugin-bound tracks only
