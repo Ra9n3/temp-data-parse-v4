@@ -171,7 +171,7 @@
 
 namespace {
 
-constexpr const char* kEngineVersion = "0.7.1";
+constexpr const char* kEngineVersion = "0.8.0";
 constexpr int kProtocolVersion = 1;
 constexpr int kDefaultPort = 9377;
 constexpr int kMaxVoices = 64;

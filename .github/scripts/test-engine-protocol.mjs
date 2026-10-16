@@ -461,9 +461,9 @@ ws.addEventListener("message", (event) => {
     }
     if (msg.type === "hello" && multiPhase === 0) {
       if (msg.protocol !== 1) fail(`expected protocol 1, got ${msg.protocol}`);
-      if (msg.engineVersion !== "0.7.1") fail(`expected 0.7.1, got ${msg.engineVersion}`);
+      if (msg.engineVersion !== "0.8.0") fail(`expected 0.7.1, got ${msg.engineVersion}`);
       if (!fixtureDir) fail("multi mode requires a fixture dir argument");
-      console.log("[test] hello OK (0.7.1) — scanning for the stand-in host plugin...");
+      console.log("[test] hello OK (0.8.0) — scanning for the stand-in host plugin...");
       multiPhase = 1;
       ws.send(JSON.stringify({ type: "scan", dirs: [fixtureDir] }));
     } else if (msg.type === "scan_result" && multiPhase === 1) {
@@ -981,7 +981,7 @@ ws.addEventListener("message", (event) => {
     if (msg.type === "hello" && !helloOk) {
       helloOk = true;
       if (msg.protocol !== 1) fail(`expected protocol 1, got ${msg.protocol}`);
-      if (msg.engineVersion !== "0.7.1") fail(`expected 0.7.1, got ${msg.engineVersion}`);
+      if (msg.engineVersion !== "0.8.0") fail(`expected 0.7.1, got ${msg.engineVersion}`);
       // Stage 3c close-out: the dispatch ledger streams what the engine
       // ACTUALLY dispatched — the replay-burst and re-attack asserts read it.
       ws.send(JSON.stringify({ type: "dispatch_log", enable: true }));

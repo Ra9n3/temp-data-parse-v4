@@ -1236,3 +1236,117 @@ behavior).
   SHOULD be summed to master by default (this stage's "nothing becomes
   silent" choice) or gated behind explicit routing, and the audible effect
   of --plugin-gain on the summed mix (clipping where one bus did not clip).
+
+## Stage 3e-4 — crash-containment diagnosis (NO hosting code changed)
+
+The brief asked for a written diagnosis of (a) what happens to the engine
+process when a hosted plugin crashes at each lifecycle point, (b) what the
+Rust shell does when the engine exits unexpectedly, and (c) a concrete
+proposal for per-instance child-process isolation. Facts below are read
+from the code (main.cpp, src-tauri/src/engine.rs, src/App.tsx /
+engineClient.ts) — none of it is implemented in this stage.
+
+### (a) What happens today when a hosted plugin crashes
+
+- **During LOAD (instantiate / prepare / state restore)** — `loadHostedPlugin`
+  runs on the async init worker inside `try { … } catch (std::exception) {
+  … } catch (…) { … }` with MSVC `/EHa` (so a SEH access violation is caught
+  too): the crash becomes a clean per-instance `plugin_state error` receipt
+  ("previous instance retained"), the OTHER instances of the set are
+  unaffected, and the engine survives. **A non-catchable death
+  (abort(), stack overflow, heap corruption, fail-fast) kills the ENGINE
+  process** — there is no isolation boundary around instantiate (the
+  SCAN path has one — the `--scan-worker` child — but hosting does not).
+  A state-restore crash (`setStateInformation`) is likewise try/caught →
+  receipt + default state.
+- **During processBlock** — the audio callback has NO exception guard (a
+  realtime thread; catch there would be UB-adjacent and the codebase's
+  discipline is no-throw on the audio thread). **A crash in a plugin's
+  processBlock kills the engine process mid-buffer.** The shell restart
+  (below) is the only recovery; audible symptom: playback stops, reconnect
+  re-hosts, transport position resets to 0 (the engine's lastTick is
+  process-local and dies with it).
+- **During editor open** — `createEditor()` runs ON the message pump thread
+  inside `openEditorWindow` with NO try/catch: a C++ exception unwinds into
+  the JUCE message loop (→ terminate); a hard crash kills the process. A
+  WEDGE (createEditor never returning) is NOT a crash — the 3d-4-hotfix
+  pending-open watchdog names it in engine.log after 10 s
+  ("createEditor() has not returned; message thread blocked inside plugin
+  editor creation") but cannot recover — the engine stays wedged until
+  restarted. Accepted risk documented since 3d-1: the editor runs in-process
+  by design (engine-owned popup windows).
+
+### (b) What the Rust shell does when the engine exits unexpectedly
+
+`src-tauri/src/engine.rs::check_and_restart`, polled periodically from a
+background thread: on `try_wait()` = exited, it restarts the engine
+(`spawn_engine(port)` — SAME port, stdout/stderr piped to null per the
+Stage-3c-hotfix policy), up to **MAX_RESTARTS = 3 within a 60 s window**
+(`RESTART_WINDOW_SECS`; a stable 60 s resets the counter). Beyond the
+budget → `state.failed = true` and NO further restarts (the UI shows the
+engine as failed; no automatic recovery). The shell itself does NOT re-send
+the project — it cannot (it speaks no protocol). Recovery is the FRONTEND's:
+`EngineClient` reconnects with the deterministic backoff (1/2/4/8/16 s, max
+5 attempts — no RNG), and on the "ready" transition App.tsx's HOST-ON-CONNECT
+(3d-4 hotfix) re-sends the confirmed load — routing + plugins[] INCLUDING
+the embedded plugin states — so hosting and patches restore WITHOUT user
+action. If the crash repeats faster than the restart budget, the user sees
+"engine failed" and the remedy is restarting the app. Net effect for a
+load-time crash: brief outage, automatic restore, position lost. For a
+processBlock crash: same, plus the audible cut.
+
+### (c) Proposal: one child process per hosted instance (NOT implemented)
+
+Shape: the engine keeps a lightweight SUPERVISOR in-process; each
+`loadHostedPlugin` entry spawns a child copy of a new `scorch-host` binary
+(the engine exe with a `--plugin-host <uid|--path>` mode, mirroring
+`--scan-worker`) that instantiates exactly ONE plugin. The supervisor talks
+to each child over a private local socket (the WS loopback pattern already
+in the codebase) or shared-memory ring:
+
+- **MIDI in**: supervisor → child, small framed messages (the dispatch
+  ledger already produces exactly this record — sample position + bytes);
+  the child pumps them into its local MidiBuffer.
+- **Audio out**: child → supervisor, a float32 ring buffer (one writer, one
+  reader — the same SPSC discipline as the dispatch ledger), the supervisor
+  pulling per device buffer and summing into the master fabric. The child
+  runs its own null-style pacing clock derived from the supervisor's
+  buffer-size/rate announcements.
+- **State/editors**: getStateInformation/setStateInformation as framed
+  messages (the 2 MiB cap carries over); editor windows become the
+  Tauri-HWND-parenting option REJECTED in 3d-1 (cross-process reparenting,
+  per-OS glue, focus/resize messages) — the single largest new surface.
+- **Crash handling**: supervisor detects child death (socket close or
+  waitpid), answers `plugin_state error` for that instance, keeps the other
+  children, and can respawn on demand — the exact per-entry independence
+  the multi-instance worker already models, now with real isolation.
+- **Playhead/capabilities**: PositionInfo rides a small sidecar struct in
+  the same ring header; capabilities are queried once at child startup
+  (the scan-worker path already builds the record).
+
+Costs, honestly:
+- **Latency**: one extra buffer of FIFO depth at minimum (the child must
+  render BEFORE the supervisor mixes — scheduling shifts by one device
+  buffer, ~11 ms at 512/44.1k), plus jitter if the child is descheduled;
+  the F4 latency compensation would need the FIFO depth added per instance.
+  Today's in-process cost is ~zero.
+- **Complexity**: a second binary mode, a framed protocol, ring-buffer
+  drift/underrun policy, cross-process editors (the 3d-1 REJECTED option —
+  the largest piece), per-child lifecycle (spawn/respawn/retire), state
+  transfer on respawn, and CI coverage for all of it (the runner would need
+  child-mode fixtures). Roughly the size of Stage 3d-4 again, maybe larger.
+- **Memory**: one JUCE runtime + module per child (~10-30 MB each observed
+  for the fixture; real libraries dominate — roughly the same total as
+  today's in-process hosting, plus per-process overhead).
+- **What it buys**: a plugin crash degrades to ONE silent instance + a
+  named receipt (no more engine death from processBlock), a wedged editor
+  can be killed without restarting the engine, and a misbehaving library's
+  memory/	handle leaks are contained. That is the full extent — it does NOT
+  make plugins sound better or load faster.
+
+Recommendation: DEFER. The in-process model's crash exposure is real but
+rare in practice (one plugin family so far), the shell restart + host-on-
+connect recovery is already automatic, and the editor cross-process work is
+disproportionate. Revisit IF a real library demonstrates processBlock
+crashes in the user's workflow — the scan-worker child pattern and the
+multi-instance per-entry independence are the two halves to reuse.
