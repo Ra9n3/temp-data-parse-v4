@@ -456,20 +456,30 @@ export function validateProject(input: unknown): ValidationResult {
         );
       }
     });
-    // Stage 3c — engine channel collision (explicit assignments only): two
-    // tracks must not claim the same hosted channel. Error style follows the
-    // "engine channel" wording (brief), reported at assignment time.
-    const engineChannelOwner = new Map<number, string>();
+    // Stage 3c — engine channel collision (explicit assignments only), scoped
+    // PER INSTANCE in Stage 3g: channels live in each library group's private
+    // 1–16 namespace (instanceId = the group id), so two tracks of DIFFERENT
+    // groups may legally claim the same channel (the pre-3g global check
+    // would have rejected legal shared-instance setups on restore/import).
+    // Only riders of the SAME group collide; an unbound track's explicit
+    // channel is inert until it joins an instance (applyTrackShare assigns
+    // the lowest free channel then). Error style follows the "engine
+    // channel" wording (brief), reported at assignment time.
+    const engineChannelOwner = new Map<string, Map<number, string>>();
     p.tracks.forEach((t, i) => {
       const ch = (t as Track)?.engineChannel;
       if (typeof ch !== "number") return;
-      const owner = engineChannelOwner.get(ch);
+      const nsKey = (t as Track)?.libraryGroupId ?? "";
+      if (!nsKey) return;   // unbound: no instance namespace, nothing to collide with
+      let ns = engineChannelOwner.get(nsKey);
+      if (!ns) { ns = new Map(); engineChannelOwner.set(nsKey, ns); }
+      const owner = ns.get(ch);
       if (owner !== undefined) {
         errors.push(
           `tracks[${i}] (${t.name ?? t.id}) engine channel ${ch} is already assigned to ${owner} (engine channel collision)`,
         );
       } else {
-        engineChannelOwner.set(ch, t.name ?? t.id ?? `tracks[${i}]`);
+        ns.set(ch, t.name ?? t.id ?? `tracks[${i}]`);
       }
     });
   }

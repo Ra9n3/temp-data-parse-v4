@@ -197,6 +197,40 @@ export function planAssignmentLoad(engineReady: boolean, transportPlaying: boole
   return transportPlaying ? "stop-then-load" : "load";
 }
 
+// ─── Stage 3g — sharing one hosted instance between several tracks ──────────
+// A Share (or a shared-group unlink) changes ONLY routing: the plugin set —
+// every group's id+pluginId+pluginPath — is untouched (pluginSetSignature is
+// unchanged), so the engine must never be sent a plugin-set load for them.
+// The plans below name WHO sends the routing update for each engine state;
+// both are PURE and suite-pinned.
+//
+// "mid-play-effect": while the transport rolls with the group confirmed
+// loaded, the App's existing mid-play reload effect already fires on the
+// project change (same signature ⇒ not skipped) and its load hits the
+// engine's mid-play reuse fast path ("reuse while playing — no
+// re-instantiate", CI-proven) — an explicit send here would only supersede
+// it and red-toast. "send": the engine is stopped, so the ordinary
+// sendSwapLoad path carries the update (no transport to disturb). A Share
+// onto a group the engine has NOT confirmed loaded is a hosting change for
+// the engine (the instance does not exist yet) → "assign-load": the 3f-5
+// queueAssignmentLoad contract (stop-then-load / defer). An unlink from a
+// never-hosted group changes NOTHING engine-side (both before and after,
+// the track renders through the test synth) → "none".
+
+export type ShareUpdatePlan = "defer" | "mid-play-effect" | "send" | "assign-load";
+export function planShareUpdate(engineReady: boolean, groupHosted: boolean, enginePlaying: boolean): ShareUpdatePlan {
+  if (!engineReady) return "defer";
+  if (!groupHosted) return "assign-load";
+  return enginePlaying ? "mid-play-effect" : "send";
+}
+
+export type UnlinkUpdatePlan = "defer" | "mid-play-effect" | "send" | "none";
+export function planUnlinkUpdate(engineReady: boolean, groupHosted: boolean, enginePlaying: boolean): UnlinkUpdatePlan {
+  if (!engineReady) return "defer";
+  if (!groupHosted) return "none";
+  return enginePlaying ? "mid-play-effect" : "send";
+}
+
 /** Stage 3f-5 — the stop→load release gate. An assignment made while the
  * transport plays queues its load here instead of sending it; the queue
  * releases on the engine's OWN playing=false state message — the proof the

@@ -38,6 +38,11 @@ interface Props {
   /** Channel-assignment handler: null clears the explicit assignment (back to
    * auto); 1–16 sets it. The caller owns collision validation. */
   onEngineChannel?: (ch: number | null) => void;
+  /** Stage 3g — channels used by ANOTHER track of the same group (resolved
+   * routing). The dropdown only offers the channels NOT in this set, plus the
+   * track's own (never in the set by construction). Absent/empty = all 16
+   * offered (test-synth tracks, sole riders). */
+  engineChannelTaken?: number[];
 }
 
 export function TrackHeader({
@@ -56,6 +61,7 @@ export function TrackHeader({
   engineChannelResolved,
   engineChannelExplicit,
   onEngineChannel,
+  engineChannelTaken,
 }: Props) {
   // Patch 4 — the "CC" button, its popup and the expression-editor callback
   // are REMOVED from the UI. track.expressionMapping itself stays in the
@@ -157,9 +163,13 @@ export function TrackHeader({
               )}
             >
               <option value="" title="Auto (test synth unless plugin-routed)">·</option>
-              {Array.from({ length: 16 }, (_, i) => i + 1).map((ch) => (
-                <option key={ch} value={ch}>{ch}</option>
-              ))}
+              {/* Stage 3g — only channels no other track of this group uses
+                  (the track's own resolved channel is never in the set). */}
+              {Array.from({ length: 16 }, (_, i) => i + 1)
+                .filter((ch) => !engineChannelTaken?.includes(ch))
+                .map((ch) => (
+                  <option key={ch} value={ch}>{ch}</option>
+                ))}
             </select>
           )}
           <IconBtn

@@ -5,14 +5,15 @@ import dorianFixture from "./fixtures/dorian-16bars.json";
 import { TopBar } from "./components/TopBar";
 import { Arranger } from "./components/Arranger";
 import { GenerationSettingsPanel } from "./components/GenerationSettingsPanel";
-import { EngineClient, createStoppedGate, formatPluginInfo, mergeScanProbe, planAssignmentLoad, pluginSetSignature, type EngineLoadMeta, type EngineStatus, type EditorEventMessage, type LoadFailure, type PluginCapabilitiesMessage, type PluginSavedStateMessage, type PluginStateMessage, type ScanResultMessage, type ScannedPlugin, type StoppedGate } from "./engine/engineClient";
-import { buildEngineStream, resolveEngineChannelView } from "./engine/engineStream";
+import { EngineClient, createStoppedGate, formatPluginInfo, mergeScanProbe, planAssignmentLoad, planShareUpdate, planUnlinkUpdate, pluginSetSignature, type EngineLoadMeta, type EngineStatus, type EditorEventMessage, type LoadFailure, type PluginCapabilitiesMessage, type PluginSavedStateMessage, type PluginStateMessage, type ScanResultMessage, type ScannedPlugin, type StoppedGate } from "./engine/engineClient";
+import { applyTrackShare, applyTrackUnlink, buildEngineStream, resolveEngineChannelView, shareCandidatesForPlugin, takenEngineChannelsByTrack, type ShareCandidate } from "./engine/engineStream";
 import { PPQ, projectEndTick, tickToBar } from "./shared/schema";
 import {
   AboutDialog,
   ExportDialog,
   MixDialog,
   PianoRoll,
+  PluginShareDialog,
   PluginSwapDialog,
   TestsPanel,
   Toasts,
@@ -229,6 +230,17 @@ export default function App() {
   // Stage 3f-4 — the track whose plugin the SWAP picker is open for (the
   // pill's swap icon). null = closed; the dialog itself owns search + confirm.
   const [swapTrackId, setSwapTrackId] = useState<string | null>(null);
+  // Stage 3g — the pick that found already-hosted instances of the SAME
+  // binary. Open while the share-or-create dialog shows; null = closed.
+  // The dialog is modal, so `project` cannot drift under it. `create`
+  // carries the ORIGINAL pick payload so "Create a new instance" replays
+  // today's behaviour exactly (plugin vs built-in-profile pick).
+  const [sharePick, setSharePick] = useState<{
+    trackId: string;
+    pluginName: string;
+    candidates: ShareCandidate[];
+    create: { kind: "plugin"; pluginId: string; pluginPath?: string; profileId?: string } | { kind: "profile"; profileId: string };
+  } | null>(null);
   // Chord v2 — the editing chord id is LIFTED here (was local to the Arranger
   // lane) so the top-bar panel and the in-lane editor share one source of
   // truth: creation/retarget/Esc/delete all stay in sync. No schema change.
@@ -735,11 +747,34 @@ export default function App() {
   // profileId (expression map) is preserved: it governs export, not hosting,
   // and the user picked it explicitly. The engine retires the instance for
   // the now-unbound group (grace + capture + editor close by id — 3d-4).
+  // Stage 3g — a SHARED group is never torn down under its remaining riders:
+  // when other tracks still point at it, the remove becomes an UNLINK of
+  // just this track (libraryGroupId + engineChannel cleared — the channel
+  // belonged to that instance's namespace). The group keeps its binding and
+  // every other rider keeps hosting; the plugin set is unchanged, so the
+  // engine update is routing-only (planUnlinkUpdate).
   const removeTrackPlugin = useCallback(
     (trackId: string) => {
       const t = project.tracks.find((tr) => tr.id === trackId);
       const g = t ? project.libraryGroups.find((lg) => lg.id === t.libraryGroupId) : undefined;
       if (!t || !g || !g.pluginId) return;
+      const othersUse = project.tracks.some((tr) => tr.id !== trackId && tr.libraryGroupId === g.id);
+      if (othersUse) {
+        const next = applyTrackUnlink(project, trackId);
+        commit(next);
+        setPluginLabels((p) => {
+          const { [trackId]: _drop, ...labels } = p;
+          return labels;
+        });
+        setSwapTrackId(null);
+        toast("ok", `${g.name} unlinked — the track rides the built-in test synth; the other tracks keep the shared instance`);
+        const plan = planUnlinkUpdate(engineStatus === "ready", hostedIds.has(g.id), enginePlaying);
+        if (plan === "send") sendSwapLoad(next);
+        // mid-play-effect: the mid-play reload effect owns the update (same
+        // signature → its load hits the engine's reuse fast path).
+        // defer/none: nothing changed for the engine (or nothing is live yet).
+        return;
+      }
       const { pluginPath: _ppath, ...rest } = g;
       const next: Project = {
         ...project,
@@ -754,7 +789,7 @@ export default function App() {
       toast("ok", `${g.name} removed — the track rides the built-in test synth`);
       sendSwapLoad(next);
     },
-    [project, commit, toast, sendSwapLoad],
+    [project, commit, toast, engineStatus, hostedIds, enginePlaying, sendSwapLoad],
   );
 
   // Stage 3d-4 derived sets for the Arranger pills: which tracks have a
@@ -947,6 +982,101 @@ export default function App() {
     [engineStatus, effectivePlaying, engineDrive, engineStop, sendSwapLoad, toast],
   );
 
+  // ─── Stage 3g — share one hosted instance between several tracks ──────────
+  // The pick flow's two outcomes, extracted so the share-or-create dialog and
+  // the no-candidate fast path run the EXACT same code:
+  //   createInstanceAssignment / createProfileAssignment = "Create a new
+  //     instance" — today's behaviour, byte-for-byte (a fresh makeId("lg")
+  //     group per picked track + the 3f-5 host-on-assign load);
+  //   shareWithGroup = "Share the existing <name> instance" — NO new group:
+  //     the track joins the chosen group and gets the lowest engine channel
+  //     no other rider uses (applyTrackShare; all 16 taken → the spec's
+  //     "this instance has no free channel" toast and nothing else).
+  // The engine update after a Share is ROUTING-ONLY (planShareUpdate): the
+  // plugin set is untouched, so no plugin-set load is ever sent for it —
+  //   mid-play-effect → the existing mid-play reload effect sends the load,
+  //     which hits the engine's reuse fast path (no re-init, transport keeps
+  //     rolling — CI-proven receipt "reuse while playing — no re-instantiate");
+  //   send → the engine is stopped: the ordinary sendSwapLoad carries the
+  //     routing (no transport to disturb);
+  //   assign-load → the group is NOT confirmed loaded (fresh session or a
+  //     failed host): the engine's desired set DID grow → the 3f-5 contract;
+  //   defer → the engine is not here yet: host-on-connect and the next play
+  //     load pick the shared routing up.
+  const createInstanceAssignment = useCallback(
+    (trackId: string, pick: { pluginId: string; name: string; pluginPath?: string; profileId?: string }) => {
+      const g = {
+        id: makeId("lg"),
+        name: pick.name,
+        pluginId: pick.pluginId,
+        pluginState: null,
+        ...(pick.pluginPath ? { pluginPath: pick.pluginPath } : {}),
+        ...(pick.profileId ? { profileId: pick.profileId } : {}),
+      };
+      const next: Project = {
+        ...project,
+        libraryGroups: [...project.libraryGroups, g],
+        tracks: project.tracks.map((t) => (t.id === trackId ? { ...t, libraryGroupId: g.id } : t)),
+      };
+      commit(next);
+      setPluginLabels((p) => ({ ...p, [trackId]: pick.name }));
+      toast("ok", `Assigned ${pick.name}${pick.profileId ? " (expression map bound — tracks route to its engine channels)" : ""}`);
+      // Stage 3f-5 — host the plugin THE MOMENT it is assigned (mock
+      // browser rows carry no pluginPath — nothing to host there).
+      if (g.pluginId && g.pluginPath) queueAssignmentLoad(pick.name, next);
+    },
+    [project, commit, toast, queueAssignmentLoad],
+  );
+
+  const createProfileAssignment = useCallback(
+    (trackId: string, profileId: string, name: string) => {
+      const match = desktopScan?.plugins.find((p) =>
+        /bbcso|bbc symphony/i.test(p.name)) ?? undefined;
+      const needsBbcso = profileId === "spitfire-bbcso";
+      const g = {
+        id: makeId("lg"),
+        name,
+        pluginId: needsBbcso && match ? match.uid : null,
+        pluginState: null,
+        profileId,
+        ...(needsBbcso && match ? { pluginPath: match.path } : {}),
+      };
+      const next: Project = {
+        ...project,
+        libraryGroups: [...project.libraryGroups, g],
+        tracks: project.tracks.map((t) => (t.id === trackId ? { ...t, libraryGroupId: g.id } : t)),
+      };
+      commit(next);
+      setPluginLabels((p) => ({ ...p, [trackId]: name }));
+      toast("ok", `Assigned ${name} (expression map)${needsBbcso && match ? " + hosted plugin" : ""}`);
+      if (g.pluginId && g.pluginPath) queueAssignmentLoad(name, next);
+    },
+    [project, desktopScan, commit, toast, queueAssignmentLoad],
+  );
+
+  const shareWithGroup = useCallback(
+    (trackId: string, groupId: string, pluginName: string) => {
+      const applied = applyTrackShare(project, trackId, groupId);
+      if (!applied) {
+        // Spec step 2 — the instance's 16 channels are all in use: nothing
+        // happens (no commit, no engine message).
+        toast("error", "this instance has no free channel");
+        return;
+      }
+      commit(applied.project);
+      setPluginLabels((p) => ({ ...p, [trackId]: pluginName }));
+      const g = project.libraryGroups.find((lg) => lg.id === groupId);
+      toast("ok", `Shared ${g?.name ?? pluginName} — engine channel ${applied.channel} of the existing instance`);
+      const plan = planShareUpdate(engineStatus === "ready", hostedIds.has(groupId), enginePlaying);
+      if (plan === "send") sendSwapLoad(applied.project);
+      else if (plan === "assign-load") queueAssignmentLoad(g?.name ?? pluginName, applied.project);
+      // mid-play-effect: the mid-play reload effect sends the routing update
+      // (engine reuse fast path — no re-init, no transport stop).
+      // defer: host-on-connect / the next play load pick it up.
+    },
+    [project, commit, toast, engineStatus, hostedIds, enginePlaying, sendSwapLoad, queueAssignmentLoad],
+  );
+
   const engineSeek = useCallback((tick: number) => {
     const t = Math.max(0, Math.round(tick));
     if (engineDrive) {
@@ -1046,6 +1176,9 @@ export default function App() {
   // auto) drives the per-track selectors; explicit assignment validates
   // collisions AT ASSIGNMENT TIME (the engine double-checks at load).
   const resolvedEngineChannels = useMemo(() => resolveEngineChannelView(project), [project]);
+  // Stage 3g — per-track dropdown filter data: channels the group's OTHER
+  // tracks already use (resolved routing). Pure, recomputed per project edit.
+  const engineChannelsTaken = useMemo(() => takenEngineChannelsByTrack(project), [project]);
   const handleEngineChannel = useCallback(
     (trackId: string, ch: number | null) => {
       if (ch === null) {
@@ -1057,13 +1190,27 @@ export default function App() {
         });
         return;
       }
-      const owner = project.tracks.find(
-        (t) => t.id !== trackId && t.engineChannel === ch,
-      );
+      // Stage 3g — collisions are per-INSTANCE now: each group's channels
+      // live in its own 1–16 namespace, so a channel held by a track of
+      // ANOTHER group is free for this one (the pre-3g global check would
+      // have blocked legal cross-instance reuse). The dropdown already hides
+      // same-group channels; this names the owning track if a stale UI still
+      // lands one (resolveInstanceRouting would otherwise deterministically
+      // fall back to auto for the loser).
+      const edited = project.tracks.find((t) => t.id === trackId);
+      const owner = edited
+        ? project.tracks.find(
+            (t) =>
+              t.id !== trackId &&
+              t.engineChannel === ch &&
+              t.libraryGroupId !== null &&
+              t.libraryGroupId === edited.libraryGroupId,
+          )
+        : undefined;
       if (owner) {
         toast(
           "error",
-          `Engine channel ${ch} is already assigned to ${owner.name} (engine channel collision)`,
+          `Engine channel ${ch} is already assigned to ${owner.name} on this instance (engine channel collision)`,
         );
         return;
       }
@@ -1222,6 +1369,7 @@ export default function App() {
         // error → label + toast).
         pluginLoadingTrackIds={loadingTrackIds}
         engineChannels={resolvedEngineChannels}
+        engineChannelsTaken={engineChannelsTaken}
         onEngineChannel={handleEngineChannel}
         audioBuffer={audioBuffer}
         audioName={audioName}
@@ -1359,28 +1507,18 @@ export default function App() {
           // The profile drives UACC CC#32 / 20ms pre-trigger / cc74Scale 0.5;
           // the pluginId+pluginPath bind the hosted binary.
           const profileId = /bbcso|bbc symphony/i.test(name) ? "spitfire-bbcso" : undefined;
-          const g = {
-            id: makeId("lg"),
-            name,
-            pluginId,
-            pluginState: null,
-            ...(pluginPath ? { pluginPath } : {}),
-            ...(profileId ? { profileId } : {}),
-          };
-          // Stage 3f-5 — hoist the NEW project object: the same object goes to
-          // commit AND to the host-on-assign load (sending the OLD project
-          // would load a score without the plugin just assigned).
-          const next: Project = {
-            ...project,
-            libraryGroups: [...project.libraryGroups, g],
-            tracks: project.tracks.map((t) => (t.id === vstTrackId ? { ...t, libraryGroupId: g.id } : t)),
-          };
-          commit(next);
-          setPluginLabels((p) => ({ ...p, [vstTrackId]: name }));
-          toast("ok", `Assigned ${name}${profileId ? " (expression map bound — tracks route to its engine channels)" : ""}`);
-          // Stage 3f-5 — host the plugin THE MOMENT it is assigned (mock
-          // browser rows carry no pluginPath — nothing to host there).
-          if (g.pluginId && g.pluginPath) queueAssignmentLoad(name, next);
+          // Stage 3g — BEFORE creating a group: does an existing group already
+          // host THIS binary (pluginId AND pluginPath equal)? If so, the user
+          // chooses between sharing that instance and a fresh one (spec step
+          // 1). Mock browser rows carry no path — nothing to share there.
+          if (pluginPath) {
+            const candidates = shareCandidatesForPlugin(project.libraryGroups, project.tracks, pluginId, pluginPath);
+            if (candidates.length > 0) {
+              setSharePick({ trackId: vstTrackId, pluginName: name, candidates, create: { kind: "plugin", pluginId, pluginPath, profileId } });
+              return;
+            }
+          }
+          createInstanceAssignment(vstTrackId, { pluginId, name, pluginPath, profileId });
         }}
         onPickProfile={(profileId, name) => {
           if (!vstTrackId) return;
@@ -1392,42 +1530,37 @@ export default function App() {
           const match = desktopScan?.plugins.find((p) =>
             /bbcso|bbc symphony/i.test(p.name)) ?? undefined;
           const needsBbcso = profileId === "spitfire-bbcso";
-          const g = {
-            id: makeId("lg"),
-            name,
-            pluginId: needsBbcso && match ? match.uid : null,
-            pluginState: null,
-            profileId,
-            ...(needsBbcso && match ? { pluginPath: match.path } : {}),
-          };
-          // Stage 3f-5 — hoist the NEW project object (commit + host-on-assign
-          // load share the SAME object).
-          const next: Project = {
-            ...project,
-            libraryGroups: [...project.libraryGroups, g],
-            tracks: project.tracks.map((t) => (t.id === vstTrackId ? { ...t, libraryGroupId: g.id } : t)),
-          };
-          commit(next);
-          setPluginLabels((p) => ({ ...p, [vstTrackId]: name }));
-          toast("ok", `Assigned ${name} (expression map)${needsBbcso && match ? " + hosted plugin" : ""}`);
-          // Stage 3f-5 — host when this assignment actually binds a scanned
-          // binary (needsBbcso && match ⇔ pluginId && pluginPath here).
-          if (g.pluginId && g.pluginPath) queueAssignmentLoad(name, next);
+          // Stage 3g — the share offer for a profile pick that BINDS a binary:
+          // only groups with the same binary AND the same profile qualify
+          // (sharing a raw same-binary group would strip this track's
+          // profile semantics — export AND hosted UACC path).
+          if (needsBbcso && match) {
+            const candidates = shareCandidatesForPlugin(project.libraryGroups, project.tracks, match.uid, match.path, profileId);
+            if (candidates.length > 0) {
+              setSharePick({ trackId: vstTrackId, pluginName: name, candidates, create: { kind: "profile", profileId } });
+              return;
+            }
+          }
+          createProfileAssignment(vstTrackId, profileId, name);
         }}
       />
       {(() => {
         // Stage 3f-4 — the pill's swap picker. currentName resolves from the
         // track's group (its hosting identity), falling back to the pill
         // label. Desktop scan rows only (real hosting); an empty list tells
-        // the user to scan first.
+        // the user to scan first. Stage 3g — affectedTracks names the group's
+        // rider count so the confirm says "this changes N tracks" (shared
+        // replace) or becomes an unlink note (shared remove).
         if (swapTrackId === null) return null;
         const t = project.tracks.find((tr) => tr.id === swapTrackId);
         const g = t ? project.libraryGroups.find((lg) => lg.id === t.libraryGroupId) : undefined;
+        const affectedTracks = g ? project.tracks.filter((tr) => tr.libraryGroupId === g.id).length : 1;
         return (
           <PluginSwapDialog
             open
             currentName={g?.name ?? pluginLabels[swapTrackId] ?? "the plugin"}
             plugins={desktopScan?.plugins ?? []}
+            affectedTracks={affectedTracks}
             onClose={() => setSwapTrackId(null)}
             onReplace={(pick) => replaceTrackPlugin(swapTrackId, pick)}
             onRemove={() => removeTrackPlugin(swapTrackId)}
@@ -1435,6 +1568,30 @@ export default function App() {
           />
         );
       })()}
+      {sharePick && project.tracks.some((tr) => tr.id === sharePick.trackId) && (
+        // Stage 3g — the share-or-create offer (spec step 1). The candidates
+        // are snapshotted at pick time; the dialog is modal, so the project
+        // cannot drift underneath. onCreate replays the ORIGINAL pick through
+        // today's create path.
+        <PluginShareDialog
+          pluginName={sharePick.pluginName}
+          candidates={sharePick.candidates.map((c) => ({
+            groupId: c.group.id,
+            name: c.group.name,
+            trackNames: c.trackNames,
+          }))}
+          onClose={() => setSharePick(null)}
+          onShare={(groupId) => shareWithGroup(sharePick.trackId, groupId, sharePick.pluginName)}
+          onCreate={() => {
+            const c = sharePick.create;
+            if (c.kind === "plugin") {
+              createInstanceAssignment(sharePick.trackId, { pluginId: c.pluginId, name: sharePick.pluginName, pluginPath: c.pluginPath, profileId: c.profileId });
+            } else {
+              createProfileAssignment(sharePick.trackId, c.profileId, sharePick.pluginName);
+            }
+          }}
+        />
+      )}
       <ExportDialog
         open={exportOpen}
         project={project}

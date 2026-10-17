@@ -327,6 +327,7 @@ export function PluginSwapDialog({
   open,
   currentName,
   plugins,
+  affectedTracks,
   onClose,
   onReplace,
   onRemove,
@@ -336,6 +337,11 @@ export function PluginSwapDialog({
   /** The plugin currently bound to the track (the <old> in the confirm). */
   currentName: string;
   plugins: ScannedPlugin[];
+  /** Stage 3g — how many tracks ride the SAME group (shared instance).
+   * > 1: the replace confirm must say "this changes N tracks" (every rider
+   * swaps), and the remove confirm becomes an unlink (the instance survives
+   * for the other riders). Absent/1 = today's texts. */
+  affectedTracks?: number;
   onClose: () => void;
   onReplace: (pick: ScannedPlugin) => void;
   onRemove: () => void;
@@ -345,6 +351,10 @@ export function PluginSwapDialog({
 }) {
   const [query, setQuery] = useState("");
   const [pending, setPending] = useState<"remove" | ScannedPlugin | null>(null);
+  // Stage 3g — the swap target's group is shared when more than one track
+  // points at it. The confirm texts name that consequence.
+  const shared = (affectedTracks ?? 1) > 1;
+  const riderCount = (affectedTracks ?? 1) - 1;
   // Fresh dialog per open: the search and any half-taken confirm must not
   // survive into the next swap (different track, different list).
   useEffect(() => {
@@ -367,19 +377,30 @@ export function PluginSwapDialog({
         <div>
           <p className="text-sm leading-relaxed text-stone-200">
             {pending === "remove" ? (
-              <>
-                Remove <span className="font-semibold text-orange-300">{currentName}</span>? Its saved
-                sound state will be discarded. The track returns to the built-in test synth.
-              </>
+              shared ? (
+                <>
+                  Remove <span className="font-semibold text-orange-300">{currentName}</span> from this
+                  track? It is unlinked — the shared instance keeps serving the other{" "}
+                  {riderCount === 1 ? "track" : <> {riderCount} tracks</>}.
+                </>
+              ) : (
+                <>
+                  Remove <span className="font-semibold text-orange-300">{currentName}</span>? Its saved
+                  sound state will be discarded. The track returns to the built-in test synth.
+                </>
+              )
             ) : (
               <>
                 Replace <span className="font-semibold text-orange-300">{currentName}</span> with{" "}
                 <span className="font-semibold text-orange-300">{pending.name}</span>? Its saved sound
                 state will be discarded.
+                {shared && <> This changes {affectedTracks} tracks.</>}
               </>
             )}
           </p>
-          <p className="mt-1.5 text-[11px] text-stone-500">Track MIDI channels stay unchanged.</p>
+          {(!shared || pending !== "remove") && (
+            <p className="mt-1.5 text-[11px] text-stone-500">Track MIDI channels stay unchanged.</p>
+          )}
           <div className="mt-4 flex justify-end gap-2">
             <button
               type="button"
@@ -471,6 +492,97 @@ export function PluginSwapDialog({
           </div>
         </div>
       )}
+    </Modal>
+  );
+}
+
+/**
+ * Stage 3g — the share-or-create offer. The picked plugin binary is already
+ * hosted by at least one existing library group; the user chooses between
+ * REUSING that instance (several tracks ride one group — the engine's 16
+ * channels per instance) and today's behaviour (a fresh group + instance).
+ * Several matches are listed BY THE NAMES OF THE TRACKS that use them
+ * (spec step 1); one match needs no selection. The button texts are the
+ * spec's, verbatim: "Share the existing <name> instance" / "Create a new
+ * instance".
+ */
+export function PluginShareDialog({
+  pluginName,
+  candidates,
+  onClose,
+  onShare,
+  onCreate,
+}: {
+  /** The picked plugin's display name (the <name> in the button texts). */
+  pluginName: string;
+  /** The matching groups (≥1 — the caller only opens the dialog then). */
+  candidates: Array<{ groupId: string; name: string; trackNames: string[] }>;
+  onClose: () => void;
+  onShare: (groupId: string) => void;
+  onCreate: () => void;
+}) {
+  const [chosen, setChosen] = useState(candidates[0]?.groupId ?? "");
+  // Keep the selection valid if the candidate list changes while open.
+  useEffect(() => {
+    if (!candidates.some((c) => c.groupId === chosen)) setChosen(candidates[0]?.groupId ?? "");
+  }, [candidates, chosen]);
+  const multi = candidates.length > 1;
+  return (
+    <Modal title="Already hosted" onClose={onClose}>
+      <p className="text-sm leading-relaxed text-stone-200">
+        <span className="font-semibold text-orange-300">{pluginName}</span> is already hosted
+        {multi ? ` by ${candidates.length} instances` : ""}:
+      </p>
+      <div className="mt-3 space-y-1.5">
+        {candidates.map((c) => (
+          <button
+            key={c.groupId}
+            type="button"
+            onClick={() => setChosen(c.groupId)}
+            className={cn(
+              "flex w-full items-start gap-2 rounded-md px-2.5 py-2 text-left text-sm ring-1",
+              multi && chosen === c.groupId
+                ? "bg-orange-500/10 ring-orange-400/40"
+                : "bg-black/30 ring-white/10 hover:bg-white/5",
+            )}
+          >
+            <Ph name={multi ? (chosen === c.groupId ? "check" : "plug") : "plug"} className={cn("mt-0.5 h-3.5 w-3.5 shrink-0", multi && chosen === c.groupId ? "text-orange-300" : "text-stone-500")} />
+            <span className="min-w-0 flex-1">
+              <span className="block truncate text-stone-100">{c.name}</span>
+              <span className="block text-[11px] text-stone-500">
+                used by {c.trackNames.join(", ")}
+              </span>
+            </span>
+          </button>
+        ))}
+      </div>
+      <p className="mt-3 text-[11px] text-stone-500">
+        Sharing puts this track on the same instance (a free channel of its 16 is assigned). A new
+        instance costs its own load.
+      </p>
+      <div className="mt-4 flex justify-end gap-2">
+        <button
+          type="button"
+          onClick={() => {
+            onCreate();
+            onClose();
+          }}
+          className="rounded-md bg-white/10 px-3 py-1.5 text-sm text-stone-100 hover:bg-white/15"
+        >
+          Create a new instance
+        </button>
+        <button
+          type="button"
+          disabled={!chosen}
+          onClick={() => {
+            onShare(chosen);
+            onClose();
+          }}
+          className="rounded-md bg-orange-400 px-3 py-1.5 text-sm font-medium text-black hover:bg-orange-300 disabled:opacity-50"
+        >
+          Share the existing {pluginName} instance
+        </button>
+      </div>
     </Modal>
   );
 }

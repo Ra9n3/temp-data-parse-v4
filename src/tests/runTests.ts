@@ -43,8 +43,8 @@ import { exposedBreakdownRoles, planRotation, resolveRotationConfig } from "../g
 import { consolidateSustains } from "../generation/sustain";
 import { cc7ForWeight, acousticWeightForTrack, DEFAULT_BALANCE_CONFIG } from "../generation/balance";
 import { builtInProfileById, vst3EventAdapter } from "../plugins/expressionMaps";
-import { buildEngineStream, resolveInstanceRouting } from "../engine/engineStream";
-import { createStoppedGate, describeLateLoadAck, formatPluginInfo, formatTailSeconds, mergeScanProbe, planAssignmentLoad, pluginSetSignature, rowsNeedingProbe, swapPickerRows, type PluginCapabilitiesMessage, type ScannedPlugin } from "../engine/engineClient";
+import { applyTrackShare, applyTrackUnlink, buildEngineStream, lowestFreeEngineChannel, resolveInstanceRouting, shareCandidatesForPlugin, takenEngineChannelsByTrack } from "../engine/engineStream";
+import { createStoppedGate, describeLateLoadAck, formatPluginInfo, formatTailSeconds, mergeScanProbe, planAssignmentLoad, planShareUpdate, planUnlinkUpdate, pluginSetSignature, rowsNeedingProbe, swapPickerRows, type PluginCapabilitiesMessage, type ScannedPlugin } from "../engine/engineClient";
 import userProjectJson from "../fixtures/user-project.json";
 import { mulberry32 } from "../generation/prng";
 import { snapshotDigest } from "../generation/efgGolden";
@@ -932,12 +932,22 @@ export function runUnitTests(): TestResult[] {
       assert(!r17.ok && r17.errors.some((e) => e.includes("(engine channel)")), "engineChannel 17 must fail");
       v1.engineChannel = 5;
       v2.engineChannel = 5;
+      // Stage 3g — the collision scope is PER INSTANCE: unbound tracks have
+      // no namespace, so their explicit channels are inert and never collide;
+      // riders of the SAME group do; riders of DIFFERENT groups are legal.
+      assert(validateProject(project).ok, "two UNBOUND tracks on the same explicit channel are inert (no namespace, no collision)");
+      project.libraryGroups.push({ id: "lg_v1", name: "A", pluginId: "uid-a", pluginState: null, pluginPath: "/a.vst3" });
+      project.libraryGroups.push({ id: "lg_v2", name: "B", pluginId: "uid-b", pluginState: null, pluginPath: "/b.vst3" });
+      v1.libraryGroupId = "lg_v1";
+      v2.libraryGroupId = "lg_v2";
+      assert(validateProject(project).ok, "the SAME channel on DIFFERENT groups is legal (per-instance namespaces — 3g sharing)");
+      v2.libraryGroupId = "lg_v1";
       const rCollide = validateProject(project);
-      assert(!rCollide.ok && rCollide.errors.some((e) => e.includes("engine channel 5 is already assigned to") && e.includes("(engine channel collision)")), "two tracks on one engine channel must collide");
+      assert(!rCollide.ok && rCollide.errors.some((e) => e.includes("engine channel 5 is already assigned to") && e.includes("(engine channel collision)")), "two tracks of ONE group on one engine channel must collide");
       delete v2.engineChannel;
       delete (v1 as { engineChannel?: number }).engineChannel;
       assert(validateProject(project).ok, "absent engineChannel must stay valid (additive optional field)");
-      return "1–16 enforced, 'engine channel' error style, cross-track collision rejected, absence valid";
+      return "1–16 enforced, 'engine channel' error style, collision scoped PER INSTANCE (same group collides, cross-group legal), absence valid";
     }),
     timed("Stage 3d-4: resolveInstanceRouting — explicit wins (per-instance scope), first-come order, ALL plugin-bound tracks route (universal)", () => {
       const project = fixture();
@@ -1208,6 +1218,80 @@ export function runUnitTests(): TestResult[] {
       assert(withBoth.includes("unresponsive 4s ago") && withBoth.includes("previous plugin load"),
         "both causes can be named together");
       return "probe selection exact; cause matrix: none/mm/load/both";
+    }),
+    timed("Stage 3g: share one hosted instance — candidates by track names, exactly-one-group share with channels 1+2, dropdown filter, unlink keeps the group, plan tables", () => {
+      const project = fixture();
+      const riders = project.tracks.filter((t) => t.family !== "structure" && t.family !== "audio" && t.role !== "structure");
+      const [t1, t2] = [riders[0]!, riders[1]!];
+      const g = { id: "lg_shared", name: "BBCSO", pluginId: "uid-1", pluginState: null, pluginPath: "C:/VST3/BBCSO.vst3" };
+      project.libraryGroups = [g];
+      t1.libraryGroupId = "lg_shared";
+      t1.engineChannel = 1;
+      // (a) The share offer (spec step 1): the SAME pluginId AND pluginPath
+      // matches, listed BY the names of the tracks that use it; a different
+      // binary never matches; a profile pick requires the same profileId; an
+      // orphan group (no tracks) is never offered.
+      const cands = shareCandidatesForPlugin(project.libraryGroups, project.tracks, "uid-1", "C:/VST3/BBCSO.vst3");
+      assert(cands.length === 1 && cands[0]!.group.id === "lg_shared" && cands[0]!.trackNames.length === 1 && cands[0]!.trackNames[0] === t1.name, "the matching group is listed BY its track's name");
+      assert(shareCandidatesForPlugin(project.libraryGroups, project.tracks, "uid-1", "C:/VST3/OTHER.vst3").length === 0, "a different binary path never matches");
+      assert(shareCandidatesForPlugin(project.libraryGroups, project.tracks, "uid-2", "C:/VST3/BBCSO.vst3").length === 0, "a different pluginId never matches");
+      assert(shareCandidatesForPlugin(project.libraryGroups, project.tracks, "uid-1", "C:/VST3/BBCSO.vst3", "spitfire-bbcso").length === 0, "a profile pick does not match a group without that profile");
+      project.libraryGroups.push({ ...g, id: "lg_orphan", name: "BBCSO Map", profileId: "spitfire-bbcso" });
+      assert(shareCandidatesForPlugin(project.libraryGroups, project.tracks, "uid-1", "C:/VST3/BBCSO.vst3", "spitfire-bbcso").length === 0, "a profile-matching ORPHAN group (no riders) is not offered");
+      project.libraryGroups = [g];
+      // (b) The Share commit (spec step 2): NO new group; the lowest channel
+      // no other rider uses; the resolved routing rides ONE instance 1 and 2.
+      assert(lowestFreeEngineChannel(project, "lg_shared") === 2, "the lowest free channel of the group's namespace is 2 (1 is taken)");
+      const applied = applyTrackShare(project, t2.id, "lg_shared");
+      assert(applied !== null && applied.channel === 2, "the shared track gets channel 2");
+      const shared = applied.project;
+      assert(shared.libraryGroups.length === 1 && shared.libraryGroups[0]!.id === "lg_shared", "sharing creates NO group — exactly one group remains");
+      const sharedTrack = shared.tracks.find((t) => t.id === t2.id)!;
+      assert(sharedTrack.libraryGroupId === "lg_shared" && sharedTrack.engineChannel === 2, "the track joins the group with an explicit channel 2");
+      const routing = resolveInstanceRouting(shared).routing;
+      assert(routing[t1.id]!.inst === "lg_shared" && routing[t1.id]!.ch === 1, "rider 1 stays on channel 1");
+      assert(routing[t2.id]!.inst === "lg_shared" && routing[t2.id]!.ch === 2, "rider 2 rides channel 2 of the SAME instance");
+      // (c) The dropdown filter (spec step 6): each rider sees the OTHER's
+      // channel as taken; its own is never in the set.
+      const taken = takenEngineChannelsByTrack(shared);
+      assert(JSON.stringify(taken[t1.id]) === "[2]", "rider 1's dropdown hides channel 2");
+      assert(JSON.stringify(taken[t2.id]) === "[1]", "rider 2's dropdown hides channel 1");
+      // (e) The unlink (spec step 4): the group keeps its binding and the
+      // remaining rider keeps hosting — nothing is torn down.
+      const unlinked = applyTrackUnlink(shared, t2.id);
+      const ug = unlinked.libraryGroups.find((x) => x.id === "lg_shared");
+      assert(ug !== undefined && ug.pluginId === "uid-1" && ug.pluginPath === "C:/VST3/BBCSO.vst3", "unlinking one rider KEEPS the group's binding");
+      assert(unlinked.tracks.find((t) => t.id === t2.id)!.libraryGroupId === null, "the unlinked track is detached");
+      const urouting = resolveInstanceRouting(unlinked).routing;
+      assert(urouting[t1.id]!.inst === "lg_shared" && urouting[t1.id]!.ch === 1, "the remaining rider still routes through the shared instance (channel untouched)");
+      // (d) The 16-channel cap: fill the namespace, the next share refuses.
+      let filled = shared;
+      let ok = 0;
+      for (const t of riders) {
+        if (t.id === t1.id || t.id === t2.id) continue;
+        const more = applyTrackShare(filled, t.id, "lg_shared");
+        if (!more) break;
+        filled = more.project;
+        ok += 1;
+      }
+      assert(ok === 14, `filling from channels 1+2 takes exactly 14 more riders, got ${ok}`);
+      assert(lowestFreeEngineChannel(filled, "lg_shared") === null, "all 16 channels taken");
+      // The refusal needs a NON-rider: a rider re-sharing gets its own
+      // channel back (its own is excluded from the taken set by design).
+      const outsider = project.tracks.find((t) => t.family === "structure" || t.family === "audio" || t.role === "structure");
+      assert(outsider !== undefined, "the fixture has an un-routable (structure/audio) track");
+      assert(applyTrackShare(filled, outsider!.id, "lg_shared") === null, "a share onto a full instance returns null (the spec's no-free-channel refusal)");
+      assert(filled.libraryGroups.length === 1, "refused or not, NO extra group is ever created");
+      // (f) The engine-update plans: a Share/unlink NEVER sends a plugin-set
+      // load for an already-loaded group — mid-play the reload effect owns it
+      // (engine reuse fast path), stopped the ordinary sendSwapLoad does.
+      assert(planShareUpdate(false, false, false) === "defer" && planShareUpdate(false, true, true) === "defer", "engine not ready → defer (host-on-connect / the next play pick it up)");
+      assert(planShareUpdate(true, false, false) === "assign-load" && planShareUpdate(true, false, true) === "assign-load", "group not confirmed loaded → the 3f-5 assignment contract (the engine's set grows)");
+      assert(planShareUpdate(true, true, true) === "mid-play-effect", "playing + loaded → the mid-play reload effect sends it (fast path, no re-init, no stop)");
+      assert(planShareUpdate(true, true, false) === "send", "stopped + loaded → the ordinary sendSwapLoad carries the routing");
+      assert(planUnlinkUpdate(true, true, true) === "mid-play-effect" && planUnlinkUpdate(true, true, false) === "send", "unlink from a loaded instance → routing-only update");
+      assert(planUnlinkUpdate(true, false, false) === "none" && planUnlinkUpdate(false, false, true) === "defer", "unlink from a never-hosted group changes NOTHING engine-side");
+      return "candidates by track names; share → one group + channels 1+2; 16-cap refusal; dropdown filter; unlink keeps the group; share/unlink plan tables pinned";
     }),
   ];
 }

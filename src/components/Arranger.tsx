@@ -85,6 +85,9 @@ interface Props {
   // Stage 3c-3 — engine-channel assignment (per-track compact selector).
   engineChannels: Record<string, number>;
   onEngineChannel: (id: string, ch: number | null) => void;
+  // Stage 3g — per-track channels taken by OTHER tracks of the same group
+  // (the dropdown filter data; see takenEngineChannelsByTrack).
+  engineChannelsTaken?: Record<string, number[]>;
   // Chord v2 — editing chord id is owned by App (top-bar panel needs it).
   editingChord: string | null;
   onEditChord: (id: string | null) => void;
@@ -219,6 +222,7 @@ export function Arranger(props: Props) {
     pluginLoadingTrackIds,
     engineChannels,
     onEngineChannel,
+    engineChannelsTaken,
     audioBuffer,
     audioName,
     selectedTrackId,
@@ -417,7 +421,7 @@ export function Arranger(props: Props) {
             timelineWidth={timelineWidth}
             tpBar={tpBar}
             tpb={tpb}
-            pluginLabel={track.role === "audio" ? audioName || "Load audio" : (pluginLabels[track.id] ?? "No plugin")}
+            pluginLabel={track.role === "audio" ? audioName || "Load audio" : (pluginLabels[track.id] ?? project.libraryGroups.find((g) => g.id === track.libraryGroupId)?.name ?? "No plugin")}
             pluginInfo={track.role === "audio" ? undefined : pluginInfoByTrack[track.id]}
             pluginLoading={track.role !== "audio" && (pluginLoadingTrackIds?.has(track.id) ?? false)}
             audioBuffer={audioBuffer}
@@ -447,6 +451,7 @@ export function Arranger(props: Props) {
             engineChannelResolved={engineChannels[track.id]}
             engineChannelExplicit={track.engineChannel !== undefined}
             onEngineChannel={(ch) => onEngineChannel(track.id, ch)}
+            engineChannelTaken={engineChannelsTaken?.[track.id]}
             onSelectTrack={() => onSelectTrack(track.id)}
             onOpenPianoRoll={() => onOpenPianoRoll(track.id)}
             onSelectSection={(id) => {
@@ -554,6 +559,8 @@ function TrackRow(props: {
   engineChannelResolved?: number;
   engineChannelExplicit: boolean;
   onEngineChannel: (ch: number | null) => void;
+  // Stage 3g — channels used by other tracks of this track's group.
+  engineChannelTaken?: number[];
 }) {
   const { track, project, ppt, timelineWidth, tpBar, tpb } = props;
   return (
@@ -579,6 +586,7 @@ function TrackRow(props: {
           engineChannelResolved={props.engineChannelResolved}
           engineChannelExplicit={props.engineChannelExplicit}
           onEngineChannel={props.onEngineChannel}
+          engineChannelTaken={props.engineChannelTaken}
         />
       </div>
       <div

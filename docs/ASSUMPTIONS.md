@@ -1811,3 +1811,97 @@ Falcon/BBCSO stall behaviour — where it wedges, how long, what the user
 feels during it, and whether the new toasts help — can only be verified by
 hand on real Windows with the shipped installer (stated in the commit
 message).
+
+## Stage 3g — share one hosted instance between tracks (tag `share-instance-v1`, frontend only)
+
+**What "share" means.** The engine's 3d-4 model already hosts one instance per
+plugin-bearing library group (instanceId = the group id) with a private 1–16
+channel namespace per instance; `resolveInstanceRouting` already maps several
+tracks onto one group. Stage 3g only adds the FRONTEND offer: the pick flow may
+reuse an existing group instead of always creating one. No engine, shell, or
+protocol change; engine stays 0.8.3.
+
+**Match rule (spec step 1, literal).** `shareCandidatesForPlugin` matches on
+pluginId AND pluginPath (the hosting identity) — NOT on the group's name or
+profile. Consequence: sharing adopts the group's semantics as they are. If the
+existing group carries an expression-map profileId (e.g. bound via the swap
+heuristic), a rider picked through the plain scan list gets the profile path
+(UACC), not raw notes — that is the honest meaning of "share the existing
+instance". The onPickProfile path narrows the offer to groups with the SAME
+profileId AND binary: a profile pick must keep its export/hosting semantics, so
+a raw same-binary group is never offered to it.
+
+**Orphan groups are not offered.** A group with the same binding but ZERO
+riders (possible after unlink chains) hosts nothing and names no tracks; the
+dialog only offers groups with ≥1 rider. Creating a fresh instance for an
+orphan's binary stays today's behaviour (the orphan keeps its embedded state
+for a future re-bind).
+
+**Channel assignment (spec step 2).** The shared track gets an EXPLICIT
+engineChannel = `lowestFreeEngineChannel` — computed from the RESOLVED routing,
+so first-come auto-assigned siblings count as taken, and the joining track's
+own previous channel (which belonged to its PREVIOUS group's namespace) is
+overwritten, never kept. A rider re-sharing onto its own group gets its own
+channel back (its own is excluded from the taken set by design). All 16 taken
+→ the spec's exact toast "this instance has no free channel" and NO commit.
+
+**Engine updates are routing-only (spec step 5).** A Share or shared-group
+unlink leaves every group's id+pluginId+pluginPath unchanged
+(`pluginSetSignature` identical), so no plugin-set load is ever sent for them.
+The plan helpers name who sends:
+- playing + group confirmed loaded (hostedIds) → the EXISTING mid-play reload
+  effect sends the load; the engine takes its reuse fast path ("reuse while
+  playing — no re-instantiate", D-mode CI-proven). No transport stop. An
+  explicit sendSwapLoad here would only supersede the effect's in-flight load
+  and red-toast "superseded by a newer load" — that is why the share handler
+  deliberately sends NOTHING in this branch.
+- stopped + loaded → ordinary `sendSwapLoad`. The engine's fast path exists
+  for the ROLLING transport only; a stopped same-set load takes the normal
+  async-init path (the engine's standing 3d-4 contract for every stopped
+  load — same cost as today's assignment flow, and nothing audible to
+  disturb). The 3g win is: no stop, no mid-play rejection, instant Play
+  afterwards (the ack caches the project).
+- not loaded (fresh session / failed host) → `queueAssignmentLoad` (3f-5):
+  the engine's desired set genuinely grows — stop-then-load / defer-to-connect.
+- unlink from a never-hosted group → NOTHING is sent: before and after, the
+  track renders through the test synth; the engine's set never changes.
+
+**Remove vs unlink (spec step 4).** "Remove plugin" on a group other tracks
+still ride = unlink THIS track only (libraryGroupId + engineChannel cleared —
+the channel belonged to that instance's namespace); the group's binding and
+every other rider are untouched. The last rider's remove keeps today's
+behaviour (binding cleared on the group, group retained with pluginId null).
+The pill swap dialog receives `affectedTracks` (the group's rider count):
+replace gains "This changes N tracks." (the swap replaces the binary for EVERY
+rider — that is what a shared group means), and the shared-remove confirm
+names the unlink instead of promising a state discard (the instance's saved
+state survives for the remaining riders).
+
+**Per-instance channels everywhere (spec step 6 + the validator).** The
+dropdown hides channels used by other riders of the same group
+(`takenEngineChannelsByTrack`, resolved routing); `handleEngineChannel`
+validates collisions per-instance; `validateProject`'s 3c engine-channel
+collision rule is scoped identically (same-group duplicates rejected,
+cross-group duplicates now LEGAL, unbound tracks inert). This validator change
+is REQUIRED, not cosmetic: with sharing legal, a saved project holding the
+same explicit channel on two DIFFERENT groups is valid state — the old global
+rule would have failed autosave restore and import and fallen back to the
+fixture (data loss). The 3c validator test was extended (not weakened): the
+same-group collision still rejects with the exact "engine channel collision"
+wording, plus the new legal cross-group case is pinned.
+
+**Labels.** The Arranger pill label falls back to the track's group name, so
+every rider of a shared group reads the instance's name even without a
+per-track pluginLabels entry (restored projects included); a swap updates the
+GROUP's name, which all riders then reflect.
+
+**Known pre-existing behaviour (observed, NOT fixed here).** The engine's
+mid-play fast path re-sends plugin_state "loaded" per instance, and the client
+toasts every loaded receipt — so a share while playing (like every mid-play
+reload since 3c) produces one "X hosted (latency …)" toast. Informative, not
+harmful; left as is.
+
+**CI / by-ear.** The web tier proves tsc + suite (51) + web build; the Desktop
+tier proves the build and re-proves the engine fast-path receipts (pre-existing
+D-mode assertions). The share dialog, channel bookkeeping, dropdown filtering
+and unlink flow are UI — by-ear on real Windows with the shipped installer.

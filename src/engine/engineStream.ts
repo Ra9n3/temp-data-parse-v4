@@ -181,6 +181,136 @@ export function resolveEngineChannelView(project: Project): Record<string, numbe
   return out;
 }
 
+// ─── Stage 3g — sharing one hosted instance between several tracks ──────────
+// The engine's 3d-4 model ALREADY supports several tracks riding one library
+// group (instanceId = the group id; each rider gets a channel in that
+// instance's private 1–16 namespace). What 3g adds is the FRONTEND offer:
+// the pick flow may REUSE an existing group instead of always creating one,
+// plus the per-group channel bookkeeping (lowest free channel, dropdown
+// filtering, unlink-without-teardown). All of it is PURE below the dialog.
+
+/** One shareable existing group: the group plus the names of the tracks
+ * currently using it (the dialog lists matches BY those names). */
+export interface ShareCandidate {
+  group: LibraryGroup;
+  trackNames: string[];
+}
+
+/**
+ * PURE — the existing groups that host the SAME plugin binary the user just
+ * picked (pluginId AND pluginPath equal — the hosting identity), each with
+ * ≥1 bound track (an orphan group hosts nothing; offering it would name no
+ * tracks and gain nothing over creating a fresh instance). When `profileId`
+ * is given (the onPickProfile path), only groups carrying the SAME profile
+ * match — a profile pick must keep its export/hosting semantics, so a raw
+ * same-binary group is NOT offered. First-appearance order (deterministic).
+ */
+export function shareCandidatesForPlugin(
+  libraryGroups: LibraryGroup[],
+  tracks: Track[],
+  pluginId: string,
+  pluginPath: string,
+  profileId?: string,
+): ShareCandidate[] {
+  const out: ShareCandidate[] = [];
+  for (const g of libraryGroups) {
+    if (g.pluginId !== pluginId) continue;
+    if (!g.pluginPath || g.pluginPath !== pluginPath) continue;
+    if (profileId !== undefined && g.profileId !== profileId) continue;
+    const trackNames = tracks.filter((t) => t.libraryGroupId === g.id).map((t) => t.name);
+    if (trackNames.length === 0) continue;
+    out.push({ group: g, trackNames });
+  }
+  return out;
+}
+
+/**
+ * PURE — the lowest engine channel (1–16) of `groupId`'s namespace that NO
+ * other track currently uses (explicit AND first-come auto both count — the
+ * resolved routing is the truth). null = all 16 taken (the caller shows the
+ * spec's "this instance has no free channel" and does nothing).
+ */
+export function lowestFreeEngineChannel(project: Project, groupId: string, excludeTrackId?: string): number | null {
+  const { routing } = resolveInstanceRouting(project);
+  const taken = new Set<number>();
+  for (const [trackId, r] of Object.entries(routing)) {
+    if (r.inst === groupId && trackId !== excludeTrackId) taken.add(r.ch);
+  }
+  for (let ch = 1; ch <= 16; ++ch) if (!taken.has(ch)) return ch;
+  return null;
+}
+
+/**
+ * PURE — the Share commit: point `trackId` at `groupId` and give it an
+ * EXPLICIT engineChannel = the lowest channel no other track of that group
+ * uses (spec step 2). Returns null (and changes nothing) when the group is
+ * not a hosting group or all 16 of its channels are taken. The track's
+ * previous engineChannel belonged to its previous group's namespace and is
+ * overwritten — it has no meaning in the new namespace.
+ */
+export function applyTrackShare(
+  project: Project,
+  trackId: string,
+  groupId: string,
+): { project: Project; channel: number } | null {
+  const track = project.tracks.find((t) => t.id === trackId);
+  const group = project.libraryGroups.find((g) => g.id === groupId);
+  if (!track || !group || !group.pluginId || !group.pluginPath) return null;
+  const channel = lowestFreeEngineChannel(project, groupId, trackId);
+  if (channel === null) return null;
+  return {
+    project: {
+      ...project,
+      tracks: project.tracks.map((t) =>
+        t.id === trackId ? { ...t, libraryGroupId: groupId, engineChannel: channel } : t,
+      ),
+    },
+    channel,
+  };
+}
+
+/**
+ * PURE — the shared-group unlink (spec step 4): ONLY this track detaches
+ * (libraryGroupId + engineChannel cleared — the channel belonged to the
+ * shared namespace); the group and every other rider keep their binding and
+ * hosting. The caller decides group teardown (only when NO other track
+ * remains) and the engine update.
+ */
+export function applyTrackUnlink(project: Project, trackId: string): Project {
+  return {
+    ...project,
+    tracks: project.tracks.map((t) =>
+      t.id === trackId ? { ...t, libraryGroupId: null, engineChannel: undefined } : t,
+    ),
+  };
+}
+
+/**
+ * PURE — the TrackHeader channel-dropdown filter data (spec step 6): for
+ * every track that rides a group, the channels used by the group's OTHER
+ * tracks (resolved routing — explicit and auto alike). The dropdown must
+ * offer only the free channels plus the track's own (never in this set by
+ * construction). Tracks without a group (or with no siblings) are absent.
+ */
+export function takenEngineChannelsByTrack(project: Project): Record<string, number[]> {
+  const { routing } = resolveInstanceRouting(project);
+  const byGroup = new Map<string, Set<number>>();
+  for (const r of Object.values(routing)) {
+    let s = byGroup.get(r.inst);
+    if (!s) { s = new Set(); byGroup.set(r.inst, s); }
+    s.add(r.ch);
+  }
+  const out: Record<string, number[]> = {};
+  for (const t of project.tracks) {
+    const s = t.libraryGroupId ? byGroup.get(t.libraryGroupId) : undefined;
+    if (!s) continue;
+    const mine = routing[t.id]?.ch;
+    const others = [...s].filter((ch) => ch !== mine).sort((a, b) => a - b);
+    if (others.length > 0) out[t.id] = others;
+  }
+  return out;
+}
+
 /**
  * PURE, DETERMINISTIC — Project → engine load payload.
  * Plugin-routed tracks: WITH a built-in profile → the full M9 profile path
