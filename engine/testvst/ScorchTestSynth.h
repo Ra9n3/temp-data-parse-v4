@@ -38,6 +38,25 @@
 // and every capability JSON must stay parseable (tailSeconds serialized as
 // null = "infinite").
 
+// Stage 3i (CI fixture for runtime-latency tracking): real libraries cannot
+// be scripted in CI, so the RESERVED CC#23 drives this fixture's reported
+// latency AT RUNTIME — the same right a VST3 convolver/sampler exercises when
+// its IR loads or its look-ahead changes. Deterministic command table
+// (value → effect; every change is logged as "[testvst] latency n=<samples>
+// notified=<0|1> mode=<mode>" under SCORCH_TESTVST_LOG=1):
+//   0  → setLatencySamples(0)    + updateHostDisplay(latencyChanged)  (NOTIFIED)
+//   1  → setLatencySamples(1024) + updateHostDisplay(latencyChanged)  (NOTIFIED)
+//   2  → setLatencySamples(2048) + updateHostDisplay(latencyChanged)  (NOTIFIED)
+//   10 → setLatencySamples(2048) with NO notification — the engine's 2000 ms
+//        message-thread safety-net timer must detect it (2-identical-reads
+//        debounce) — the silent-change CI proof
+//   20 → NOTIFIED FLICKER: 40 toggles 0↔1024, one every 4 blocks (~46 ms at
+//        44100/512 ≈ 1.9 s total), each one notified (updateHostDisplay from
+//        INSIDE processBlock — the realtime-notification shape a real plugin
+//        can produce), then SETTLES at 1024. Exercises the engine's rate
+//        limit (≤ one republish per instance per second) + final-state
+//        convergence. Block-counted in processBlock: no timers, no RNG.
+
 #pragma once
 
 #include <cmath>
@@ -119,6 +138,25 @@ public:
                 if (v.phase > 6.283185307179586) v.phase -= 6.283185307179586;
             }
             if (v.releasing && v.env <= 0.0f) v.active = false;
+        }
+
+        // Stage 3i — CC#23 v=20 flicker stepper (block-counted, deterministic).
+        // Every 4 blocks (~46 ms at 44100/512): toggle the latency and notify
+        // FROM the process context — the exact realtime-notification shape the
+        // engine's listener must survive allocation-free. After 40 toggles the
+        // value SETTLES at 1024 (one last notified change).
+        if (flickerLeft > 0 && ++flickerBlocks >= 4) {
+            flickerBlocks = 0;
+            --flickerLeft;
+            flickerValue = flickerValue == 0 ? 1024 : 0;
+            setLatencySamples(flickerValue);
+            updateHostDisplay(juce::AudioProcessorListener::ChangeDetails().withLatencyChanged(true));
+            logLatency("flicker", flickerValue, 1);
+            if (flickerLeft == 0) {
+                setLatencySamples(1024);
+                updateHostDisplay(juce::AudioProcessorListener::ChangeDetails().withLatencyChanged(true));
+                logLatency("settle", 1024, 1);
+            }
         }
 
         // Stage 3e-3 — AUX BUS OUTPUT: a DISTINCT CONSTANT 0.25 per sample on
@@ -310,6 +348,23 @@ private:
             else if (num == 11) cc11[ch] = val;
             else if (num == 21) masterScale.store(juce::jlimit(0.0f, 4.0f, static_cast<float>(val) / 127.0f));
             else if (num == 22) auxArmed = val > 0 ? 1 : 0;   // 3e-3: aux-bus arm (deterministic, score-driven)
+            else if (num == 23) {   // 3i: RESERVED runtime-latency control (see header)
+                if (val == 0 || val == 1 || val == 2) {
+                    const int target = (val == 0) ? 0 : (val == 1 ? 1024 : 2048);
+                    setLatencySamples(target);
+                    updateHostDisplay(juce::AudioProcessorListener::ChangeDetails().withLatencyChanged(true));
+                    logLatency("cc", target, 1);
+                } else if (val == 10) {
+                    // SILENT change: no updateHostDisplay — only the engine's
+                    // 2000 ms safety-net timer can detect this one.
+                    setLatencySamples(2048);
+                    logLatency("silent", 2048, 0);
+                } else if (val == 20) {
+                    flickerLeft = 40;   // 40 toggles @ 4 blocks, settles at 1024 (see processBlock)
+                    flickerValue = 0;
+                    flickerBlocks = 0;
+                }
+            }
             else if (num == 120 || num == 123) {
                 for (auto& v : voices) {
                     if (v.channel == ch) { v.releasing = true; v.active = false; }
@@ -333,10 +388,26 @@ private:
         std::fflush(stdout);
     }
 
+    // Stage 3i: latency-command observability (SCORCH_TESTVST_LOG=1) — proves
+    // the fixture TOOK each commanded change and whether it notified, so CI
+    // can cross-check fixture notifications against the engine's republish
+    // receipts (rate-limit math).
+    void logLatency(const char* mode, int samples, int notified) {
+        static const bool enabled = std::getenv("SCORCH_TESTVST_LOG") != nullptr;
+        if (!enabled) return;
+        std::fprintf(stdout, "[testvst] latency n=%d notified=%d mode=%s blocks=%lld\n",
+                     samples, notified, mode, static_cast<long long>(blockStart));
+        std::fflush(stdout);
+    }
+
     Voice voices[kMaxVoices];
     int cc7[17] = {};   // [1..16]; 0 until received (MIDI fader default = silent)
     int cc11[17] = {};  // [1..16]
     int auxArmed = 0;   // 3e-3: CC#22 arms the aux bus (default OFF — CI peaks byte-identical)
+    // Stage 3i: CC#23 runtime-latency control state (see the header table).
+    int flickerLeft = 0;      // remaining toggles (0 = idle)
+    int flickerValue = 0;     // current flicker latency target
+    int flickerBlocks = 0;    // block counter toward the next toggle
     static constexpr float kAuxLevel = 0.25f;   // the aux bus's distinct constant level
     double sampleRate = 44100.0;
     long long blockStart = 0;

@@ -415,6 +415,75 @@ jobs:
             Remove-Item Env:\SCORCH_TESTVST_LOG -ErrorAction SilentlyContinue
           }
 
+          # Test D3 — Stage 3i: RUNTIME LATENCY TRACKING (detect, then
+          # mini-republish). The fixture's reserved CC#23 commands runtime
+          # latency changes (notified 1024/0, SILENT 2048, a 40-toggle notified
+          # flicker settling at 1024) while the transport ROLLS. The harness
+          # asserts over the wire (reuse receipt latencyMs chain, transport
+          # continuity, exactly one load-path publish); the engine.log
+          # assertions below prove the receipt discipline itself.
+          Write-Host "=== Test D3: runtime latency tracking (detect -> mini-republish, no reload) ==="
+          $env:SCORCH_TESTVST_LOG = "1"
+          $procD3 = Start-Process -FilePath "engine/build/scorch-engine.exe" -ArgumentList "--port","9384","--null-audio" -PassThru -NoNewWindow -RedirectStandardOutput "engine-d3-stdout.txt" -RedirectStandardError "engine-d3-stderr.txt"
+          Start-Sleep -Seconds 3
+          try {
+            if ($procD3.HasExited) {
+              Write-Host "Engine D3 exited early (code=$($procD3.ExitCode)). stdout:"
+              if (Test-Path engine-d3-stdout.txt) { Get-Content engine-d3-stdout.txt }
+              throw "Engine D3 process exited before test could connect"
+            }
+            node .github/scripts/test-engine-protocol.mjs 9384 latency "$env:SCAN_FIXTURES"
+            if ($LASTEXITCODE -ne 0) {
+              Write-Host "Engine D3 stdout:"
+              if (Test-Path engine-d3-stdout.txt) { Get-Content engine-d3-stdout.txt }
+              Write-Host "Engine D3 stderr:"
+              if (Test-Path engine-d3-stderr.txt) { Get-Content engine-d3-stderr.txt }
+              throw "Engine D3 runtime-latency test failed"
+            }
+            # Fixture-side proof: every CC#23 command was taken by the synth
+            # (the [testvst] latency lines name value + notified flag + mode).
+            $fx = Get-Content "engine-d3-stdout.txt" | Select-String -Pattern "\[testvst\] latency n=(\d+) notified=(\d) mode=(\w+)"
+            if (($fx | Measure-Object).Count -lt 8) { throw "3i fixture-side proof missing: expected >= 8 [testvst] latency lines, got $(($fx | Measure-Object).Count)" }
+            $modes = $fx.Matches | ForEach-Object { $_.Groups[3].Value }
+            if (-not ($modes -contains "cc") -or -not ($modes -contains "silent") -or -not ($modes -contains "settle")) { throw "3i fixture-side proof incomplete: cc/silent/settle modes must all appear ($($modes -join ','))" }
+            Write-Host "3i fixture-side proof: $(($fx | Measure-Object).Count) latency command(s) taken (cc/silent/flicker/settle)"
+            # Engine.log receipts: the republish discipline itself. inst-lat is
+            # unique to D3, so these counts are isolated from the other tests.
+            $engineLog = Join-Path $env:APPDATA "scorch\engine.log"
+            $latRepub = (Select-String -Path $engineLog -Pattern "\[latency\] republish instance=inst-lat old=(\d+) new=(\d+) samples").Count
+            if ($latRepub -lt 5) { throw "3i receipt missing: expected >= 5 '[latency] republish' receipts for inst-lat (up/down/silent/flicker/final), got $latRepub" }
+            if ($latRepub -gt 15) { throw "3i rate-limit broken: $latRepub republish receipts for inst-lat exceeds the 15 bound (one per instance per second)" }
+            $latDeferred = (Select-String -Path $engineLog -Pattern "\[latency\] republish deferred — rate limit .* instance=inst-lat").Count
+            if ($latDeferred -lt 1) { throw "3i receipt missing: the flicker must have hit the one-per-second rate limit at least once (deferred receipt)" }
+            # The commanded correction pairs must ALL appear (order-insensitive;
+            # mid-flicker pairs vary by drain timing):
+            foreach ($pair in @("old=128 new=1024", "old=1024 new=0", "old=0 new=2048")) {
+              $hit = Select-String -Path $engineLog -Pattern ("\[latency\] republish instance=inst-lat " + [regex]::Escape($pair))
+              if (-not $hit) { throw "3i receipt missing: no '[latency] republish ... $pair' for inst-lat in engine.log" }
+            }
+            $finalPair = Select-String -Path $engineLog -Pattern "\[latency\] republish instance=inst-lat old=\d+ new=1024 samples"
+            if (-not $finalPair) { throw "3i final-state receipt missing: no republish landing inst-lat at 1024 after the flicker settle" }
+            $pubSummaries = (Select-String -Path $engineLog -Pattern "\[latency\] publish: swapped set corrected=").Count
+            if ($pubSummaries -lt 4) { throw "3i receipt missing: expected >= 4 '[latency] publish: swapped set' summaries, got $pubSummaries" }
+            # NO-RELOAD proof: exactly ONE load-path publish for inst-lat (the
+            # initial load) — every correction rode the mini-republish, and the
+            # five mid-play event swaps took the reuse fast path.
+            $loadedLat = (Select-String -Path $engineLog -Pattern "\[plugin\] loaded name=.* instance=inst-lat").Count
+            if ($loadedLat -ne 1) { throw "3i no-reload proof failed: inst-lat must publish through the load path EXACTLY once, got $loadedLat" }
+            $reuseLat = (Select-String -Path $engineLog -Pattern "\[plugin\] reuse while playing.*instance=inst-lat").Count
+            if ($reuseLat -ne 5) { throw "3i reuse proof failed: expected exactly 5 mid-play reuse receipts for inst-lat, got $reuseLat" }
+            # NO-DISRUPTION proof: no editor traffic for this engine session —
+            # the correction path must never touch editors (the D3 engine opens
+            # none; any [editor] receipt would name an unexpected path).
+            Write-Host "3i engine.log receipts: $latRepub republish(es) (all pairs present), $latDeferred deferred, $loadedLat load-path publish, $reuseLat reuse, $pubSummaries publish summaries"
+            $procD3.WaitForExit(20000) | Out-Null
+            if (-not $procD3.HasExited -or $procD3.ExitCode -ne 0) { throw "Engine D3 did not exit cleanly (code=$($procD3.ExitCode))" }
+            Write-Host "Engine D3 clean exit 0 (runtime-latency tracking verified)"
+          } finally {
+            Stop-Process -Id $procD3.Id -Force -ErrorAction SilentlyContinue
+            Remove-Item Env:\SCORCH_TESTVST_LOG -ErrorAction SilentlyContinue
+          }
+
           # Test E — Stage 3c-hotfix: REAL-PROJECT-SIZED load. The CI gap was
           # scale; this closes it: a deterministic 13,824-event (~1.1 MB)
           # fixture is sent as ONE load message and the loadAck receipt must

@@ -2011,3 +2011,103 @@ filter — is GitHub-documented paths-filter behavior and is not exercised
 by this push (this commit touches desktop.yml, which was already listed).
 No engine, protocol, shell, or frontend change: engine stays 0.8.4,
 protocol 1 unchanged, no version bump (3g CI-fix precedent).
+
+## Stage 3i — runtime latency tracking: detect, then mini-republish (tag `latency-republish-v1`, engine 0.8.5)
+
+**The defect: a one-shot latency snapshot.** `InstanceSet::slotLatency` — the
+F4 per-instance dispatch-early shift the audio callback reads per buffer —
+was populated exactly twice per instance: at loadHostedPlugin's prepare and
+at audioDeviceAboutToStart. Nothing ever re-read `getLatencySamples()` from
+a live instance afterwards, and VST3 plugins may change their REPORTED
+latency at any time (convolution IR loading, sampler re-buffering on patch
+change, look-ahead changes). When that happened the F4 shift stayed wrong
+forever — the instance played audibly early/late against the others until a
+reload — and a plugin reporting 0 at prepare time (the 3e-1 comment already
+admitted some do) had that 0 baked in permanently. The design (per-buffer
+shift from the published set) was never wrong; only the snapshot was.
+
+**Three producers, one republish job.** (1) A `juce::AudioProcessorListener`
+per hosted instance, registered right after the load-time prepare and
+detached in `~HostedPlugin` (the destructor is the single detach point: the
+janitor's free, superseded-load discards, and any other death path are all
+covered, and the wrapper can never fire into a dying listener during its own
+teardown). (2) A `juce::Timer` on the message thread, every 2000 ms, as the
+safety net for plugins that change WITHOUT notifying — it owns the
+2-identical-reads debounce (a candidate must be seen identical on two
+consecutive polls before acting; wrappers wobble during startup and patch
+loads). (3) `audioDeviceAboutToStart`, which re-prepares every live instance
+and refreshes `HostedPlugin::latencySamples` but could never touch the
+PUBLISHED set — it now feeds the same republish job with the freshly
+prepared values, making device (re)start just another producer.
+
+**The listener callback is a bare atomic store — and that is load-bearing.**
+A plugin may notify from ANY thread, including its own realtime context
+(which under this engine IS our audio thread inside processBlock). The
+obvious `MessageManager::callAsync` scheduling would allocate on the
+NOTIFYING thread — a new allocation path on the audio thread, forbidden by
+the engine's no-lock/no-alloc contract. So the callback only stores a
+per-instance flag, and the flags are drained by the init worker's 100 ms
+loop (the engine's existing plugin-facing worker — `releaseResources`
+already runs there) plus the message-thread timer. This is a deliberate
+deviation from the "enqueue for the message thread" wording: the READS stay
+off the audio thread, which is the invariant that actually matters, and the
+init-worker drain is also what makes the one-per-second rate limit
+REACHABLE — with only a 2 s timer enqueuing, enqueue events could never
+cluster within one second and the limit would be dead code (observed in
+local validation: a 1.9 s flicker fit entirely between two timer drains and
+produced zero deferrals until the fast drain existed). The getter comment
+states the real mechanism: `getLatencySamples()` returns the wrapper's
+cached sample count, which JUCE refreshes when the plugin calls
+`restartComponent(kLatencyChanged)` — it is read on the init worker or the
+message thread, never the audio thread.
+
+**The mini-republish is a CAS loop, and `h->latencySamples` is NOT merely
+receipt-only.** The validated correction is enqueued to the plugin init
+thread (jobs coalesce per instance — at most one queued correction per
+instance), and the job rebuilds a NEW immutable `InstanceSet` from a FRESH
+`g_instances` load, changing ONLY `slotLatency` for surviving candidates,
+then commits through `compare_exchange_strong`: every retry rebuilds from
+the fresh value CAS deposited, so a concurrent load publish can never be
+clobbered (the loser re-applies onto the newer set); an instance gone
+between detection and publish is dropped silently. NO plugin is retired and
+NO retire queue is touched — every HostedPlugin pointer is shared with the
+new set, and the replaced set container frees via the shared_ptr refcount
+exactly like every other replaced set. The audio thread's only change: a
+later buffer loads the corrected set — the exact mechanism the score/mix
+publishes already prove — with ONE buffer of timing discontinuity accepted
+and logged on every correction. `g_pluginLatencySamples` (max) is recomputed
+in the same publish. And the "benign receipt-only" write is nothing of the
+sort: the load path rebuilds `slotLatency` from `h->latencySamples` for BOTH
+fresh and retained instances, so the job MUST refresh that member or the
+NEXT load resurrects the stale value — the local test proves the correction
+survives five mid-play loads via the reuse receipts' latencyMs chain.
+
+**Rate limit, oscillation, and the past.** At most one enqueued republish
+per instance per second; a suppressed candidate stays pending (its value
+updated in place) so the final state always converges, and each suppression
+episode is named ONCE ("[latency] republish deferred — rate limit").
+Latency increases while playing do NOT retro-correct events already
+dispatched under the old shift — the same "past never resurrects" clamp
+rule as F4. Multiple instances changing in the same window ride one combined
+republish with individual receipts.
+
+**What CI proves and what only hands can.** The `latency` protocol mode
+(Test D3, port 9384) drives the fixture's RESERVED CC#23 through notified
+1024/0, a SILENT 2048 (no `updateHostDisplay` — only the safety net can see
+it), and a 40-toggle notified flicker from INSIDE processBlock (the
+realtime-notification shape) settling at 1024. The wire proof is the reuse
+receipts' latencyMs chain [128, 128, 1024, 0, 2048, 1024] — every
+correction landed AND survived a mid-play load — plus transport continuity
+(ticks advance through every window, playing never drops, no error, no
+load_rejected) and exactly ONE load-path publish (no re-instantiate).
+desktop.yml additionally asserts the engine.log discipline: ≥5 and ≤15
+republish receipts (the bounds bracket the commanded corrections and the
+one-per-second limit), the exact commanded pairs, ≥1 deferred receipt, the
+publish summaries, and the fixture's own [testvst] latency command log.
+Correction LATENCY bounds (≤ ~2.2 s notified, ≤ ~4.5 s silent) were
+observed with wall-clock stamps in local validation but are only bounded by
+design in CI. The REAL Falcon/BBCSO behaviour — when real libraries change
+their latency, how the correction sounds under a rolling transport, whether
+the one-buffer discontinuity is audible in mix context — remains by-ear on
+real Windows with the shipped installer. Engine 0.8.4 → 0.8.5; protocol 1
+unchanged; frontend and shell byte-untouched.

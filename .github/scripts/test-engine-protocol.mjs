@@ -108,6 +108,31 @@
 //     be NAMED (skipped=1, firstErrorIndex=index). Then a clean load is
 //     restored and the transport contract re-verified at scale (play → ticks
 //     advance → stop).
+//   latency (argv[4] = fixture dir) — Stage 3i: RUNTIME LATENCY TRACKING.
+//     Loads the test synth (reports 128 samples from its constructor), starts
+//     the transport, then drives the fixture's RESERVED CC#23 through a
+//     scripted sequence of mid-play event loads and asserts — ALL over the
+//     wire — that the engine detects and mini-republishes every latency
+//     change WITHOUT a reload:
+//       CC#23 v=1  (notified 1024) → the NEXT mid-play load's reuse
+//                  plugin_state carries latencyMs ≈ 34.83 ((1024+512)/44.1)
+//                  — the correction landed AND survived a mid-play load;
+//       CC#23 v=0  (notified 0)    → next reuse latencyMs ≈ 11.61;
+//       CC#23 v=10 (SILENT 2048 — no updateHostDisplay) → the 2000 ms
+//                  message-thread safety net + its 2-identical-reads debounce
+//                  must catch it → next reuse latencyMs ≈ 58.05;
+//       CC#23 v=20 (NOTIFIED FLICKER: 40× 0↔1024 from INSIDE processBlock,
+//                  settling at 1024) → the per-instance one-per-second rate
+//                  limit holds (engine.log receipts counted by desktop.yml)
+//                  and the final reuse latencyMs ≈ 34.83 (settled value).
+//     Transport continuity: playing states keep streaming and the tick
+//     ADVANCES across every correction window (no transportGen hiccup), no
+//     error/load_rejected after the initial load, and plugin_state "loaded"
+//     arrives EXACTLY 6× (1 initial + 5 mid-play reuse) — the corrections
+//     ride the mini-republish, never a re-instantiate.
+//     The engine.log receipts themselves ([latency] republish old→new pairs,
+//     the deferred rate-limit receipt, publish summaries) are asserted by
+//     desktop.yml after the session.
 
 // Stage 3f-3a runner-only imports: the Windows host-hwnd holder spawns a
 // PowerShell WinForms form and reads its HWND from a file (everything else
@@ -376,10 +401,62 @@ const timeout = setTimeout(() => {
 // loaded-receipt bound is asserted EXPLICITLY per phase below — but the
 // wall-clock budget still covers them, plus the Stage 3h stall probe (a 2.5 s
 // audio freeze + its tail): 120 s.
-}, mode === "scan" ? 180000 : mode === "host" ? 60000 : mode === "multi" ? 120000 : 30000);
+}, mode === "scan" ? 180000 : mode === "host" ? 60000 : mode === "multi" ? 120000 : mode === "latency" ? 90000 : 30000);
 
 // scan-mode flags
 let scanSent = false, scanResultOk = false, aliveAfterCrashOk = false, defaultScanOk = false;
+
+// ── Stage 3i latency-mode state (see the header docs) ──
+const LAT_META = { bpm: 120, ppqn: 960, timeSignature: { numerator: 4, denominator: 4 }, endTick: 115200 };
+let latPhase = 0;              // 0 hello, 1 scanning, 2 loading, 3 playing, 4 sequence running
+let latPlugin = null;
+let latSeq = 10;               // mid-play event loads use seq 11..15 (seq 1 = the initial load)
+let latLoadedReceipts = [];    // latencyMs per plugin_state "loaded" (1 initial + 5 reuse, IN ORDER)
+let latLastTick = 0;           // last observed transport tick (playing states)
+let latTickAtLoad = {};        // seq → tick when that load was SENT (each CC rides lastTick + 960)
+let latErrorAfterLoad = false;
+
+// The fixture's plugin_state latencyMs = (h->latencySamples + 512) / 44100 * 1000
+// (the engine's standing receipts formula) — this helper is the EXPECTED value
+// for a given corrected slotLatency.
+const latLatencyMs = (samples) => (samples + 512) / 44100.0 * 1000.0;
+
+function latEvents(ccVal) {
+  const evs = [{ eventType: "NOTE_ON", channel: 1, data1: 60, data2: 100, timestampTicks: 0, trackId: "t1" }];
+  if (ccVal !== undefined)
+    evs.push({ eventType: "CONTROL_CHANGE", channel: 1, data1: 23, data2: ccVal,
+               timestampTicks: latLastTick + 960, trackId: "t1" });
+  return evs;
+}
+
+function latSendLoad(ccVal) {
+  latSeq += 1;
+  latTickAtLoad[latSeq] = latLastTick;
+  console.log(`[test] L: mid-play event load seq ${latSeq} (CC#23 ${ccVal === undefined ? "—" : "v=" + ccVal} at tick ${latLastTick + 960})`);
+  ws.send(JSON.stringify({
+    type: "load", seq: latSeq, events: latEvents(ccVal), meta: LAT_META,
+    plugins: [{ instanceId: "inst-lat", uid: latPlugin.uid, path: latPlugin.path, name: latPlugin.name }],
+    routing: { t1: { inst: "inst-lat", ch: 1 } },
+  }));
+}
+
+// The CC#23 sequence (windows sized so every correction has landed before the
+// NEXT load's reuse receipt reads h->latencySamples):
+//   +0.5s  v=1  notified 1024   → lands ≤ ~3.2s (flag drain ≤ 2s timer + 100ms job)
+//   +5.0s  v=0  notified 0
+//   +9.5s  v=10 SILENT 2048     → safety net: 2 debounce polls (2s each) → ≤ ~14.5s
+//   +17.0s v=20 NOTIFIED FLICKER (40 toggles ≈ 1.9s, settles 1024) → rate-limited
+//          publishes + final convergence ≤ ~4.5s post-settle
+//   +26.0s probe load (no CC)   → its reuse receipt PROVES the settled 1024
+function latRun() {
+  console.log("[test] L: transport rolling — driving the CC#23 runtime-latency sequence");
+  setTimeout(() => latSendLoad(1), 500);
+  setTimeout(() => latSendLoad(0), 5000);
+  setTimeout(() => latSendLoad(10), 9500);
+  setTimeout(() => latSendLoad(20), 17000);
+  setTimeout(() => latSendLoad(undefined), 26000);
+  setTimeout(() => { console.log("[test] L: sequence complete — shutdown (engine.log receipts asserted by desktop.yml)"); finishAndShutdown(); }, 30500);
+}
 // Stage 3f-7: lazy-probe phase machine (silence → explicit-synth →
 // explicit-crash → probeAll), the silence deadline, the probeAll receipt
 // count, and whether the transport-pause probe ran.
@@ -664,9 +741,9 @@ ws.addEventListener("message", (event) => {
     }
     if (msg.type === "hello" && multiPhase === 0) {
       if (msg.protocol !== 1) fail(`expected protocol 1, got ${msg.protocol}`);
-      if (msg.engineVersion !== "0.8.4") fail(`expected 0.8.4, got ${msg.engineVersion}`);
+      if (msg.engineVersion !== "0.8.5") fail(`expected 0.8.5, got ${msg.engineVersion}`);
       if (!fixtureDir) fail("multi mode requires a fixture dir argument");
-      console.log("[test] hello OK (0.8.4) — scanning for the stand-in host plugin...");
+      console.log("[test] hello OK (0.8.5) — scanning for the stand-in host plugin...");
       multiPhase = 1;
       ws.send(JSON.stringify({ type: "scan", dirs: [fixtureDir] }));
     } else if (msg.type === "scan_result" && multiPhase === 1) {
@@ -1274,7 +1351,7 @@ ws.addEventListener("message", (event) => {
     if (msg.type === "hello" && !helloOk) {
       helloOk = true;
       if (msg.protocol !== 1) fail(`expected protocol 1, got ${msg.protocol}`);
-      if (msg.engineVersion !== "0.8.4") fail(`expected 0.8.4, got ${msg.engineVersion}`);
+      if (msg.engineVersion !== "0.8.5") fail(`expected 0.8.5, got ${msg.engineVersion}`);
       if (!fixtureDir) fail("scan mode requires a fixture dir argument");
       console.log("[test] hello OK — sending scan of fixture dir + nested dir (dedup proof):", fixtureDir);
       scanSent = true;
@@ -1430,12 +1507,66 @@ ws.addEventListener("message", (event) => {
     return;
   }
 
+  if (mode === "latency") {
+    // ── Stage 3i: runtime latency tracking (detect, then mini-republish) ──
+    if (msg.type === "hello" && latPhase === 0) {
+      if (msg.protocol !== 1) fail(`expected protocol 1, got ${msg.protocol}`);
+      if (msg.engineVersion !== "0.8.5") fail(`expected 0.8.5, got ${msg.engineVersion}`);
+      if (!fixtureDir) fail("latency mode requires a fixture dir argument");
+      helloOk = true;
+      latPhase = 1;
+      console.log("[test] hello OK (0.8.5) — scanning for the stand-in host plugin...");
+      ws.send(JSON.stringify({ type: "scan", dirs: [fixtureDir] }));
+    } else if (msg.type === "scan_result" && latPhase === 1) {
+      const valid = (msg.plugins ?? []).find((p) => p.name === "Scorch Test Synth");
+      if (!valid) fail(`latency mode: stand-in plugin not found in scan (${JSON.stringify(msg.plugins)})`);
+      latPlugin = valid;
+      latPhase = 2;
+      console.log(`[test] stand-in found: "${valid.name}" — loading inst-lat (reported latency 128 samples)`);
+      ws.send(JSON.stringify({
+        type: "load", seq: 1,
+        events: latEvents(undefined), meta: LAT_META,
+        plugins: [{ instanceId: "inst-lat", uid: valid.uid, path: valid.path, name: valid.name }],
+        routing: { t1: { inst: "inst-lat", ch: 1 } },
+      }));
+    } else if (msg.type === "plugin_state" && msg.state === "loaded") {
+      if (msg.instanceId !== "inst-lat") fail(`latency mode: plugin_state for unexpected instance ${msg.instanceId}`);
+      latLoadedReceipts.push(msg.latencyMs);
+      if (latLoadedReceipts.length === 1) {
+        if (Math.abs(msg.latencyMs - latLatencyMs(128)) > 0.5)
+          fail(`initial plugin_state latencyMs ${msg.latencyMs} ≠ the fixture's 128-sample expectation ${latLatencyMs(128).toFixed(2)}`);
+        latPhase = 3;
+        console.log(`[test] L: inst-lat loaded (latencyMs ${msg.latencyMs.toFixed(2)}) — transport play`);
+        ws.send(JSON.stringify({ type: "transport", command: "play", tick: 0 }));
+      }
+      // Receipts 2..6 are the mid-play REUSE receipts — their latencyMs values
+      // ARE the wire proof that each correction landed AND survived a
+      // mid-play load; validated in order at close.
+    } else if (msg.type === "state" && latPhase === 3 && msg.playing === true) {
+      latLastTick = msg.tick;
+      latPhase = 4;
+      latRun();
+    } else if (msg.type === "state" && latPhase >= 4) {
+      if (msg.playing !== true)
+        fail(`latency mode: transport LEFT the playing state mid-sequence (playing=${msg.playing}, tick=${msg.tick}) — a correction disrupted the transport`);
+      if (msg.tick < latLastTick)
+        fail(`latency mode: transport tick REGRESSED (${latLastTick} → ${msg.tick}) — transportGen hiccup`);
+      latLastTick = msg.tick;
+    } else if (msg.type === "error" && latPhase >= 3) {
+      latErrorAfterLoad = true;
+      fail(`latency mode: engine sent error ${msg.code} mid-sequence — a correction disrupted the protocol`);
+    } else if (msg.type === "load_rejected") {
+      fail(`latency mode: mid-play load rejected — the same-set reload must take the reuse fast path: ${JSON.stringify(msg)}`);
+    }
+    return;
+  }
+
   if (mode === "null-audio") {
     // ── Full protocol suite + RESUME contract (null device) ──
     if (msg.type === "hello" && !helloOk) {
       helloOk = true;
       if (msg.protocol !== 1) fail(`expected protocol 1, got ${msg.protocol}`);
-      if (msg.engineVersion !== "0.8.4") fail(`expected 0.8.4, got ${msg.engineVersion}`);
+      if (msg.engineVersion !== "0.8.5") fail(`expected 0.8.5, got ${msg.engineVersion}`);
       // Stage 3c close-out: the dispatch ledger streams what the engine
       // ACTUALLY dispatched — the replay-burst and re-attack asserts read it.
       ws.send(JSON.stringify({ type: "dispatch_log", enable: true }));
@@ -1736,6 +1867,36 @@ ws.addEventListener("close", () => {
       process.exit(0);
     } else {
       console.error(`FAILED: loaded=${[...multiLoaded].join(",")} reuse=${multiReuseOk} reject=${multiRejectOk} wideA=${multiWideA} wideB=${multiWideB} peak=${multiPeak.toFixed(3)} caps=${[...multiCapIds].join(",")} capsCount=${JSON.stringify(multiCapsCount)} editors=${multiEdOpenB}/${multiEdFocusB}/${multiEdOpenA}/${multiEdCloseA}/${multiEdCloseB} headlessSkip=${multiHeadlessSkip} stall3h=${multi3hLoaded}/2`);
+      process.exit(1);
+    }
+  } else if (mode === "latency") {
+    // ── Stage 3i close-time validation ──
+    // The reuse receipts' latencyMs sequence IS the wire proof:
+    //   #1 initial 128 → #2 (CC 1024 armed, pre-correction) 128 →
+    //   #3 (after the 1024 correction) 1024 → #4 (after the 0 correction) 0 →
+    //   #5 (after the SILENT 2048 correction — timer + debounce) 2048 →
+    //   #6 (after the flicker settles at 1024 + drains) 1024.
+    const expect = [128, 128, 1024, 0, 2048, 1024];
+    const countOk = latLoadedReceipts.length === 6;
+    const seqOk = countOk && expect.every((s, i) =>
+      Math.abs(latLoadedReceipts[i] - latLatencyMs(s)) <= 0.5);
+    // Transport continuity: the final tick must be past EVERY CC's dispatch
+    // tick — the transport kept rolling through all five correction windows.
+    const ticksOk = [11, 12, 13, 14, 15].every((sq) =>
+      latLastTick > (latTickAtLoad[sq] ?? Number.MAX_SAFE_INTEGER) + 960);
+    allOk = helloOk && countOk && seqOk && ticksOk && !latErrorAfterLoad && latPhase >= 4;
+    if (allOk) {
+      console.log("");
+      console.log("========================================");
+      console.log("ALL RUNTIME-LATENCY TESTS PASSED (3i):");
+      console.log("  detected+republished: 128->1024 (notified), 1024->0 (notified), 0->2048 (SILENT — 2000ms safety net + 2-identical-reads debounce), flicker 0<->1024 rate-limited to settle 1024");
+      console.log(`  reuse receipt latencyMs chain: [${latLoadedReceipts.map((v) => v.toFixed(2)).join(", ")}] — every correction survived a mid-play load (no re-instantiate)`);
+      console.log(`  transport continuity: tick ${latLastTick} past every CC dispatch tick; playing never dropped; no error mid-sequence`);
+      console.log("  engine.log receipts ([latency] republish old->new, deferred rate-limit, publish summaries) asserted by desktop.yml");
+      console.log("========================================");
+      process.exit(0);
+    } else {
+      console.error(`FAILED: hello=${helloOk} receipts=${latLoadedReceipts.length}/6 chain=[${latLoadedReceipts.map((v) => v.toFixed(2)).join(", ")}] expectMs=[${expect.map((s) => latLatencyMs(s).toFixed(2)).join(", ")}] ticks=${ticksOk}(last=${latLastTick}) err=${latErrorAfterLoad} phase=${latPhase}`);
       process.exit(1);
     }
   } else if (mode === "host") {

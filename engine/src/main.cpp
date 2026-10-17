@@ -210,7 +210,7 @@
 
 namespace {
 
-constexpr const char* kEngineVersion = "0.8.4";
+constexpr const char* kEngineVersion = "0.8.5";
 constexpr int kProtocolVersion = 1;
 constexpr int kDefaultPort = 9377;
 constexpr int kMaxVoices = 64;
@@ -610,6 +610,63 @@ struct BusRouting {
     float gain = 1.0f;
     bool mute = false;
 };
+// ─── Stage 3i — runtime latency tracking (detect, then mini-republish) ─────
+// WHY: InstanceSet::slotLatency (the F4 per-instance dispatch-early shift) was
+// populated exactly twice per instance — at loadHostedPlugin's prepare and at
+// audioDeviceAboutToStart — and never re-read afterwards. A VST3 plugin that
+// changes its REPORTED latency at runtime (convolution IR loading, sampler
+// re-buffering on patch change, look-ahead changes) therefore kept the WRONG
+// shift forever: it played audibly early/late against the others until a
+// reload. The fix follows "detect, then mini-republish": three producers feed
+// ONE immutable-republish job (nothing on the audio thread changes except
+// that a later buffer loads a corrected set — the exact mechanism the
+// score/mix publishes already prove):
+//   (1) a juce::AudioProcessorListener per hosted instance, registered right
+//       after loadHostedPlugin's prepare and detached in ~HostedPlugin (so it
+//       can never outlive the wrapper it is registered on). The callback MUST
+//       stay allocation-free and lock-free: a plugin may notify from its own
+//       realtime context (our audio thread inside processBlock), so the only
+//       thing it does is store a per-instance atomic flag — scheduling the
+//       read with MessageManager::callAsync would allocate on the notifying
+//       thread. The flags are drained by the init worker's 100 ms loop (the
+//       engine's existing plugin-facing worker — fast path, no debounce) and
+//       by the message-thread timer below.
+//   (2) a juce::Timer on the message thread (2000 ms) — the safety net for
+//       plugins that change WITHOUT notifying, and the pump for the flags
+//       set by (1). It also owns the 2-identical-reads debounce for the
+//       walk path (wrappers wobble during startup/patch loads).
+//   (3) audioDeviceAboutToStart, which re-prepares every live instance and
+//       refreshes HostedPlugin::latencySamples but could never touch the
+//       PUBLISHED set — it now feeds the same republish job with the freshly
+//       prepared values.
+// getLatencySamples() is read on the message thread or the init worker only
+// (never the audio thread): it returns the wrapper's cached sample count,
+// which JUCE refreshes when the plugin calls restartComponent(kLatencyChanged)
+// (the VST3 wrapper forwards an inner updateHostDisplay(latencyChanged) to
+// the host listeners). The validated correction is enqueued to the plugin
+// init thread, which rebuilds a NEW immutable InstanceSet (same HostedPlugin
+// pointers, same slots, same routing — ONLY slotLatency changes) and commits
+// it through a compare_exchange_strong loop on g_instances. The published set
+// is NEVER mutated in place — the immutability contract is load-bearing (the
+// audio callback takes one acquire load per buffer and reasons on set
+// identity; the old set frees via the shared_ptr refcount exactly like every
+// other replaced set, and NO plugin is retired by a latency republish because
+// every pointer is shared with the new set).
+class LatencyListener : public juce::AudioProcessorListener {
+public:
+    explicit LatencyListener(std::atomic<bool>* flag) : notified(flag) {}
+    void audioProcessorChanged(juce::AudioProcessor*, const ChangeDetails& details) override {
+        // Realtime-safe by construction: one relaxed store, nothing else.
+        if (details.latencyChanged) notified->store(true, std::memory_order_release);
+    }
+    void audioProcessorParameterChanged(juce::AudioProcessor*, int, float) override {}
+    void audioProcessorParameterChangeGestureBegin(juce::AudioProcessor*, int) override {}
+    void audioProcessorParameterChangeGestureEnd(juce::AudioProcessor*, int) override {}
+
+private:
+    std::atomic<bool>* notified;
+};
+
 struct HostedPlugin {
     std::unique_ptr<juce::AudioPluginInstance> instance;
     std::string name, vendor;
@@ -643,6 +700,18 @@ struct HostedPlugin {
     std::vector<int> outputBusChannels;
     int totalOutputChannels = 0;
     std::vector<BusRouting> outputRouting;   // optional per-load routing
+    // Stage 3i — runtime latency tracking (see the block above HostedPlugin).
+    // The listener is registered right after the load-time prepare and stays
+    // attached for the instance's whole life; the destructor detaches it so
+    // the wrapper can never fire into a dying listener during its own
+    // teardown (JUCE wrapper destruction can flush pending notifications).
+    std::unique_ptr<LatencyListener> latencyListener;
+    std::atomic<bool> latencyNotified{false};
+
+    ~HostedPlugin() {
+        if (latencyListener && instance)
+            instance->removeListener(latencyListener.get());
+    }
 };
 // Immutable slot-ordered set published behind ONE atomic shared_ptr (same
 // publication pattern as RoutingTable/ScoreSnapshot — the audio callback
@@ -667,6 +736,175 @@ std::atomic<std::shared_ptr<const InstanceSet>> g_instances;
 // Legacy convenience: max live latency, mirrored for receipts/compensation
 // messages (the per-event F4 shift uses InstanceSet.slotLatency).
 std::atomic<int> g_pluginLatencySamples{0};
+
+// ─── Stage 3i implementation — detection state, producers, republish job ────
+// THREAD MAP (audio safety):
+//   * audio thread: NOTHING new. The LatencyListener callback stores one
+//     atomic flag; a later buffer simply loads the corrected set.
+//   * message thread (the juce::Timer pump): the 2000 ms safety-net walk
+//     (2-identical-reads debounce) plus flag drains; audioDeviceAboutToStart
+//     feeds the same enqueue path.
+//   * plugin init thread: the 100 ms flag drain (the fast notified path), job
+//     consumption, the CAS publish, and the receipts.
+struct LatencyCorrection { std::string instanceId; int newValue; };
+
+// ONE mutex guards the detection state (pending map + rate-limit stamps) AND
+// the job queue. Taken by the message thread (timer), the init thread (its
+// 100 ms flag drain + job consumption), and AboutToStart — NEVER by the audio
+// thread (the listener callback is a bare atomic store).
+std::mutex g_latencyJobMutex;
+std::vector<std::vector<LatencyCorrection>> g_latencyJobs;       // queued mini-republish jobs
+struct LatencyPending { int value = 0; bool deferNamed = false; };
+std::unordered_map<std::string, LatencyPending> g_latencyPending;    // guarded by g_latencyJobMutex
+std::unordered_map<std::string, std::chrono::steady_clock::time_point> g_latencyLastEnqueue;  // guarded by g_latencyJobMutex
+
+// Enqueue a VALIDATED correction (value ≠ published). Message thread or init
+// worker (never the audio thread). Rate limit: at most one enqueued republish
+// per instance per second — the limit bites because the init worker's 100 ms
+// flag drain can cluster enqueues (a notified plugin toggling rapidly), and a
+// suppressed candidate STAYS pending so the safety net lands it once the
+// window opens; the suppression is named ONCE per episode. Jobs coalesce per
+// instance (an instance appears at most once across the whole queue), so a
+// burst of detections collapses into one publish.
+bool latencyTryEnqueue(const std::string& iid, int newVal) {
+    std::lock_guard<std::mutex> lock(g_latencyJobMutex);
+    const auto now = std::chrono::steady_clock::now();
+    auto last = g_latencyLastEnqueue.find(iid);
+    const bool rateLimited = last != g_latencyLastEnqueue.end() &&
+        std::chrono::duration_cast<std::chrono::milliseconds>(now - last->second).count() < 1000;
+    if (rateLimited) {
+        auto& pend = g_latencyPending[iid];
+        pend.value = newVal;
+        if (!pend.deferNamed) {
+            pend.deferNamed = true;   // named once per suppressed episode
+            engineLog("[latency] republish deferred — rate limit (one per instance per second) instance=" +
+                      iid + " pending=" + std::to_string(newVal) + " samples");
+        }
+        return false;
+    }
+    g_latencyLastEnqueue[iid] = now;
+    g_latencyPending.erase(iid);
+    for (auto& job : g_latencyJobs)
+        for (auto& c : job)
+            if (c.instanceId == iid) { c.newValue = newVal; return true; }   // coalesce
+    if (!g_latencyJobs.empty()) { g_latencyJobs.front().push_back({iid, newVal}); return true; }
+    g_latencyJobs.push_back(std::vector<LatencyCorrection>{LatencyCorrection{iid, newVal}});
+    return true;
+}
+
+// The drain: (a) instances the plugin EXPLICITLY notified (latencyChanged
+// flag) act immediately — the plugin confirmed the change, no debounce; (b)
+// optionally (safety walk, message-thread timer only) every live instance is
+// polled and a diff must be seen IDENTICAL on 2 consecutive polls before
+// acting. Called from the init worker's 100 ms loop (flags) AND the message
+// thread's 2000 ms timer (flags + walk).
+void latencyDrain(bool safetyWalk) {
+    const auto set = g_instances.load(std::memory_order_acquire);
+    if (set == nullptr) {
+        std::lock_guard<std::mutex> lock(g_latencyJobMutex);
+        g_latencyPending.clear();
+        return;
+    }
+    std::vector<std::pair<std::string, int>> notifiedNow;
+    for (int s = 0; s < kMaxInstances; ++s) {
+        HostedPlugin* h = set->slots[s];
+        if (h == nullptr || !h->instance) continue;
+        const bool flagged = h->latencyNotified.exchange(false, std::memory_order_acq_rel);
+        const int published = set->slotLatency[s];
+        if (flagged) {
+            const int v = static_cast<int>(h->instance->getLatencySamples());
+            if (v != published) notifiedNow.emplace_back(h->instanceId, v);
+        }
+        if (safetyWalk && !flagged) {
+            const int v = static_cast<int>(h->instance->getLatencySamples());
+            if (v == published) continue;
+            // Decide under the lock, act OUTSIDE it (latencyTryEnqueue takes
+            // the same non-recursive mutex — a nested call would deadlock).
+            bool act = false;
+            {
+                std::lock_guard<std::mutex> lock(g_latencyJobMutex);
+                auto pit = g_latencyPending.find(h->instanceId);
+                if (pit != g_latencyPending.end() && pit->second.value == v) act = true;   // second identical poll
+                else g_latencyPending[h->instanceId] = {v, false};                         // first sighting — wait one poll
+            }
+            if (act) latencyTryEnqueue(h->instanceId, v);
+        }
+    }
+    for (const auto& c : notifiedNow) latencyTryEnqueue(c.first, c.second);
+    // A candidate whose instance vanished (retired/failed) is dropped — the
+    // republish job re-checks against a fresh load anyway, this just keeps
+    // the map from holding dead entries.
+    std::lock_guard<std::mutex> lock(g_latencyJobMutex);
+    for (auto it = g_latencyPending.begin(); it != g_latencyPending.end();) {
+        if (set->byId(it->first) == nullptr) it = g_latencyPending.erase(it);
+        else ++it;
+    }
+}
+
+class LatencyWatchTimer : public juce::Timer {
+public:
+    void timerCallback() override { latencyDrain(true); }
+};
+LatencyWatchTimer* g_latencyWatch = nullptr;   // created ON the message thread (mm pump)
+
+// The mini-republish job (plugin init thread): rebuild a NEW immutable set
+// from a FRESH g_instances load, change ONLY slotLatency for the surviving
+// candidates, and commit via a compare_exchange_strong loop — every retry
+// rebuilds from the fresh value CAS deposited in `cur`, so a load publishing
+// concurrently can never be clobbered (the loser re-applies onto the newer
+// set). An instance gone between detection and publish is dropped silently.
+// NO plugin is retired and NO retire queue is touched: every HostedPlugin
+// pointer is shared with the new set; the replaced set container frees via
+// the shared_ptr refcount (the audio thread's in-flight buffer reference is
+// the accepted pattern — see the InstanceSet block).
+struct LatencyApplied { HostedPlugin* h; int oldV; int newV; };
+void latencyRepublishJob(std::vector<LatencyCorrection> candidates) {
+    const auto t0 = std::chrono::steady_clock::now();
+    for (int attempt = 0; attempt < 8 && !g_should_exit.load(); ++attempt) {
+        auto cur = g_instances.load(std::memory_order_acquire);
+        if (cur == nullptr) return;
+        auto nextSet = std::make_shared<InstanceSet>(*cur);
+        std::vector<LatencyApplied> applied;
+        for (const auto& c : candidates) {
+            HostedPlugin* h = nextSet->byId(c.instanceId);
+            if (h == nullptr) continue;                       // gone — drop silently
+            const int oldV = nextSet->slotLatency[h->slot];
+            if (oldV == c.newValue) continue;                 // converged — no-op
+            nextSet->slotLatency[h->slot] = c.newValue;
+            applied.push_back({h, oldV, c.newValue});
+        }
+        if (applied.empty()) {
+            engineLog("[latency] publish: no effective change after rebuild — skipped");
+            return;
+        }
+        int maxLat = 0;
+        for (int s = 0; s < kMaxInstances; ++s)
+            if (nextSet->slotLatency[s] > maxLat) maxLat = nextSet->slotLatency[s];
+        if (g_instances.compare_exchange_strong(cur, nextSet,
+                                                std::memory_order_acq_rel,
+                                                std::memory_order_acquire)) {
+            // Committed. The receipt-only member is ALSO the value future
+            // load publishes rebuild slotLatency from (fresh + retained
+            // instances) — refresh it so a later load keeps the correction.
+            for (auto& a : applied) {
+                a.h->latencySamples = static_cast<double>(a.newV);
+                engineLog("[latency] republish instance=" + a.h->instanceId +
+                          " old=" + std::to_string(a.oldV) +
+                          " new=" + std::to_string(a.newV) +
+                          " samples (stage 3i)" +
+                          " — one buffer of timing discontinuity accepted");
+            }
+            g_pluginLatencySamples.store(maxLat, std::memory_order_release);
+            const long long ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                std::chrono::steady_clock::now() - t0).count();
+            engineLog("[latency] publish: swapped set corrected=" +
+                      std::to_string(applied.size()) + " elapsed=" + std::to_string(ms) + "ms");
+            return;
+        }
+        // CAS failed: `cur` now holds the newest set — loop and rebuild from it.
+    }
+    engineLog("[latency] publish: gave up after 8 CAS retries (the set kept changing) — the safety net will re-detect");
+}
 
 // ─── Stage 3d-1: plugin editor windows (engine-owned popup) ────────────────
 // Mechanism (investigated, ASSUMPTIONS.md "Stage 3d-1"): editors are JUCE
@@ -1662,6 +1900,19 @@ public:
                           device->getTypeName().toStdString() + ")");
             }
             g_pluginLatencySamples.store(maxLat, std::memory_order_release);
+            // Stage 3i — THIRD PRODUCER: the re-prepare loop above refreshed
+            // h->latencySamples and the max mirror, but the PUBLISHED set's
+            // slotLatency (what the F4 dispatch shift actually reads) was
+            // never updated. Enqueue the same mini-republish job with the
+            // freshly prepared values — device (re)start becomes just another
+            // producer of the same corrections.
+            for (int slot = 0; slot < kMaxInstances; ++slot) {
+                HostedPlugin* h = set->slots[slot];
+                if (h == nullptr || !h->instance) continue;
+                const int lat = static_cast<int>(h->instance->getLatencySamples());
+                if (lat != set->slotLatency[slot])
+                    latencyTryEnqueue(h->instanceId, lat);
+            }
         }
     }
 
@@ -2792,6 +3043,12 @@ std::string loadHostedPlugin(const juce::var& pluginVar, const std::string& inst
         hosted->name = chosen->name.toStdString();
         hosted->vendor = chosen->manufacturerName.toStdString();
         hosted->latencySamples = hosted->instance->getLatencySamples();
+        // Stage 3i: attach the runtime-latency listener (see the block above
+        // HostedPlugin). The callback stores one atomic flag — realtime-safe
+        // no matter which thread the plugin notifies from. Detached in
+        // ~HostedPlugin so the wrapper can never fire into a dying listener.
+        hosted->latencyListener = std::make_unique<LatencyListener>(&hosted->latencyNotified);
+        hosted->instance->addListener(hosted->latencyListener.get());
         hosted->uid = uid;
         hosted->path = path;
         hosted->instanceId = instanceId;
@@ -3959,6 +4216,14 @@ int main(int argc, char** argv) {
     // the WS threads and the audio path all just post to it.
     std::thread mm_pump_thread([]() {
         juce::MessageManager::getInstance();   // created ON this thread
+        // Stage 3i: the latency watchdog timer lives on the message thread —
+        // started HERE so the Timer is created on the same thread that pumps
+        // it (JUCE requirement), for the process lifetime. Every 2000 ms it
+        // drains the plugin-notification flags (immediate path, no debounce)
+        // and walks every live instance as the safety net for plugins that
+        // change WITHOUT notifying (2-identical-reads debounce there).
+        g_latencyWatch = new LatencyWatchTimer();
+        g_latencyWatch->startTimer(2000);
         // Blocks until main() calls stopDispatchLoop() at shutdown. The loop
         // is event-driven (no polling, no keep-alive): it wakes for every
         // posted JUCE message and sleeps otherwise.
@@ -4269,6 +4534,27 @@ int main(int argc, char** argv) {
                         receipts.push_back("[plugin] retire deferred — capture job still pending on the message thread instance=" + iid);
                 }
                 for (const auto& r : receipts) engineLog(r);
+            }
+            // ── Stage 3i: latency flag drain + mini-republish jobs ──
+            // The init worker is a PRODUCER-side drainer too: a plugin may
+            // notify (latencyChanged) from any thread — including its own
+            // realtime context — so the listener callback only stores an
+            // atomic flag; scheduling the read via MessageManager::callAsync
+            // would allocate on the notifying thread (audio-thread allocation
+            // ban), so THIS 100 ms loop drains the flags instead. It is the
+            // engine's existing plugin-facing worker (releaseResources already
+            // runs here), the reads stay off the audio thread, and the fast
+            // drain is also what makes the one-per-second rate limit real:
+            // rapid notifications now CLUSTER into rate-limited enqueues
+            // instead of collapsing into one flag per 2 s timer tick.
+            latencyDrain(false);
+            {
+                std::vector<std::vector<LatencyCorrection>> jobs;
+                {
+                    std::lock_guard<std::mutex> lock(g_latencyJobMutex);
+                    jobs.swap(g_latencyJobs);
+                }
+                for (auto& job : jobs) latencyRepublishJob(std::move(job));
             }
             // Stage 3d-4 hotfix — pending-open watchdog (this janitor loop is
             // the only off-MM heartbeat the engine owns; zero new threads).
