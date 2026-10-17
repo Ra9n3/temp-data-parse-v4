@@ -156,6 +156,13 @@ const url = `ws://127.0.0.1:${port}`;
 //     round-trips through it), the deferred captures' pluginSavedState
 //     broadcasts all land (the drain proof), and a post-drain load proves
 //     the fast capture path still ENDS (not TIMEOUTS).
+//   Stage 3h STALL PROBE (M-18..M-20): the audio-stall marker file
+//     (SCORCH_TEST_AUDIO_STALL_FILE, engine-process env) freezes the audio
+//     thread 2.5 s INSIDE the callback; TWO rapid replace loads (seq 7 + 8)
+//     publish WHILE frozen — both retired entries queue unprovable (the seq
+//     counter cannot advance) and may only free after the un-stall. The
+//     deferred + freed receipts and the seq >= swapSeq + 2 counter math are
+//     asserted against engine.log by desktop.yml (log-receipt assertion).
 //   clean shutdown.
 const MULTI_META = { bpm: 120, ppqn: 960, timeSignature: { numerator: 4, denominator: 4 }, endTick: 8448 };
 const multiEvents = [
@@ -203,6 +210,15 @@ let multiTSlowLoad = 0, multiTFastLoad = 0, multiTFinalLoad = 0;
 // Stage 3g CI fix: one-shot timer that DRAINS the message thread's queued
 // capture jobs before the slow-state marker is armed (see the M-12 branch).
 let multiArmTimer = null;
+// Stage 3h stall probe: the engine's env names this marker file; while it
+// EXISTS the first audio buffer to notice the appear transition freezes the
+// audio thread 2.5 s inside the callback (g_audioBufferSeq stops advancing).
+// The env var is set by desktop.yml for the ENGINE process AND inherited by
+// this script, so both sides agree on the exact path; the tmpdir default
+// covers local runs. multi3hLoaded counts the loaded receipts that arrived
+// WHILE frozen (both rapid swaps must publish with the audio thread stalled).
+const multiStallMarker = process.env.SCORCH_TEST_AUDIO_STALL_FILE || path.join(os.tmpdir(), "scorch-3h-audio-stall.marker");
+let multi3hLoaded = 0;
 // Stage 3f-6 drain-wait: the stalled retire captures complete LATER on the
 // message thread (each stall occupies the MM for its full 10 s — unkillable
 // from the host side, exactly like the real Falcon symptom) and each
@@ -348,7 +364,7 @@ const timeout = setTimeout(() => {
   } else if (mode === "host") {
     console.error(`TIMEOUT at step ${step} phase=${hostPhase} (scan=${hostScanSent} hostHwnd=${hostHwndSetOk} pluginState=${hostPluginStateOk} editorNeg=${hostEditorNegOk} editorOpen=${hostEditorOpenOk} editorFocus=${hostEditorFocusOk} editorClose=${hostEditorCloseOk} stateCap=${hostStateCaptureOk} stateRestore=${hostStateRestoreOk} stateRT=${hostStateRoundtripOk} reloadAck=${hostReloadAckOk} reject=${hostRejectOk} stillPlaying=${hostPlayingAfterReject} stops=${hostStopTick1}/${hostStopTick2} peaks A/B/C=${hostPeakA.toFixed(3)}/${hostPeakB.toFixed(3)}/${hostPeakC.toFixed(3)} entries=${hostEntries.length})`);
   } else if (mode === "multi") {
-    console.error(`TIMEOUT at step ${step} phase=${multiPhase} (scan=${multiScanPlugin ? "ok" : "none"} loaded=${[...multiLoaded].join(",")} reuse=${multiReuseOk} reject=${multiRejectOk} peak=${multiPeak.toFixed(3)} wideA=${multiWideA} wideB=${multiWideB} editors=${multiEdOpenB}/${multiEdFocusB}/${multiEdOpenA}/${multiEdCloseA}/${multiEdCloseB} headlessSkip=${multiHeadlessSkip} captures=${[...multiCapIds].join(",")} entries=${multiLedger.length})`);
+    console.error(`TIMEOUT at step ${step} phase=${multiPhase} (scan=${multiScanPlugin ? "ok" : "none"} loaded=${[...multiLoaded].join(",")} reuse=${multiReuseOk} reject=${multiRejectOk} peak=${multiPeak.toFixed(3)} wideA=${multiWideA} wideB=${multiWideB} editors=${multiEdOpenB}/${multiEdFocusB}/${multiEdOpenA}/${multiEdCloseA}/${multiEdCloseB} headlessSkip=${multiHeadlessSkip} captures=${[...multiCapIds].join(",")} entries=${multiLedger.length} stall3h=${multi3hLoaded}/2)`);
   } else {
     console.error(`TIMEOUT at step ${step} (hello=${helloOk} pong=${pongOk} load=${loadOk} noDeviceErr=${noDeviceErrOk} pongAfterErr=${pongAfterErrOk} stillFunctional=${stillFunctionalOk})`);
   }
@@ -358,8 +374,9 @@ const timeout = setTimeout(() => {
 // grows the publish-safe phase (slow-capture replace + following load) whose
 // 10 s message-thread stalls run ASYNCHRONOUSLY to the assertions — the 5 s
 // loaded-receipt bound is asserted EXPLICITLY per phase below — but the
-// wall-clock budget still covers them: 90 s.
-}, mode === "scan" ? 180000 : mode === "host" ? 60000 : mode === "multi" ? 90000 : 30000);
+// wall-clock budget still covers them, plus the Stage 3h stall probe (a 2.5 s
+// audio freeze + its tail): 120 s.
+}, mode === "scan" ? 180000 : mode === "host" ? 60000 : mode === "multi" ? 120000 : 30000);
 
 // scan-mode flags
 let scanSent = false, scanResultOk = false, aliveAfterCrashOk = false, defaultScanOk = false;
@@ -574,6 +591,39 @@ function finishAndShutdown() {
   ws.send(JSON.stringify({ type: "shutdown" }));
 }
 
+// Stage 3h proof-based reclamation probe. Arm the audio-stall marker, wait
+// out one buffer period (the freeze begins within ~12 ms of the arm — the
+// next buffer observes the transition), then run TWO rapid replace loads
+// (seq 7 + seq 8) while the audio thread is FROZEN inside the callback. Both
+// publishes complete (the init/publish path is audio-independent — the
+// loaded receipts arriving during the freeze prove it), but both retired
+// entries (inst-final, then inst-stall) queue with a swapSeq the frozen
+// counter can never prove (seq < swapSeq + 2): the OLD 250 ms grace would
+// have freed them mid-stall (use-after-free territory — the audio thread is
+// STILL inside the pre-swap buffers' world when the counter is frozen); the
+// proof-based janitor must DEFER. After the un-stall the stalled buffer
+// finishes, two buffers tick past both swapSeqs, and one janitor poll frees
+// BOTH entries together (one tick satisfying several entries — the rapid-
+// swaps edge case). The freed receipts are engine.log assertions (desktop.yml
+// checks deferred >= 2, freed >= 5, and seq >= swapSeq + 2 for EVERY freed
+// entry), so this tail holds the session open past the freeze + two buffers
+// + the ~100 ms janitor cadence BEFORE the shutdown.
+function run3hStallProbe() {
+  multiPhase = 18;
+  try { fs.unlinkSync(multiStallMarker); } catch {}
+  fs.writeFileSync(multiStallMarker, "stall");
+  console.log("[test] phase M-18 — audio-stall marker armed (the next buffer freezes the audio thread 2.5 s); swapping the set while frozen (seq 7)...");
+  setTimeout(() => {
+    ws.send(JSON.stringify({
+      type: "load", seq: 7, events: multiEvents, meta: MULTI_META,
+      plugins: [
+        { instanceId: "inst-stall", uid: multiScanPlugin.uid, path: multiScanPlugin.path, name: multiScanPlugin.name },
+      ],
+      routing: { t1: { inst: "inst-stall", ch: 1 } },
+    }));
+  }, 400);
+}
+
 // Stage 3f-6: when the message thread has DRAINED (all three deferred
 // retire-capture broadcasts seen) and the marker is disarmed (M-14, phase
 // >= 15), send the final probe load — the fast-path proof: its retire
@@ -614,9 +664,9 @@ ws.addEventListener("message", (event) => {
     }
     if (msg.type === "hello" && multiPhase === 0) {
       if (msg.protocol !== 1) fail(`expected protocol 1, got ${msg.protocol}`);
-      if (msg.engineVersion !== "0.8.3") fail(`expected 0.8.3, got ${msg.engineVersion}`);
+      if (msg.engineVersion !== "0.8.4") fail(`expected 0.8.4, got ${msg.engineVersion}`);
       if (!fixtureDir) fail("multi mode requires a fixture dir argument");
-      console.log("[test] hello OK (0.8.3) — scanning for the stand-in host plugin...");
+      console.log("[test] hello OK (0.8.4) — scanning for the stand-in host plugin...");
       multiPhase = 1;
       ws.send(JSON.stringify({ type: "scan", dirs: [fixtureDir] }));
     } else if (msg.type === "scan_result" && multiPhase === 1) {
@@ -784,13 +834,39 @@ ws.addEventListener("message", (event) => {
       if (msg.instanceId !== "inst-final") fail(`multi: post-drain load must report inst-final, got ${msg.instanceId}`);
       const dt = Date.now() - multiTFinalLoad;
       if (dt > 5000) fail(`multi: post-drain load took ${dt} ms (> 5000 ms) — capture path did not recover`);
-      console.log(`[test] phase M-17 ✓ post-drain load processed (${dt} ms; its retire capture completes — END receipt, not TIMEOUT) — shutdown`);
+      console.log(`[test] phase M-17 ✓ post-drain load processed (${dt} ms; its retire capture completes — END receipt, not TIMEOUT) — holding, then the 3h stall probe`);
       // Hold the shutdown ~1500 ms so seq-6's retire capture OBSERVABLY
-      // completes: the engine.log END receipt is a desktop.yml assertion, and
-      // an instant shutdown could race the capture's done flag into an
-      // "engine exiting" timeout instead.
-      setTimeout(finishAndShutdown, 1500);
+      // completes (as before), then run the Stage 3h proof-based reclamation
+      // probe instead of shutting down directly.
+      setTimeout(run3hStallProbe, 1500);
       multiPhase = 17;
+    } else if (msg.type === "plugin_state" && multiPhase === 18 && msg.state === "loaded") {
+      if (msg.instanceId !== "inst-stall") fail(`multi: 3h stall load must report inst-stall, got ${msg.instanceId}`);
+      multi3hLoaded++;
+      console.log("[test] phase M-18 ✓ seq-7 published WHILE the audio thread is frozen (loaded receipt during the stall — the publish path is audio-independent) — rapid swap #2 (seq 8), still frozen...");
+      multiPhase = 19;
+      ws.send(JSON.stringify({
+        type: "load", seq: 8, events: multiEvents, meta: MULTI_META,
+        plugins: [
+          { instanceId: "inst-stall2", uid: multiScanPlugin.uid, path: multiScanPlugin.path, name: multiScanPlugin.name },
+        ],
+        routing: { t1: { inst: "inst-stall2", ch: 1 } },
+      }));
+    } else if (msg.type === "plugin_state" && multiPhase === 19 && msg.state === "loaded") {
+      if (msg.instanceId !== "inst-stall2") fail(`multi: 3h rapid swap must report inst-stall2, got ${msg.instanceId}`);
+      multi3hLoaded++;
+      console.log("[test] phase M-19 ✓ seq-8 published while STILL frozen — both retired entries queued unprovable (frozen seq < swapSeq + 2). Holding the freeze, then un-stalling...");
+      multiPhase = 20;
+      // Hold the freeze ~800 more ms (a time-based 250 ms grace would have
+      // freed BOTH retired entries inside this window — engine.log must
+      // instead show the audio-proof deferrals), then remove the marker. The
+      // stalled buffer finishes its FULL sleep regardless; two buffers then
+      // tick past both swapSeqs and the janitor frees both at its next poll.
+      setTimeout(() => {
+        try { fs.unlinkSync(multiStallMarker); } catch {}
+        console.log("[test] phase M-20 — marker removed (un-stall); waiting out the freeze tail + two buffers + the janitor poll before shutdown (the freed receipts are engine.log assertions)...");
+        setTimeout(finishAndShutdown, 3500);
+      }, 800);
     } else if (msg.type === "pluginSavedState" && multiPhase >= 13) {
       // Deferred retire captures broadcast their blob when the message thread
       // finally gets to them (up to ~10 s after the init thread stopped
@@ -1198,7 +1274,7 @@ ws.addEventListener("message", (event) => {
     if (msg.type === "hello" && !helloOk) {
       helloOk = true;
       if (msg.protocol !== 1) fail(`expected protocol 1, got ${msg.protocol}`);
-      if (msg.engineVersion !== "0.8.3") fail(`expected 0.8.3, got ${msg.engineVersion}`);
+      if (msg.engineVersion !== "0.8.4") fail(`expected 0.8.4, got ${msg.engineVersion}`);
       if (!fixtureDir) fail("scan mode requires a fixture dir argument");
       console.log("[test] hello OK — sending scan of fixture dir + nested dir (dedup proof):", fixtureDir);
       scanSent = true;
@@ -1359,7 +1435,7 @@ ws.addEventListener("message", (event) => {
     if (msg.type === "hello" && !helloOk) {
       helloOk = true;
       if (msg.protocol !== 1) fail(`expected protocol 1, got ${msg.protocol}`);
-      if (msg.engineVersion !== "0.8.3") fail(`expected 0.8.3, got ${msg.engineVersion}`);
+      if (msg.engineVersion !== "0.8.4") fail(`expected 0.8.4, got ${msg.engineVersion}`);
       // Stage 3c close-out: the dispatch ledger streams what the engine
       // ACTUALLY dispatched — the replay-burst and re-attack asserts read it.
       ws.send(JSON.stringify({ type: "dispatch_log", enable: true }));
@@ -1637,7 +1713,8 @@ ws.addEventListener("close", () => {
       (multiCapsCount[iid] ?? 0) > 0 && multiCapsCount[iid] === (multiLoadedCount[iid] ?? 0));
     const editorOk = multiHeadlessSkip || (multiEdOpenB && multiEdFocusB && multiEdOpenA && multiEdCloseA && multiEdCloseB);
     allOk = multiStateOk === 2 && multiReuseOk === 2 && multiRejectOk &&
-            multiWideA && multiWideB && multiPeak > 1.0 && multiCapIds.size === 2 && capsOk && editorOk;
+            multiWideA && multiWideB && multiPeak > 1.0 && multiCapIds.size === 2 && capsOk && editorOk &&
+            multi3hLoaded === 2;
     if (allOk) {
       console.log("");
       console.log("========================================");
@@ -1652,10 +1729,13 @@ ws.addEventListener("close", () => {
         : "  editors: inst-b opens → repeat raises (focused) → inst-a opens a SECOND SIMULTANEOUS window → per-id closes");
       console.log("  captureState → one pluginSavedState PER INSTANCE (distinct instanceIds)");
       console.log(`  3e-1 capability handshake: one plugin_capabilities per loaded receipt per instance (${JSON.stringify(multiCapsCount)})`);
+      console.log("  3h retire proof: TWO rapid swaps published WHILE the audio thread was frozen 2.5 s inside the callback;");
+      console.log("           both retired entries deferred (audio proof pending) and freed only after two post-un-stall buffers");
+      console.log("           (engine.log receipts asserted by desktop.yml: deferred >= 2, freed >= 5, seq >= swapSeq + 2 for every freed entry)");
       console.log("========================================");
       process.exit(0);
     } else {
-      console.error(`FAILED: loaded=${[...multiLoaded].join(",")} reuse=${multiReuseOk} reject=${multiRejectOk} wideA=${multiWideA} wideB=${multiWideB} peak=${multiPeak.toFixed(3)} caps=${[...multiCapIds].join(",")} capsCount=${JSON.stringify(multiCapsCount)} editors=${multiEdOpenB}/${multiEdFocusB}/${multiEdOpenA}/${multiEdCloseA}/${multiEdCloseB} headlessSkip=${multiHeadlessSkip}`);
+      console.error(`FAILED: loaded=${[...multiLoaded].join(",")} reuse=${multiReuseOk} reject=${multiRejectOk} wideA=${multiWideA} wideB=${multiWideB} peak=${multiPeak.toFixed(3)} caps=${[...multiCapIds].join(",")} capsCount=${JSON.stringify(multiCapsCount)} editors=${multiEdOpenB}/${multiEdFocusB}/${multiEdOpenA}/${multiEdCloseA}/${multiEdCloseB} headlessSkip=${multiHeadlessSkip} stall3h=${multi3hLoaded}/2`);
       process.exit(1);
     }
   } else if (mode === "host") {

@@ -358,6 +358,12 @@ jobs:
           # stays fast). Only D2 opts in — A/D/E engines run without it.
           $env:SCORCH_TESTVST_SLOWSTATE_FILE = (Join-Path (Get-Location) "scorch-3f6-slowstate.marker")
           Remove-Item $env:SCORCH_TESTVST_SLOWSTATE_FILE -ErrorAction SilentlyContinue
+          # Stage 3h: the audio-stall marker — while it exists, the first
+          # audio buffer to observe the appear transition freezes the audio
+          # thread 2.5 s INSIDE the callback (the regression probe's
+          # controllable "stalled audio thread"). Only D2 opts in.
+          $env:SCORCH_TEST_AUDIO_STALL_FILE = (Join-Path (Get-Location) "scorch-3h-audio-stall.marker")
+          Remove-Item $env:SCORCH_TEST_AUDIO_STALL_FILE -ErrorAction SilentlyContinue
           $procD2 = Start-Process -FilePath "engine/build/scorch-engine.exe" -ArgumentList "--port","9383","--null-audio" -PassThru -NoNewWindow -RedirectStandardOutput "engine-d2-stdout.txt" -RedirectStandardError "engine-d2-stderr.txt"
           Start-Sleep -Seconds 3
           try {
@@ -400,6 +406,11 @@ jobs:
             # (an armed marker would stall any capture that outlives D2).
             Remove-Item $env:SCORCH_TESTVST_SLOWSTATE_FILE -ErrorAction SilentlyContinue
             Remove-Item Env:\SCORCH_TESTVST_SLOWSTATE_FILE -ErrorAction SilentlyContinue
+            # Stage 3h cleanup: same policy for the audio-stall marker (an
+            # armed marker would freeze the audio thread of any engine that
+            # outlives D2 — there are none today, but the env must not leak).
+            Remove-Item $env:SCORCH_TEST_AUDIO_STALL_FILE -ErrorAction SilentlyContinue
+            Remove-Item Env:\SCORCH_TEST_AUDIO_STALL_FILE -ErrorAction SilentlyContinue
             Remove-Item Env:\SCORCH_TESTVST_LOG -ErrorAction SilentlyContinue
           }
 
@@ -566,7 +577,33 @@ jobs:
           if ($ownerApplied -ne 1) { throw "3f-3a receipt wrong: host mode must apply the owner EXACTLY ONCE (one editor open; repeat raises), got $ownerApplied '[editor] host-owner applied' receipts" }
           $ownerSkips = (Select-String -Path $engineLog -Pattern "\[editor\] host-owner skipped \(no host hwnd\)").Count
           if ($ownerSkips -ne 2) { throw "3f-3a receipt missing: multi mode opens TWO editors (inst-a + inst-b) WITHOUT setHostWindow and must log '[editor] host-owner skipped (no host hwnd)' per open (got $ownerSkips, need 2)" }
-          Write-Host "engine.log receipt assertions passed (scale load, play, load-fail, async init, reuse, rolling-transport reject, audio config, prepare config, session peak, musical release, resume re-attacks, editor unavailable/open=x1/focus/close, state captured/restored, 3f-3a host-window set + owner applied + missing-path skips all present)"
+          # Stage 3h: proof-based reclamation. The D2 stall probe freezes the
+          # audio thread 2.5 s INSIDE the callback while TWO rapid swaps
+          # publish (seq 7 + 8); both retired entries must DEFER (audio proof
+          # pending — the counter is frozen) and free only after the un-stall.
+          # The deferred receipt proves the freeze actually held a free (the
+          # old 250 ms grace would have freed mid-stall); the freed lines'
+          # counter math — seq >= swapSeq + 2 for EVERY freed entry, plugins
+          # and scores — is the never-before-the-proof assertion (a retired
+          # object freed early would print a violating pair and throw here).
+          $audioDefers = (Select-String -Path $engineLog -Pattern "retire deferred .*audio proof pending instance=").Count
+          if ($audioDefers -lt 2) { throw "engine.log missing 3h audio-proof defer receipts (got $audioDefers, need >= 2: inst-final + inst-stall queued while the audio thread was frozen)" }
+          $pluginFrees = Select-String -Path $engineLog -Pattern "\[plugin\] retire freed instance=(\S+) swapSeq=(\d+) seq=(\d+)"
+          if ($pluginFrees.Count -lt 5) { throw "engine.log missing 3h plugin free receipts (got $($pluginFrees.Count), need >= 5: inst-a + inst-b + inst-slow + inst-fast + the stall swaps)" }
+          foreach ($m in $pluginFrees) {
+            $s = [uint64]$m.Matches[0].Groups[2].Value
+            $q = [uint64]$m.Matches[0].Groups[3].Value
+            if ($q -lt ($s + 2)) { throw "3h counter math violated: plugin $($m.Matches[0].Groups[1].Value) freed at seq $q < swapSeq $s + 2 — a retired plugin was freed before the audio proof passed (use-after-free window)" }
+          }
+          $scoreFrees = Select-String -Path $engineLog -Pattern "\[audio\] score snapshot freed swapSeq=(\d+) seq=(\d+)"
+          if ($scoreFrees.Count -lt 1) { throw "engine.log missing 3h score free receipts (got $($scoreFrees.Count), need >= 1 — retired score snapshots must free on the audio proof too)" }
+          foreach ($m in $scoreFrees) {
+            $s = [uint64]$m.Matches[0].Groups[1].Value
+            $q = [uint64]$m.Matches[0].Groups[2].Value
+            if ($q -lt ($s + 2)) { throw "3h counter math violated: score snapshot freed at seq $q < swapSeq $s + 2 — a retired score was freed before the audio proof passed" }
+          }
+          Write-Host "3h proof-based reclamation: $audioDefers audio-proof deferral(s), $($pluginFrees.Count) plugin free(s) + $($scoreFrees.Count) score free(s), ALL with seq >= swapSeq + 2 (the 2.5 s freeze held both stall-swap frees until two post-un-stall buffers)"
+          Write-Host "engine.log receipt assertions passed (scale load, play, load-fail, async init, reuse, rolling-transport reject, audio config, prepare config, session peak, musical release, resume re-attacks, editor unavailable/open=x1/focus/close, state captured/restored, 3f-3a host-window set + owner applied + missing-path skips, 3h retire deferrals + freed counter math all present)"
 
       - run: npm ci
 

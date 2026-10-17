@@ -210,7 +210,7 @@
 
 namespace {
 
-constexpr const char* kEngineVersion = "0.8.3";
+constexpr const char* kEngineVersion = "0.8.4";
 constexpr int kProtocolVersion = 1;
 constexpr int kDefaultPort = 9377;
 constexpr int kMaxVoices = 64;
@@ -291,15 +291,67 @@ struct ScoreSnapshot {
 };
 std::atomic<ScoreSnapshot*> g_score{nullptr};
 
-// Retirement queue (worker-thread-only): published objects that may still be
-// referenced by one in-flight audio buffer. Drained after a grace period far
-// exceeding any buffer duration (250ms >> 1024 samples @ 44.1kHz = 23ms), so
-// the audio thread NEVER frees anything. Deliberately NOT drained at exit
-// (process exit reclaims — same policy as the hosted plugin teardown).
+// ─── Stage 3h — proof-based reclamation (retire = wait for PROOF, not time) ──
+// The audio callback increments g_audioBufferSeq once per buffer (ONE relaxed
+// fetch_add at the top of audioDeviceIOCallbackWithContext, right after the
+// published-pointer loads; the real-device path and the EngineNullDevice path
+// both run through that single callback). Buffers are STRICTLY SEQUENTIAL on
+// the one audio thread, so the counter is a grace-period proof in the RCU
+// sense:
+//
+//   publisher: store(new) → S = g_audioBufferSeq.load() → queue {old, S}
+//   janitor frees {old, S} only when g_audioBufferSeq >= S + 2
+//
+// WHY THE CAPTURE IS AFTER THE STORE (a deliberate, proven deviation from the
+// Stage 3h spec's "record before the atomic store"): let the store fall
+// between increment #A and increment #(A+1) of the seq atomic. Buffers 1..A
+// loaded the OLD pointer; buffer A+1 MAY have (its load and the store share
+// the same window between those two increments); buffers A+2.. load NEW. A
+// capture taken BEFORE the store can go stale: the publisher can be
+// preempted between its seq load and the store, letting A grow arbitrarily
+// past S — then "seq >= S + 2" fires while an OLD-holding buffer is still in
+// flight, i.e. the exact use-after-free class this stage fixes. A capture
+// taken AFTER the store satisfies S >= A always, so "seq >= S + 2 >= A + 2"
+// proves increment #(A+2) happened, which (sequential buffers) proves buffer
+// A+1 — the last possible OLD holder — FINISHED, under arbitrary preemption,
+// on real devices and the null device alike. "+1" is not enough (buffer A+1
+// may hold OLD); "+2" is exact. A buffer preempted between its load and its
+// increment keeps the observed count below S + 2 by construction, so the
+// condition cannot even be observed early.
+//
+// If the audio thread never advances (device closed/asleep, system sleep,
+// --no-audio), the counter freezes and the entries simply stay queued —
+// correct and intentional; the janitor names each deferred entry ONCE (rate
+// limit) so the log stays honest, and process exit reclaims (the standing
+// 3c teardown policy — the lists are deliberately NOT drained at exit).
 struct HostedPlugin;   // defined below (lock-free published instance)
+std::atomic<uint64_t> g_audioBufferSeq{0};
 std::mutex g_retireMutex;
-std::vector<std::pair<ScoreSnapshot*, std::chrono::steady_clock::time_point>> g_retiredScores;
-std::vector<std::pair<HostedPlugin*, std::chrono::steady_clock::time_point>> g_retiredPlugins;
+struct RetiredScoreRef {
+    ScoreSnapshot* snapshot = nullptr;
+    uint64_t swapSeq = 0;      // g_audioBufferSeq captured AFTER the publish store
+    bool deferNamed = false;   // one "retire deferred" receipt per entry (rate limit)
+};
+struct RetiredPluginRef {
+    HostedPlugin* plugin = nullptr;
+    uint64_t swapSeq = 0;      // captured AFTER the g_instances store
+    bool deferNamed = false;
+};
+std::vector<RetiredScoreRef> g_retiredScores;
+std::vector<RetiredPluginRef> g_retiredPlugins;
+
+// Stage 3h TEST-ONLY stall hook (the null-audio regression probe): when this
+// env-named marker file EXISTS, the first audio buffer to observe the appear
+// transition sleeps kTestAudioStallMs INSIDE the callback before touching
+// anything — one long, deliberate freeze of the audio thread, so the buffer
+// cannot finish and g_audioBufferSeq cannot advance while a swap publishes.
+// This is the controllable "stalled audio thread" the old 250 ms grace
+// silently assumed away (driver DPC spike / antivirus / plugin I/O). Set by
+// desktop.yml for the D2 engine process and by local validation runs; a
+// production engine never has it set, and the steady-state cost when unset
+// is one predictable branch on an empty string. No lock, no allocation.
+std::string g_testAudioStallFile;   // written once in main(), read-only afterward
+constexpr int kTestAudioStallMs = 2500;
 
 // Stage 3f-6: a retire capture runs on the MESSAGE thread (callAsync) while
 // the init worker only WAITS up to 3000 ms for it — so when the budget
@@ -1136,6 +1188,27 @@ public:
                                           int numOutputChannels,
                                           int numSamples,
                                           const juce::AudioIODeviceCallbackContext& /*context*/) override {
+        // ── Stage 3h TEST-ONLY stall hook (see g_testAudioStallFile) ──
+        // The FIRST buffer to observe the marker's appear transition freezes
+        // HERE for kTestAudioStallMs — before the loads and the seq tick, so
+        // a frozen buffer holds NO published pointers and g_audioBufferSeq
+        // stops advancing for the whole sleep. This is the controllable
+        // stalled-audio-thread regression probe; production engines never
+        // see the env var set (the empty-string branch below is the entire
+        // steady-state cost).
+        if (!g_testAudioStallFile.empty()) {
+            bool exists = false;
+            if (FILE* f = std::fopen(g_testAudioStallFile.c_str(), "rb")) {
+                std::fclose(f);
+                exists = true;
+            }
+            if (!testStallInited) {
+                testStallInited = true;          // never stall on the very first buffer
+            } else if (exists && !testStallLastSeen) {
+                std::this_thread::sleep_for(std::chrono::milliseconds(kTestAudioStallMs));
+            }
+            testStallLastSeen = exists;
+        }
         // Zero the output buffer
         for (int ch = 0; ch < numOutputChannels; ++ch)
             std::memset(outputChannelData[ch], 0, sizeof(float) * numSamples);
@@ -1152,6 +1225,12 @@ public:
         const auto routing = g_routing.load(std::memory_order_acquire);
         const auto mix = g_mix.load(std::memory_order_acquire);
         ScoreSnapshot* score = g_score.load(std::memory_order_acquire);
+        // Stage 3h: the retire-proof tick — ONE relaxed increment per buffer,
+        // immediately after the published-pointer loads. This is the ONLY
+        // audio-thread change proof-based reclamation makes: no lock, no
+        // allocation, no blocking call (the test-only stall hook above is
+        // compiled-in but inert unless the env var was provided at startup).
+        g_audioBufferSeq.fetch_add(1, std::memory_order_relaxed);
         float peak = 0.0f;
 
         // Stage 3c-polish (D2): kill requests from PANIC and the play-time
@@ -1595,6 +1674,13 @@ private:
     // Stage 3d-4: ONE reusable MidiBuffer PER SLOT (same steady-state
     // no-alloc contract) — each instance receives only its own events.
     juce::MidiBuffer instMidi[kMaxInstances];
+
+    // Stage 3h test-only stall state (audio-thread-owned; see the hook at the
+    // top of audioDeviceIOCallbackWithContext). The first buffer only
+    // INITIALIZES the seen-flag so a stale marker at device start cannot
+    // freeze the very first buffer.
+    bool testStallInited = false;
+    bool testStallLastSeen = false;
 
 public:
     // Stage 3e-2: the playhead every hosted instance sees. One stable address
@@ -3183,8 +3269,13 @@ void handle_load(const juce::var& json, ix::WebSocket& ws, size_t byteSize) {
         snap->tsDenominator = tsDen;
         ScoreSnapshot* old = g_score.exchange(snap, std::memory_order_acq_rel);
         if (old) {
+            // Stage 3h: the proof value is captured AFTER the store — a
+            // capture taken before it could go stale if this thread were
+            // preempted between the two statements (see the retirement-queue
+            // block for the full proof).
+            const uint64_t swapSeq = g_audioBufferSeq.load(std::memory_order_relaxed);
             std::lock_guard<std::mutex> rlock(g_retireMutex);
-            g_retiredScores.push_back({old, std::chrono::steady_clock::now()});
+            g_retiredScores.push_back({old, swapSeq, false});
         }
         // Stage 3c close-out — a new score is a new articulation context: the
         // per-channel knowledge resets to UNKNOWN so the first CC#32 always
@@ -3514,8 +3605,10 @@ size_t publishScoreWithReattacks(int64_t startTick) {
     snap->tsDenominator = cur->tsDenominator;
     ScoreSnapshot* old = g_score.exchange(snap, std::memory_order_acq_rel);
     if (old) {
+        // Stage 3h: proof value captured AFTER the store (retirement-queue block).
+        const uint64_t swapSeq = g_audioBufferSeq.load(std::memory_order_relaxed);
         std::lock_guard<std::mutex> rlock(g_retireMutex);
-        g_retiredScores.push_back({old, std::chrono::steady_clock::now()});
+        g_retiredScores.push_back({old, swapSeq, false});
     }
     return tails.size();
 }
@@ -3735,12 +3828,15 @@ void handle_open_editor(const juce::var& json, ix::WebSocket& ws) {
     }
     // Stage 3d-4 hotfix: the lambda NO LONGER captures the raw `live`
     // pointer. HostedPlugin objects live inside raw-pointer-slotted
-    // InstanceSets and are freed by the worker's retire path after a 250ms
-    // grace — a set replacement in the request→run window could dangle the
-    // capture (the silent-death family the user hit). The job instead
-    // re-resolves by id from the CURRENT set at message-thread run time —
-    // this codebase's standard resolve-from-current-load pattern — and the
-    // abandon receipt in openEditorWindow names any retirement.
+    // InstanceSets and are freed by the worker's retire path once the audio
+    // proof passes (Stage 3h: two buffer-start ticks past the swap — the
+    // audio thread runs buffers sequentially, so the old set is provably
+    // unreferenced by then; with no audio running the free is deferred
+    // indefinitely) — a set replacement in the request→run window could
+    // dangle the capture (the silent-death family the user hit). The job
+    // instead re-resolves by id from the CURRENT set at message-thread run
+    // time — this codebase's standard resolve-from-current-load pattern — and
+    // the abandon receipt in openEditorWindow names any retirement.
     {
         std::lock_guard<std::mutex> pl(g_pendingEditorMutex);
         g_pendingEditorOpen = PendingEditorOpen{ iid, std::chrono::steady_clock::now(), {} };
@@ -3841,6 +3937,13 @@ int main(int argc, char** argv) {
             }
         }
     }
+
+    // Stage 3h TEST-ONLY: the null-audio regression probe arms its controlled
+    // audio-thread stall through this env-named marker file (desktop.yml sets
+    // it for the D2 engine process). Read ONCE here, before any thread exists,
+    // so the audio thread's per-buffer check is a plain string compare.
+    if (const char* stallFile = std::getenv("SCORCH_TEST_AUDIO_STALL_FILE"))
+        g_testAudioStallFile = stallFile;
 
     ix::initNetSystem();
 
@@ -4081,56 +4184,91 @@ int main(int argc, char** argv) {
     std::thread plugin_init_thread([&server]() {
         uint64_t seenGen = 0;
         while (!g_should_exit.load()) {
-            // Stage 3c-polish (D2): retire aged publications FIRST — the
-            // grace period guarantees any in-flight audio buffer holding the
-            // old pointer finished long ago (250ms >> 23ms worst buffer).
-            // Never freed on the audio thread; deliberately NOT drained at
-            // exit (process exit reclaims — the 3c teardown policy).
+            // Stage 3c-polish (D2): retire aged publications FIRST — Stage 3h
+            // replaced the fixed 250 ms grace with a PROOF: the audio
+            // callback's buffer-sequence counter (see the retirement-queue
+            // block). seq >= swapSeq + 2 proves every buffer that began
+            // before the swap has FINISHED (buffers run sequentially on the
+            // one audio thread), so the free can never race an in-flight
+            // buffer — a stalled audio thread (driver DPC spike, antivirus,
+            // plugin I/O in processCall) now DEFERS the free instead of
+            // losing the race. With no audio running the counter freezes and
+            // entries stay queued (named once each); process exit reclaims,
+            // as before. Receipts are collected and emitted after the lock
+            // (the standing log discipline).
             {
-                const auto now = std::chrono::steady_clock::now();
-                std::lock_guard<std::mutex> rlock(g_retireMutex);
-                auto aged = [&now](const auto& p) {
-                    return std::chrono::duration_cast<std::chrono::milliseconds>(now - p.second).count() >= 250;
-                };
-                for (auto it = g_retiredScores.begin(); it != g_retiredScores.end();) {
-                    if (aged(*it)) { delete it->first; it = g_retiredScores.erase(it); }
-                    else ++it;
-                }
-                // Stage 3f-6: a plugin whose retire capture is STILL pending on
-                // the message thread (queued, or mid-sleep inside a slow
-                // getStateInformation) must not be freed — the capture job
-                // dereferences it after the init worker's 3000 ms budget has
-                // already expired. Defer the free until the job's done flag
-                // lands; the 250 ms grace stays the floor, never a deadline
-                // that can cut a live capture short. Named ONCE per record.
-                std::vector<std::string> retireDeferredIds;
-                for (auto it = g_retiredPlugins.begin(); it != g_retiredPlugins.end();) {
-                    if (aged(*it)) {
-                        bool capturePending = false;
-                        {
-                            std::lock_guard<std::mutex> clk(g_retireCaptureMutex);
-                            for (auto rcit = g_retireCaptures.begin(); rcit != g_retireCaptures.end();) {
-                                if (rcit->plugin != it->first) { ++rcit; continue; }
-                                if (rcit->done->load(std::memory_order_acquire)) {
-                                    rcit = g_retireCaptures.erase(rcit);   // job finished touching it
-                                    continue;
-                                }
-                                capturePending = true;
-                                if (!rcit->named) {
-                                    rcit->named = true;
-                                    retireDeferredIds.push_back(it->first->instanceId);
-                                }
-                                ++rcit;
+                std::vector<std::string> receipts;
+                {
+                    std::lock_guard<std::mutex> rlock(g_retireMutex);
+                    const uint64_t nowSeq = g_audioBufferSeq.load(std::memory_order_relaxed);
+                    for (auto it = g_retiredScores.begin(); it != g_retiredScores.end();) {
+                        if (nowSeq >= it->swapSeq + 2) {
+                            receipts.push_back("[audio] score snapshot freed swapSeq=" +
+                                               std::to_string(it->swapSeq) + " seq=" +
+                                               std::to_string(nowSeq) +
+                                               " — audio proof: two buffer-start ticks past the swap");
+                            delete it->snapshot;
+                            it = g_retiredScores.erase(it);
+                        } else {
+                            if (!it->deferNamed) {
+                                it->deferNamed = true;   // rate limit: one line per deferred entry
+                                receipts.push_back("[audio] retire deferred — audio proof pending (score snapshot swapSeq=" +
+                                                   std::to_string(it->swapSeq) + " seq=" + std::to_string(nowSeq) +
+                                                   ") — the audio thread has not advanced two buffers past the swap");
                             }
+                            ++it;
                         }
-                        if (capturePending) { ++it; continue; }
-                        if (it->first->instance) it->first->instance->releaseResources();
-                        delete it->first;
-                        it = g_retiredPlugins.erase(it);
-                    } else ++it;
+                    }
+                    // Stage 3f-6: a plugin whose retire capture is STILL pending on
+                    // the message thread (queued, or mid-sleep inside a slow
+                    // getStateInformation) must not be freed — the capture job
+                    // dereferences it after the init worker's 3000 ms budget has
+                    // already expired. Stage 3h: the free now needs BOTH proofs
+                    // composed — the buffer-seq proof AND the job's done flag.
+                    // Named ONCE per record, as before.
+                    std::vector<std::string> retireDeferredIds;
+                    for (auto it = g_retiredPlugins.begin(); it != g_retiredPlugins.end();) {
+                        if (nowSeq >= it->swapSeq + 2) {
+                            bool capturePending = false;
+                            {
+                                std::lock_guard<std::mutex> clk(g_retireCaptureMutex);
+                                for (auto rcit = g_retireCaptures.begin(); rcit != g_retireCaptures.end();) {
+                                    if (rcit->plugin != it->plugin) { ++rcit; continue; }
+                                    if (rcit->done->load(std::memory_order_acquire)) {
+                                        rcit = g_retireCaptures.erase(rcit);   // job finished touching it
+                                        continue;
+                                    }
+                                    capturePending = true;
+                                    if (!rcit->named) {
+                                        rcit->named = true;
+                                        retireDeferredIds.push_back(it->plugin->instanceId);
+                                    }
+                                    ++rcit;
+                                }
+                            }
+                            if (capturePending) { ++it; continue; }
+                            if (it->plugin->instance) it->plugin->instance->releaseResources();
+                            receipts.push_back("[plugin] retire freed instance=" + it->plugin->instanceId +
+                                               " swapSeq=" + std::to_string(it->swapSeq) + " seq=" +
+                                               std::to_string(nowSeq) +
+                                               " — audio proof: two buffer-start ticks past the swap");
+                            delete it->plugin;
+                            it = g_retiredPlugins.erase(it);
+                        } else {
+                            if (!it->deferNamed) {
+                                it->deferNamed = true;   // rate limit: one line per deferred entry
+                                receipts.push_back("[plugin] retire deferred — audio proof pending instance=" +
+                                                   it->plugin->instanceId + " swapSeq=" +
+                                                   std::to_string(it->swapSeq) + " seq=" + std::to_string(nowSeq) +
+                                                   " — the audio thread has not advanced two buffers past the swap");
+                            }
+                            ++it;
+                        }
+                    }
+                    for (const auto& iid : retireDeferredIds)
+                        receipts.push_back("[plugin] retire deferred — capture job still pending on the message thread instance=" + iid);
                 }
-                for (const auto& iid : retireDeferredIds)
-                    engineLog("[plugin] retire deferred — capture job still pending on the message thread instance=" + iid);
+                for (const auto& r : receipts) engineLog(r);
             }
             // Stage 3d-4 hotfix — pending-open watchdog (this janitor loop is
             // the only off-MM heartbeat the engine owns; zero new threads).
@@ -4384,6 +4522,13 @@ int main(int argc, char** argv) {
             // editors).
             for (HostedPlugin* old : retiredNow) closeEditorAsync(old->instanceId);
             g_instances.store(std::move(nextSet), std::memory_order_acq_rel);
+            // Stage 3h: the proof value is captured AFTER the store — a capture
+            // taken before it could go stale if this thread were preempted
+            // between the two statements (the retirement-queue block carries
+            // the full proof). EVERY retired entry of this swap carries the
+            // same swapSeq; rapid successive swaps each keep their own, and
+            // one post-swap buffer tick can satisfy several entries at once.
+            const uint64_t swapSeq = g_audioBufferSeq.load(std::memory_order_relaxed);
 
             // Stage 3f-6 REORDER: the NEW set's receipts go out FIRST —
             // per-instance loaded receipts (log + plugin_state, additive
@@ -4477,8 +4622,8 @@ int main(int argc, char** argv) {
                         std::chrono::steady_clock::now() - tc0).count();
                     if (finished) {
                         // The job finished touching the instance — drop its
-                        // record so the janitor's 250 ms grace governs the free
-                        // exactly as before.
+                        // record so the janitor's audio-proof condition governs
+                        // the free exactly as before (Stage 3h: seq >= swapSeq + 2).
                         std::lock_guard<std::mutex> clk(g_retireCaptureMutex);
                         g_retireCaptures.erase(
                             std::remove_if(g_retireCaptures.begin(), g_retireCaptures.end(),
@@ -4494,7 +4639,7 @@ int main(int argc, char** argv) {
                     }
                 }
                 std::lock_guard<std::mutex> rlock(g_retireMutex);
-                g_retiredPlugins.push_back({old, std::chrono::steady_clock::now()});
+                g_retiredPlugins.push_back({old, swapSeq, false});
             }
             engineLog("[plugin] publish: done | seq " + std::to_string(req.seq) +
                       " retired=" + std::to_string(retiredNow.size()) +
