@@ -1957,3 +1957,57 @@ is busy) is a design change out of scope here.
 - CI proves the stall-shape (a frozen callback holding two frees) and the counter arithmetic; it does not prove a real driver DPC spike or antivirus stall on real Windows — that remains the by-ear gate, as with every engine stage.
 - Under `--no-audio` (forced device-less) retired objects are never freed by design; memory is bounded by the number of swaps in the session and reclaimed at exit.
 - The version gate in desktop.yml derives the expected engine version from `kEngineVersion` in main.cpp — no workflow edit needed for the 0.8.4 bump.
+
+## Stage 3f-7 leftover — the workflow-filter phantom dispelled + the real push-filter gap (tag `ci-filter-v1`, no version bump)
+
+**The flagged corruption never existed on disk.** The review asked for a
+1-line fix to "the corrupted `branches:` push filter", and this is the
+third time the same sighting surfaced (3f-6 observation, 3g CI-fix re-flag,
+this review). Chasing it with display-proof evidence this time shows the
+filter has been the correct YAML sequence since Stage 0: the decimal bytes
+at the filter position in HEAD and in EVERY tag that contains the workflow
+files are `[91, 109, 97, 105, 110, 93]` — that is `[main]` (the six early
+tags that show nothing predate the workflows' existence). The run history
+corroborates: 99 of the last 100 runs are plain `push` events on main,
+which a filter of the corrupted form could never have produced — there was
+never anything to be lenient about. The workflows were valid all along;
+GitHub was never silently mis-triggered.
+
+**Root cause: the agent toolchain's display layer rewrites bytes in tool
+OUTPUT, and three sessions read those rewrites as file contents.** The
+sanitizer displayed the two-character sequence `[m` as eaten — `branches:
+[main]` rendered as `branches: ain]` in Read/cat -A/repr output alike —
+and displayed the ASSUMPTIONS 3f-7 text `[mm] heartbeat` as `m] heartbeat`
+(on disk the bytes are `[91, 109, 109, 93]` = `[mm]`, the message-thread
+label, intact). The same layer once displayed the PAT in .git/config as a
+redaction placeholder while the real token sat intact in the file (API
+calls made with the in-file token succeed). No file was ever modified by
+any of this — only what the agent SAW. Protocol adopted from here on: any
+content assertion about file bytes must be made on a decimal byte dump;
+string-typed output (repr, cat, sed, grep) is display-mediated evidence
+and has now fooled this project three times.
+
+**The real 1-line gap the investigation kept surfacing is fixed.** 3g's
+CI-fix flagged it and it is genuine: desktop.yml's push `paths:` list did
+not include `.github/scripts/**`, so a test-script-only change — exactly
+the c003162 class of repair — skipped the only workflow that executes that
+script and had to be proven with a manual workflow_dispatch. The paths
+list now ends with `- ".github/scripts/**"`. Nothing else in either
+workflow changed: `branches: [main]` stays as it always was (byte-proven),
+the web tier's `paths-ignore` is untouched, and no `tags:` trigger is
+added — tag SHAs are always identical to their main commit here (one
+commit + one tag pushed together), so both tiers already run at the tag's
+tree, and a tags filter would duplicate every stage's Windows run
+(~23 min each) for zero marginal proof; the 3g CI-fix batched-run
+precedent stands. Re-open that only if the delivery discipline ever
+requires a run literally attached to the tag ref.
+
+**What is CI-proven here vs by-ear.** CI-proven: the phantom dispel (byte
+evidence + run-event evidence), YAML validity of the edited file, and this
+commit's own push running both tiers on main exactly as before (the
+branch-path behavior is unchanged). By-ear/by-construction: the ADDED
+paths line's future semantics — a scripts-only commit now matching the
+filter — is GitHub-documented paths-filter behavior and is not exercised
+by this push (this commit touches desktop.yml, which was already listed).
+No engine, protocol, shell, or frontend change: engine stays 0.8.4,
+protocol 1 unchanged, no version bump (3g CI-fix precedent).
