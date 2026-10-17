@@ -44,7 +44,7 @@ import { consolidateSustains } from "../generation/sustain";
 import { cc7ForWeight, acousticWeightForTrack, DEFAULT_BALANCE_CONFIG } from "../generation/balance";
 import { builtInProfileById, vst3EventAdapter } from "../plugins/expressionMaps";
 import { buildEngineStream, resolveInstanceRouting } from "../engine/engineStream";
-import { createStoppedGate, mergeScanProbe, planAssignmentLoad, pluginSetSignature, swapPickerRows, type ScannedPlugin } from "../engine/engineClient";
+import { createStoppedGate, describeLateLoadAck, formatPluginInfo, formatTailSeconds, mergeScanProbe, planAssignmentLoad, pluginSetSignature, rowsNeedingProbe, swapPickerRows, type PluginCapabilitiesMessage, type ScannedPlugin } from "../engine/engineClient";
 import userProjectJson from "../fixtures/user-project.json";
 import { mulberry32 } from "../generation/prng";
 import { snapshotDigest } from "../generation/efgGolden";
@@ -1157,6 +1157,57 @@ export function runUnitTests(): TestResult[] {
       assert(pluginSetSignature([{ id: "g1", pluginId: "uid-a", pluginPath: "/p/b.vst3" }]) !== pluginSetSignature([{ id: "g1", pluginId: "uid-a", pluginPath: "/p/a.vst3" }]), "a pluginPath change IS a hosting change");
       assert(pluginSetSignature([{ id: "g1", pluginId: null }]) !== pluginSetSignature([{ id: "g1", pluginId: "uid-a", pluginPath: "/p/a.vst3" }]), "removing the binding IS a hosting change");
       return "not-ready→0 loads; stopped→1; playing→0 before stop and exactly 1 after; release idempotent at 30Hz; signature = id+pluginId+pluginPath only";
+    }),
+    timed("Stage 3f-7: formatTailSeconds — non-finite/null tails render ∞, finite tails keep the unit form", () => {
+      // Item 1's frontend half: the engine serializes non-finite numbers as
+      // null, and null tailSeconds means "infinite".
+      assert(formatTailSeconds(null) === "∞", "null tailSeconds (engine's encoding of inf/-inf/nan) must render ∞");
+      assert(formatTailSeconds(undefined) === "∞", "undefined tailSeconds renders ∞ (defensive)");
+      assert(formatTailSeconds(Number.POSITIVE_INFINITY) === "∞", "a raw +inf tail renders ∞ (defensive)");
+      assert(formatTailSeconds(Number.NaN) === "∞", "a raw NaN tail renders ∞ (defensive)");
+      assert(formatTailSeconds(0) === "0s", "a zero tail keeps the unit form");
+      assert(formatTailSeconds(2.5) === "2.5s", "a finite tail keeps the unit form");
+      assert(formatTailSeconds(1.23456) === "1.235s", "a finite tail is 3-dp rounded (pre-existing behavior)");
+      // formatPluginInfo renders the ∞ line end to end (never throws on null).
+      const caps = {
+        type: "plugin_capabilities", instanceId: "i1", name: "InfTail", vendor: "V", version: "1",
+        isInstrument: true, acceptsMidi: true, producesMidi: false, isMidiEffect: false,
+        hasEditor: false, numPrograms: 1, latencySamples: 0, tailSeconds: null,
+        supportsDoublePrecision: false, inputBuses: 0, outputBuses: 1, classId: "c1",
+        buses: [{ input: false, index: 0, name: "Output", channels: 2, isMain: true, enabledByDefault: true, layoutChangeable: false }],
+      } as PluginCapabilitiesMessage;
+      const info = formatPluginInfo(caps);
+      assert(info.includes("tail: ∞"), "the Plugin info tooltip must show tail: ∞ for a null tailSeconds");
+      return "null/undefined/inf/nan → ∞; 0 → 0s; 2.5 → 2.5s; tooltip renders ∞";
+    }),
+    timed("Stage 3f-7: rowsNeedingProbe + describeLateLoadAck — lazy-probe selection and the late-ack cause matrix", () => {
+      // Item 3: the dialogs request probes for EXACTLY the unprobed visible
+      // rows (no capabilities AND no capabilitiesError); rows without a
+      // classId are never probeable.
+      const rows = [
+        { name: "a", vendor: "v", uid: "1", path: "/a", classId: "C-a" },
+        { name: "b", vendor: "v", uid: "2", path: "/b", classId: "C-b", capabilities: { tailSeconds: 0 } },
+        { name: "c", vendor: "v", uid: "3", path: "/c", classId: "C-c", capabilitiesError: "probe timeout" },
+        { name: "d", vendor: "v", uid: "4", path: "/d" },
+      ] as unknown as ScannedPlugin[];
+      assert(JSON.stringify(rowsNeedingProbe(rows)) === JSON.stringify(["C-a"]),
+        "only rows with a classId and NEITHER capabilities NOR capabilitiesError need a probe");
+      assert(JSON.stringify(rowsNeedingProbe([])) === "[]", "an empty list needs no probes (pure)");
+      // Item 5: the late-loadAck reason names the likely causes from engine
+      // messages already available (mm heartbeat, an unsettled previous
+      // load) instead of only "never acknowledged".
+      const base = describeLateLoadAck(4000, null, false);
+      assert(base.includes("never acknowledged") && !base.includes("likely cause"), "no signals → the plain never-acknowledged text");
+      const withMm = describeLateLoadAck(4000, { seconds: 9, ageMs: 2500 }, false);
+      assert(withMm.includes("likely cause") && withMm.includes("message thread") && withMm.includes("unresponsive 9s ago"),
+        "a recent mm-unresponsive report is NAMED as the likely cause");
+      const withLoad = describeLateLoadAck(4000, null, true);
+      assert(withLoad.includes("likely cause") && withLoad.includes("previous plugin load is still in progress"),
+        "an unsettled previous load is NAMED as the likely cause");
+      const withBoth = describeLateLoadAck(4000, { seconds: 4, ageMs: 1000 }, true);
+      assert(withBoth.includes("unresponsive 4s ago") && withBoth.includes("previous plugin load"),
+        "both causes can be named together");
+      return "probe selection exact; cause matrix: none/mm/load/both";
     }),
   ];
 }

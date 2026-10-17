@@ -599,6 +599,18 @@ export default function App() {
   // Stage 3c-1: desktop VstBrowser real-scan handler (engine present only).
   // The shell's vst3_paths() resolves the logged-in user's per-machine and
   // per-user VST3 directories; the browser keeps the mock (no engine there).
+  // Stage 3f-7 (item 3): the scan no longer probes rows automatically — the
+  // dialogs request probes for the rows they actually SHOW, and "Probe all"
+  // is an explicit button. The requested set dedupes in-flight repeats.
+  const probesRequestedRef = useRef(new Set<string>());
+  const handleRequestProbe = useCallback((classId: string) => {
+    if (probesRequestedRef.current.has(classId)) return;
+    probesRequestedRef.current.add(classId);
+    engineClientRef.current?.probe(classId);
+  }, []);
+  const handleProbeAll = useCallback(() => {
+    engineClientRef.current?.probeAll();
+  }, []);
   const desktopVst = useMemo(() => {
     if (engineStatus !== "ready") return null;
     return {
@@ -614,8 +626,12 @@ export default function App() {
           engineClientRef.current?.scan(dirs.length ? dirs : undefined);
         })();
       },
+      // Stage 3f-7 (item 3): lazy probing — the dialog requests probes for
+      // the rows it shows; "Probe all" is the explicit escape hatch.
+      onRequestProbe: handleRequestProbe,
+      onProbeAll: handleProbeAll,
     };
-  }, [engineStatus, desktopScan]);
+  }, [engineStatus, desktopScan, handleRequestProbe, handleProbeAll]);
 
   // Stage 3d-1 → 3d-4: per-TRACK editor request. A track whose library group
   // carries a plugin binding asks the engine for THAT INSTANCE's editor
@@ -1415,6 +1431,7 @@ export default function App() {
             onClose={() => setSwapTrackId(null)}
             onReplace={(pick) => replaceTrackPlugin(swapTrackId, pick)}
             onRemove={() => removeTrackPlugin(swapTrackId)}
+            onRequestProbe={handleRequestProbe}
           />
         );
       })()}

@@ -231,8 +231,11 @@ jobs:
           # Test C — Stage 3c-1 VST3 scan protocol: valid plugin found (real
           # name + vendor), CRASH-ISOLATION (worker dies → failed entry, scan
           # + engine survive), corrupt .vst3 graceful, default-dir scan clean.
+          # Stage 3f-7: --null-audio so the transport-pause proof can actually
+          # roll the transport (a device-less runner would refuse play); the
+          # scan itself never touches audio.
           Write-Host "=== Test C: VST3 scan protocol + crash isolation ==="
-          $procC = Start-Process -FilePath "engine/build/scorch-engine.exe" -ArgumentList "--port","9380" -PassThru -NoNewWindow -RedirectStandardOutput "engine-c-stdout.txt" -RedirectStandardError "engine-c-stderr.txt"
+          $procC = Start-Process -FilePath "engine/build/scorch-engine.exe" -ArgumentList "--port","9380","--null-audio" -PassThru -NoNewWindow -RedirectStandardOutput "engine-c-stdout.txt" -RedirectStandardError "engine-c-stderr.txt"
           Start-Sleep -Seconds 3
           try {
             if ($procC.HasExited) {
@@ -287,6 +290,11 @@ jobs:
           # CC#32 sends.
           Write-Host "=== Test D: VST3 hosting + channel routing + audible gating ==="
           $env:SCORCH_TESTVST_LOG = "1"
+          # Stage 3f-7 (item 1): the fixture reports an INFINITE tail in this
+          # engine — every capability JSON (probe receipt + plugin_capabilities)
+          # must carry tailSeconds as null, never a bare inf. Inherited by the
+          # probe-worker children (probe-on-load + the explicit probe).
+          $env:SCORCH_TESTVST_INFTAIL = "1"
           $procD = Start-Process -FilePath "engine/build/scorch-engine.exe" -ArgumentList "--port","9381","--null-audio" -PassThru -NoNewWindow -RedirectStandardOutput "engine-d-stdout.txt" -RedirectStandardError "engine-d-stderr.txt"
           Start-Sleep -Seconds 3
           try {
@@ -327,6 +335,7 @@ jobs:
           } finally {
             Stop-Process -Id $procD.Id -Force -ErrorAction SilentlyContinue
             Remove-Item Env:\SCORCH_TESTVST_LOG -ErrorAction SilentlyContinue
+            Remove-Item Env:\SCORCH_TESTVST_INFTAIL -ErrorAction SilentlyContinue
           }
 
           # Test D2 — Stage 3d-4 MULTI-INSTANCE hosting: the SAME free test
@@ -467,6 +476,44 @@ jobs:
           # its capture completes within the budget (END receipt).
           $retireEnds = (Select-String -Path $engineLog -Pattern "\[plugin\] retire capture END instance=").Count
           if ($retireEnds -lt 1) { throw "engine.log missing 3f-6 retire-capture END receipt (got $retireEnds, need >= 1 — the fast path must still complete)" }
+          # Stage 3f-7 item 2 receipts: the probe pause gate. The scan test
+          # rolls the transport mid-probeAll ("transport playing"), test D
+          # probes during an open editor ("editor window open"), and D2's
+          # probe-on-load pauses behind its own in-progress load ("load in
+          # progress" — deterministic: the job is queued while the load flag
+          # is held through the publish). Resume is logged 2 s after each.
+          $probePaused = (Select-String -Path $engineLog -Pattern "\[probe\] paused \(reason=").Count
+          if ($probePaused -lt 3) { throw "engine.log missing 3f-7 probe-pause receipts (got $probePaused, need >= 3: transport + editor + load in progress)" }
+          $probeResumed = (Select-String -Path $engineLog -Pattern "\[probe\] resumed").Count
+          if ($probeResumed -lt 2) { throw "engine.log missing 3f-7 probe-resume receipts (got $probeResumed, need >= 2)" }
+          $probeLoadPause = (Select-String -Path $engineLog -Pattern "\[probe\] paused \(reason=load in progress\)").Count
+          if ($probeLoadPause -lt 1) { throw "engine.log missing the load-in-progress probe pause (got $probeLoadPause, need >= 1)" }
+          # Stage 3f-7 item 1: the infinite-tail probe (test D's engine env)
+          # must produce a SUCCESSFUL probe receipt — outcome=ok in the log.
+          $probeOk = (Select-String -Path $engineLog -Pattern "\[probe\] path=.*outcome=ok").Count
+          if ($probeOk -lt 1) { throw "engine.log missing a successful probe receipt (got $probeOk, need >= 1 — the inf-tail fixture must probe outcome=ok)" }
+          # Stage 3f-7 item 4a: D2's 10 s slow-state capture blocks the
+          # message thread — the heartbeat must NAME it (diagnostic only).
+          $mmUnresponsive = (Select-String -Path $engineLog -Pattern "\[mm\] message thread unresponsive for ").Count
+          if ($mmUnresponsive -lt 1) { throw "engine.log missing the [mm] unresponsive receipt (got $mmUnresponsive, need >= 1 — D2's slow capture stalls the message thread 10 s)" }
+          $mmRecovered = (Select-String -Path $engineLog -Pattern "\[mm\] message thread recovered after ").Count
+          if ($mmRecovered -lt 1) { throw "engine.log missing the [mm] recovered receipt (got $mmRecovered, need >= 1)" }
+          # Stage 3f-7 item 4b/4c: editor close + state capture BEGIN/END and
+          # the closing-requested receipt (the closeEditor message path).
+          $closingRequested = (Select-String -Path $engineLog -Pattern "\[editor\] closing requested instance=").Count
+          if ($closingRequested -lt 3) { throw "engine.log missing closing-requested receipts (got $closingRequested, need >= 3: test D closes + D2 retires close editors)" }
+          $closeBegin = (Select-String -Path $engineLog -Pattern "\[editor\] close BEGIN instance=").Count
+          if ($closeBegin -lt 1) { throw "engine.log missing editor close BEGIN receipts (got $closeBegin, need >= 1)" }
+          $captureBegin = (Select-String -Path $engineLog -Pattern "\[plugin\] capture BEGIN instance=").Count
+          if ($captureBegin -lt 3) { throw "engine.log missing capture BEGIN receipts (got $captureBegin, need >= 3)" }
+          # Stage 3f-7 item 4d: ONE arrival line per incoming message — the
+          # log is full of them (every ping, every state-driven send).
+          $wsArrivals = (Select-String -Path $engineLog -Pattern "\[ws\] message type=").Count
+          if ($wsArrivals -lt 20) { throw "engine.log missing [ws] arrival receipts (got $wsArrivals, need >= 20)" }
+          # Stage 3f-7 item 3: the scan test explicitly probes BEFORE probeAll
+          # (lazy) — the requested-row receipt must exist.
+          $probeRequested = (Select-String -Path $engineLog -Pattern "\[probe\] requested classId=").Count
+          if ($probeRequested -lt 2) { throw "engine.log missing on-demand probe receipts (got $probeRequested, need >= 2 — the scan test requests rows explicitly)" }
           $reuseReceipts = (Select-String -Path $engineLog -Pattern "\[plugin\] reuse while playing").Count
           if ($reuseReceipts -lt 1) { throw "engine.log missing the mid-play reuse receipt (same-plugin fast path)" }
           $rejectReceipts = (Select-String -Path $engineLog -Pattern "\[load\] REJECTED while playing").Count

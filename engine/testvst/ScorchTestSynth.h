@@ -32,11 +32,18 @@
 // sleeps 10 s first (the publish-safe CI proof — a being-created instance is
 // never prepared yet, so JUCE's creation-time state handshake stays fast).
 
+// Stage 3f-7: SCORCH_TESTVST_INFTAIL=1 (engine-process env, inherited by
+// probe-worker children) makes getTailLengthSeconds return INFINITY — the
+// non-finite-number CI fixture: the probe receipt must still be outcome=ok
+// and every capability JSON must stay parseable (tailSeconds serialized as
+// null = "infinite").
+
 #pragma once
 
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
+#include <limits>
 #include <chrono>
 #include <thread>
 #include <juce_audio_processors/juce_audio_processors.h>
@@ -176,12 +183,17 @@ public:
     bool acceptsMidi() const override { return true; }
     bool producesMidi() const override { return false; }
     bool isMidiEffect() const override { return false; }
-    double getTailLengthSeconds() const override { return 0.0; }
     int getNumPrograms() override { return 1; }
     int getCurrentProgram() override { return 0; }
     void setCurrentProgram(int) override {}
     const juce::String getProgramName(int) override { return "Default"; }
     void changeProgramName(int, const juce::String&) override {}
+    double getTailLengthSeconds() const override {
+        // Stage 3f-7: the non-finite-number fixture (see the header note).
+        static const bool infTail = std::getenv("SCORCH_TESTVST_INFTAIL") != nullptr;
+        if (infTail) return std::numeric_limits<double>::infinity();
+        return 0.0;
+    }
     void getStateInformation(juce::MemoryBlock& dest) override {
         // Stage 3f-6: publish-safe CI hook. While the marker file named by the
         // ENGINE's SCORCH_TESTVST_SLOWSTATE_FILE env var exists, state capture

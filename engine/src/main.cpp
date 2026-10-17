@@ -33,15 +33,31 @@
 //                     stderr into one pipe — see handle_scan).
 //   server -> client: {"type":"scan_probe","classId":...,"capabilities":{...}}
 //                     | {"type":"scan_probe","classId":...,
-//                        "capabilitiesError":"..."}  (3f-2, ADDITIVE) — AFTER
-//                     scan_result, the engine probes each row SEQUENTIALLY
-//                     in the background: a --probe-worker child runs
-//                     createPluginInstance + prepareToPlay +
-//                     buildCapabilityFields with a 90 s timeout. A probe
-//                     failure, timeout or crash NEVER removes or changes the
-//                     row in the list — the frontend merges capabilities into
-//                     the stored row by classId, or keeps the row untouched
-//                     with only its capabilitiesError annotation.
+//                        "capabilitiesError":"..."}  (3f-2, ADDITIVE) — a
+//                     --probe-worker child runs createPluginInstance +
+//                     prepareToPlay + buildCapabilityFields with a 90 s
+//                     timeout. A probe failure, timeout or crash NEVER
+//                     removes or changes the row in the list — the frontend
+//                     merges capabilities into the stored row by classId, or
+//                     keeps the row untouched with only its capabilitiesError
+//                     annotation. LAZY since 3f-7: the scan does NOT probe
+//                     rows automatically — probes run on
+//   client -> engine: {"type":"probe","classId":"…"}   (3f-7, ADDITIVE — one
+//                     row, typically because it is visible in the scan
+//                     dialog or the picker), {"type":"probeAll"} (3f-7,
+//                     ADDITIVE — every row of the last scan; the dialog's
+//                     "Probe all" button), or automatically probe-ON-LOAD
+//                     (a loaded plugin is probed once per session; a failed
+//                     probe is retried on the next load). While a load is in
+//                     progress, any editor window is open, or the transport
+//                     plays, the probe thread pauses dequeueing (2 s resume
+//                     delay, "[probe] paused/resumed" receipts).
+//   server -> client: {"type":"engineDiagnostic","mm":"unresponsive"|"recovered",
+//                      "seconds":<n>}  (3f-7, ADDITIVE) — the message-thread
+//                     heartbeat (DIAGNOSTIC ONLY: it measures that no
+//                     callAsync ran for >3 s; it does not claim a cause) so
+//                     the frontend can name the condition in a late-loadAck
+//                     toast.
 //   server -> client: {"type":"state","playing":bool,"tick":<n>,"peak":<f>}  (~30Hz;
 //                     while stopped, tick = the remembered stop position;
 //                     "peak" (3c-2, additive) = max |output| of the last buffer)
@@ -194,7 +210,7 @@
 
 namespace {
 
-constexpr const char* kEngineVersion = "0.8.2";
+constexpr const char* kEngineVersion = "0.8.3";
 constexpr int kProtocolVersion = 1;
 constexpr int kDefaultPort = 9377;
 constexpr int kMaxVoices = 64;
@@ -445,6 +461,45 @@ void engineLog(const std::string& line) {
     }
 }
 
+// ─── Stage 3f-7: JSON helpers shared by every capability writer ─────────
+// A plugin-reported double can be non-finite (a synth may honestly report an
+// INFINITE tail). Bare inf/-inf/nan are INVALID JSON — every JSON consumer
+// (the frontend's JSON.parse, juce::JSON in the CI probe) rejects the whole
+// message. Non-finite numbers serialize as null; for tailSeconds null means
+// "infinite" (the frontend renders ∞). Finite values keep the %.6g form the
+// capability record has always used.
+std::string jsonNumberOrNul(double v) {
+    if (std::isfinite(v)) {
+        char buf[32];
+        std::snprintf(buf, sizeof(buf), "%.6g", v);
+        return std::string(buf);
+    }
+    return "null";
+}
+
+// Stage 3f-7 (4d): cheap WS message-type sniff for the arrival receipt — the
+// first 64 bytes ONLY, no JSON parse, no allocation beyond the type token.
+// Finds "type" then reads the quoted token after the colon; anything else is
+// "unknown". Message contents are NEVER logged.
+std::string wsPeekType(const std::string& message) {
+    const size_t scan = std::min<size_t>(message.size(), 64);
+    const std::string head = message.substr(0, scan);
+    const auto key = head.find("\"type\"");
+    if (key == std::string::npos) return "unknown";
+    const auto colon = head.find(':', key + 6);
+    if (colon == std::string::npos) return "unknown";
+    const auto q1 = head.find('"', colon + 1);
+    if (q1 == std::string::npos) return "unknown";
+    const auto q2 = head.find('"', q1 + 1);
+    if (q2 == std::string::npos || q2 == q1 + 1) return "unknown";
+    std::string t = head.substr(q1 + 1, q2 - q1 - 1);
+    // Sanitize: printable ASCII only, bounded — the token goes to engine.log.
+    if (t.size() > 32) return "unknown";
+    for (char& c : t)
+        if (c < 0x20 || c > 0x7e) return "unknown";
+    return t;
+}
+
 // ─── Stage 3c-2: routing / mix / hosted plugin / dispatch ledger ────────────
 // RoutingTable (immutable snapshot, atomic shared_ptr swap): the track→channel
 // assignment for the load, and the set of channels the HOSTED PLUGIN owns.
@@ -684,6 +739,10 @@ public:
           iid(std::move(instanceId)) {}
 
     void closeButtonPressed() override {
+        // Stage 3f-7 (4c): the moment the close button handler runs — BEFORE
+        // any other work — so a close that never completes is visible in
+        // engine.log by its last receipt.
+        engineLog("[editor] closing requested instance=" + iid);
         // Runs on the message thread. Destroying self synchronously inside
         // the window's own callback is unsafe — schedule the deletion.
         // USER-initiated close → the state capture fires (3d-3).
@@ -804,8 +863,17 @@ void destroyEditorWindow(const std::string& iid, bool captureOnClose) {
         g_editors.erase(it);
     }
     if (win != nullptr) {
+        // Stage 3f-7 (4b): BEGIN before the first call into the plugin (the
+        // editor destructor runs plugin code — editorBeingDeleted et al.),
+        // END with the elapsed ms after it. A destructor that never returns
+        // leaves the BEGIN line as the last receipt.
+        const auto tc0 = std::chrono::steady_clock::now();
+        engineLog("[editor] close BEGIN instance=" + iid);
         win->setVisible(false);
         delete win;   // setContentOwned(ed, true) frees the editor with the window
+        const long long closeMs = std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::steady_clock::now() - tc0).count();
+        engineLog("[editor] close END instance=" + iid + " " + std::to_string(closeMs) + " ms");
     }
     broadcastJson(std::string("{\"type\":\"editorClosed\",\"instanceId\":\"") + escape_json(iid) + "\"}");
     engineLog("[editor] closed instance=" + iid);
@@ -867,9 +935,19 @@ constexpr size_t kMaxPluginStateBytes = 2 * 1024 * 1024;   // ~2 MiB/instance
 // from any thread; plugins guard internally). try/catch: a plugin that
 // throws in getStateInformation must not kill anything.
 void captureAndBroadcastState(const HostedPlugin& h, const char* trigger) {
+    // Stage 3f-7 (4b): BEGIN before the first call into the plugin
+    // (getStateInformation) and END with the elapsed ms after it — the same
+    // receipt shape the editor close got, so a slow/hung capture is located
+    // by its last line in engine.log.
+    const auto tc0 = std::chrono::steady_clock::now();
+    engineLog("[plugin] capture BEGIN instance=" + h.instanceId + " (" + trigger + ")");
     try {
         juce::MemoryBlock mb;
         h.instance->getStateInformation(mb);
+        const long long capMs = std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::steady_clock::now() - tc0).count();
+        engineLog("[plugin] capture END instance=" + h.instanceId + " " +
+                  std::to_string(capMs) + " ms (" + trigger + ")");
         const size_t n = mb.getSize();
         if (n == 0) {
             engineLog(std::string("[plugin] state capture EMPTY (") + trigger + ") — nothing to persist");
@@ -2200,6 +2278,52 @@ struct ScanProbeJob { std::string path; std::string classId; };
 std::mutex g_scanProbeMutex;
 std::vector<ScanProbeJob> g_scanProbeQueue;
 std::condition_variable g_scanProbeCv;
+// Stage 3f-7 — LAZY probing: the scan RECORDS its rows (classId → path)
+// instead of auto-probing every one (probing competed with the user — a 90 s
+// hung probe child and a library-full of instantiates ran uninvited). Probes
+// now run when (a) the frontend asks for a visible row ({"type":"probe"}),
+// (b) the frontend asks for all rows ({"type":"probeAll"} — the scan
+// dialog's "Probe all" button), or (c) a plugin is actually LOADED
+// (probe-on-load, deduped per session until it succeeds). The pause gate in
+// the probe thread keeps even requested probes from competing with a load,
+// an open editor, or a rolling transport.
+std::unordered_map<std::string, std::string> g_scanRowPaths;
+// Probe-on-load dedupe: classId → 0 never probed / 1 probe IN FLIGHT (queued
+// or child running) / 2 probe SUCCEEDED this session. Probe-on-load skips
+// in-flight and succeeded probes (one load entry per class — a two-instance
+// load must not queue two children) and RETRIES a failed one (the plugin
+// loaded, so its earlier failure is stale). Explicit probe/probeAll requests
+// bypass this map entirely (user intent) — its value is patched by the probe
+// thread's outcome receipt.
+std::unordered_map<std::string, int> g_probeOutcomeByClassId;
+// Stage 3f-7: a load is in progress (queued or being instantiated/published
+// by the init worker) — the probe thread pauses for its whole duration.
+std::atomic<bool> g_pluginLoadActive{false};
+
+// Queue ONE probe (shared by the probe message and probe-on-load). The
+// registry is the path source of truth; unknown classIds answer a
+// capabilitiesError scan_probe so the frontend row (if any) is annotated.
+void queueProbeForClassId(const std::string& classId, ix::WebSocket* replyTo) {
+    std::string path;
+    {
+        std::lock_guard<std::mutex> lock(g_scanProbeMutex);
+        auto it = g_scanRowPaths.find(classId);
+        if (it != g_scanRowPaths.end()) path = it->second;
+    }
+    if (path.empty()) {
+        if (replyTo != nullptr)
+            replyTo->send(std::string("{\"type\":\"scan_probe\",\"classId\":\"") +
+                          escape_json(classId) +
+                          "\",\"capabilitiesError\":\"unknown classId — no such scan row (scan first)\"}");
+        return;
+    }
+    {
+        std::lock_guard<std::mutex> lock(g_scanProbeMutex);
+        g_scanProbeQueue.push_back(ScanProbeJob{path, classId});
+    }
+    g_scanProbeCv.notify_one();
+    engineLog("[probe] requested classId=\"" + classId + "\" path=" + path);
+}
 
 // Out-of-process directory scan (3f-2 DESCRIBE stage). Each *.vst3 entry
 // (bundle dir or file, found RECURSIVELY up to 4 subfolder levels) is
@@ -2208,8 +2332,9 @@ std::condition_variable g_scanProbeCv;
 // Crashes and hangs become per-file "failed" entries that now CARRY THE
 // DIAGNOSTICS (exit code, wall-clock elapsedMs, last 2000 chars of the
 // worker's stderr) — the engine and the scan survive. Duplicate classIds are
-// deduped, first by scan order. The resulting rows are queued for the
-// background probes right after scan_result is sent.
+// deduped, first by scan order. Since 3f-7 the rows are RECORDED for lazy
+// probing — the frontend requests probes for the rows it shows (probe /
+// probeAll) and loaded plugins are probed automatically.
 void handle_scan(const juce::var& json, ix::WebSocket& ws) {
     juce::DynamicObject* obj = json.getDynamicObject();
     std::vector<std::string> dirs;
@@ -2228,7 +2353,7 @@ void handle_scan(const juce::var& json, ix::WebSocket& ws) {
         juce::File::getSpecialLocation(juce::File::currentExecutableFile).getFullPathName();
 
     std::string pluginsJson, failedJson, scannedJson;
-    std::vector<ScanProbeJob> probeJobs;
+    std::unordered_map<std::string, std::string> rowPaths;   // 3f-7: classId → path (lazy probing)
     std::unordered_set<std::string> seenClassIds;
     int pluginCount = 0, failedCount = 0;
 
@@ -2348,7 +2473,7 @@ void handle_scan(const juce::var& json, ix::WebSocket& ws) {
                 if (!pluginsJson.empty()) pluginsJson += ",";
                 pluginsJson += line;
                 ++pluginCount;
-                if (!cid.empty()) probeJobs.push_back(ScanProbeJob{path, cid});
+                if (!cid.empty()) rowPaths[cid] = path;   // 3f-7: record for lazy probing (no auto-probe)
             }
             engineLog(std::string("[scan] path=") + path + " outcome=ok elapsedMs=" +
                       std::to_string(elapsedMs()));
@@ -2359,18 +2484,59 @@ void handle_scan(const juce::var& json, ix::WebSocket& ws) {
               << " failed, dirs=" << dirs.size() << std::endl;
     engineLog("[scan] summary: " + std::to_string(pluginCount) + " row(s), " +
               std::to_string(failedCount) + " failed, dirs=" + std::to_string(dirs.size()) +
-              ", probing " + std::to_string(probeJobs.size()) + " row(s) in the background");
+              " — probing is LAZY (3f-7): rows are probed on request (probe/probeAll) or when loaded");
     ws.send(std::string("{\"type\":\"scan_result\",\"plugins\":[") + pluginsJson +
             "],\"failed\":[" + failedJson + "],\"scannedDirs\":[" + scannedJson + "]}");
 
-    // 3f-2 — the rows are SAFE in the frontend list; only now do the probes
-    // start (sequentially, on the dedicated thread). A probe failure can
-    // never retroactively remove the row it belongs to.
+    // Stage 3f-7 — LAZY probing: record the rows for on-demand probes; do
+    // NOT auto-probe. The frontend asks for the rows it actually shows
+    // (probe / probeAll); loaded plugins are probed by probe-on-load.
     {
         std::lock_guard<std::mutex> lock(g_scanProbeMutex);
-        g_scanProbeQueue = std::move(probeJobs);
+        g_scanRowPaths = std::move(rowPaths);
+    }
+}
+
+// Stage 3f-7 — ON-DEMAND probes. {"type":"probe","classId":"…"} probes ONE
+// row; {"type":"probeAll"} probes EVERY row of the last scan (the scan
+// dialog's "Probe all" button). Both run through the same sequential probe
+// thread (one --probe-worker child per row, 90 s cap) and its pause gate —
+// a user-triggered probe still never competes with a load, an open editor,
+// or a rolling transport.
+void handle_probe(const juce::var& json, ix::WebSocket& ws) {
+    juce::DynamicObject* obj = json.getDynamicObject();
+    const std::string classId = obj != nullptr
+        ? obj->getProperty("classId").toString().toStdString() : "";
+    if (classId.empty()) {
+        ws.send("{\"type\":\"error\",\"code\":\"bad_probe\",\"detail\":\"probe requires classId\"}");
+        return;
+    }
+    queueProbeForClassId(classId, &ws);
+}
+
+void handle_probe_all(const juce::var& /*json*/, ix::WebSocket& ws) {
+    std::vector<std::string> ids;
+    {
+        std::lock_guard<std::mutex> lock(g_scanProbeMutex);
+        ids.reserve(g_scanRowPaths.size());
+        for (const auto& kv : g_scanRowPaths) ids.push_back(kv.first);
+    }
+    if (ids.empty()) {
+        engineLog("[probe] probeAll with no scan rows — nothing to probe (scan first)");
+        return;
+    }
+    // Deterministic order (the map is keyed, not ordered) — sort so the
+    // receipts are reproducible.
+    std::sort(ids.begin(), ids.end());
+    {
+        std::lock_guard<std::mutex> lock(g_scanProbeMutex);
+        for (const auto& cid : ids) {
+            auto it = g_scanRowPaths.find(cid);
+            g_scanProbeQueue.push_back(ScanProbeJob{it->second, cid});
+        }
     }
     g_scanProbeCv.notify_one();
+    engineLog("[probe] probeAll requested — " + std::to_string(ids.size()) + " row(s) queued");
 }
 
 // ─── Message handlers ───────────────────────────────────────────────────────
@@ -2395,8 +2561,11 @@ std::string buildCapabilityFields(juce::AudioPluginInstance& inst,
     auto boolStr = [](bool b) { return b ? "true" : "false"; };
     std::string buses;
     int inputBuses = 0, outputBuses = 0;
-    char tailBuf[32];
-    std::snprintf(tailBuf, sizeof(tailBuf), "%.6g", inst.getTailLengthSeconds());
+    // Stage 3f-7: the ONLY plugin-reported double in the record. A synth may
+    // honestly report an infinite tail — serialize non-finite as null (the
+    // frontend renders ∞; null tailSeconds means "infinite"). Bare inf/nan
+    // would make the whole capability JSON unparseable.
+    const std::string tailJson = jsonNumberOrNul(inst.getTailLengthSeconds());
     for (int dir = 0; dir < 2; ++dir) {
         const bool isInput = dir == 0;
         const int n = inst.getBusCount(isInput);
@@ -2429,7 +2598,7 @@ std::string buildCapabilityFields(juce::AudioPluginInstance& inst,
     s += ",\"hasEditor\":" + std::string(boolStr(inst.hasEditor()));
     s += ",\"numPrograms\":" + std::to_string(inst.getNumPrograms());
     s += ",\"latencySamples\":" + std::to_string(inst.getLatencySamples());
-    s += ",\"tailSeconds\":" + std::string(tailBuf);
+    s += ",\"tailSeconds\":" + tailJson;
     s += ",\"supportsDoublePrecision\":" + std::string(boolStr(inst.supportsDoublePrecisionProcessing()));
     s += ",\"inputBuses\":" + std::to_string(inputBuses);
     s += ",\"outputBuses\":" + std::to_string(outputBuses);
@@ -2542,6 +2711,25 @@ std::string loadHostedPlugin(const juce::var& pluginVar, const std::string& inst
         hosted->instanceId = instanceId;
         hosted->classId = chosen->createIdentifierString().toStdString();
         hosted->capabilitiesFields = capsFields;
+        // Stage 3f-7 — PROBE-ON-LOAD: a plugin that gets loaded is probed
+        // (once per session while in flight or succeeded; retried after a
+        // FAILED probe — the successful load makes the earlier failure
+        // stale). The job queues behind the pause gate: the load is still in
+        // progress right now, so the probe child only runs after the publish
+        // (and the 2 s resume delay).
+        {
+            const std::string loadedClassId = chosen->createIdentifierString().toStdString();
+            bool needProbe = false;
+            {
+                std::lock_guard<std::mutex> lock(g_scanProbeMutex);
+                auto it = g_probeOutcomeByClassId.find(loadedClassId);
+                if (it == g_probeOutcomeByClassId.end() || it->second == 0) {
+                    g_probeOutcomeByClassId[loadedClassId] = 1;   // in flight
+                    needProbe = true;
+                }
+            }
+            if (needProbe) queueProbeForClassId(loadedClassId, nullptr);
+        }
         // Stage 3e-3 — the bus→procBuffer channel table: per output bus, the
         // ENABLED channel count (disabled buses report 0). This table is the
         // offset map renderPlugin walks (lock-free, immutable from here).
@@ -3147,6 +3335,10 @@ void handle_load(const juce::var& json, ix::WebSocket& ws, size_t byteSize) {
                 g_pluginInitPending = true;
                 ++g_pluginInitGen;
             }
+            // Stage 3f-7: the probe thread pauses for the WHOLE load — from
+            // queue time (this line, before the worker can even see it) to
+            // the init worker's iteration end.
+            g_pluginLoadActive.store(true, std::memory_order_release);
             g_pluginInitCv.notify_one();
             engineLog("[plugin] init started (async) instances=" + std::to_string(n) +
                       " | seq " + std::to_string(seq) +
@@ -3568,6 +3760,10 @@ void handle_close_editor(const juce::var& json) {
     juce::DynamicObject* obj = json.getDynamicObject();
     std::string iid = obj ? obj->getProperty("instanceId").toString().toStdString() : "";
     if (iid.empty()) iid = "hosted";
+    // Stage 3f-7 (4c): the protocol close is a close REQUEST like the window
+    // button — the same receipt, the moment the request arrives, before any
+    // work (the button path logs the identical line without the suffix).
+    engineLog("[editor] closing requested instance=" + iid + " (closeEditor message)");
     closeEditorAsync(iid);
 }
 
@@ -3666,6 +3862,54 @@ int main(int argc, char** argv) {
         juce::MessageManager::getInstance()->runDispatchLoop();
     });
 
+    // ─── Stage 3f-7 (4a) — message-thread heartbeat ────────────────────────
+    // DIAGNOSTIC ONLY. A watcher thread posts a callAsync every 1 s that
+    // stamps the current time into an atomic; if the stamp is older than 3 s,
+    // NO callAsync has executed for that long — the message thread is not
+    // running posted work (a plugin wedged inside getStateInformation or an
+    // editor destructor is the classic shape, but the heartbeat does NOT
+    // claim a cause — it measures responsiveness and nothing else). One
+    // "[mm] message thread unresponsive for <n> s" line when the staleness
+    // first crosses 3 s, one "[mm] message thread recovered after <n> s"
+    // line when fresh stamps flow again; the same transitions broadcast an
+    // additive engineDiagnostic message so the frontend can name the
+    // condition in a late-loadAck toast (item 5) without reading engine.log.
+    std::atomic<long long> g_mmHeartbeatMs{0};
+    std::thread mm_heartbeat_thread([&g_mmHeartbeatMs]() {
+        auto nowMs = []() {
+            return std::chrono::duration_cast<std::chrono::milliseconds>(
+                std::chrono::steady_clock::now().time_since_epoch()).count();
+        };
+        g_mmHeartbeatMs.store(nowMs(), std::memory_order_release);
+        bool unresponsiveNamed = false;
+        long long stallStartMs = 0;
+        while (!g_should_exit.load()) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(1000));
+            if (g_should_exit.load()) break;
+            juce::MessageManager::callAsync([&g_mmHeartbeatMs, nowMs] {
+                g_mmHeartbeatMs.store(nowMs(), std::memory_order_release);
+            });
+            const long long now = nowMs();
+            const long long last = g_mmHeartbeatMs.load(std::memory_order_acquire);
+            const long long staleMs = now - last;
+            const bool fresh = staleMs < 3000;
+            if (!fresh && !unresponsiveNamed) {
+                unresponsiveNamed = true;
+                stallStartMs = last;
+                const long long s = (now - stallStartMs) / 1000;
+                engineLog("[mm] message thread unresponsive for " + std::to_string(s) + " s");
+                broadcastJson(std::string("{\"type\":\"engineDiagnostic\",\"mm\":\"unresponsive\",\"seconds\":") +
+                              std::to_string(s) + "}");
+            } else if (fresh && unresponsiveNamed) {
+                unresponsiveNamed = false;
+                const long long s = (now - stallStartMs) / 1000;
+                engineLog("[mm] message thread recovered after " + std::to_string(s) + " s");
+                broadcastJson(std::string("{\"type\":\"engineDiagnostic\",\"mm\":\"recovered\",\"seconds\":") +
+                              std::to_string(s) + "}");
+            }
+        }
+    });
+
     // Stage 3b-fix: NO audio initialization at startup. Audio is brought up
     // lazily on the first transport play (or simulated via --null-audio), so
     // a headless machine boots cleanly and the protocol test does not depend
@@ -3709,6 +3953,13 @@ int main(int argc, char** argv) {
                           ", retries " + std::to_string(msg->errorInfo.retries) + ")");
             } else if (msg->type == ix::WebSocketMessageType::Message) {
                 std::string message = msg->str;
+                // Stage 3f-7 (4d): ONE arrival line per incoming message,
+                // BEFORE any parsing. The type is sniffed cheaply from the
+                // first 64 bytes (or "unknown"); the CONTENTS are never
+                // logged (the pre-existing parse-failure receipt already
+                // bounds its prefix at 80 chars for the error path only).
+                engineLog("[ws] message type=" + wsPeekType(message) +
+                          " bytes=" + std::to_string(message.size()));
                 auto parsed = juce::JSON::parse(juce::String(message));
                 juce::DynamicObject* obj = parsed.getDynamicObject();
                 if (!obj) {
@@ -3739,6 +3990,13 @@ int main(int argc, char** argv) {
                     handle_panic();
                 } else if (type == "scan") {
                     handle_scan(parsed, ws);
+                } else if (type == "probe") {
+                    handle_probe(parsed, ws);   // 3f-7: lazy probing — one visible row
+                } else if (type == "probeAll") {
+                    handle_probe_all(parsed, ws);   // 3f-7: the scan dialog's "Probe all"
+                } else if (type == "engineDiagnostic") {
+                    // Reserved SERVER → CLIENT name (the 3f-7 stall
+                    // diagnostics). A client sending it is ignored silently.
                 } else if (type == "mix") {
                     handle_mix(parsed);
                 } else if (type == "dispatch_log") {
@@ -3910,6 +4168,11 @@ int main(int argc, char** argv) {
                 g_pluginInitPending = false;
                 seenGen = g_pluginInitGen;
             }
+            // Stage 3f-7: the load is in progress until this iteration ends —
+            // the probe thread pauses for all of it (queue time already set
+            // the flag on the WS thread; this re-assert covers superseding
+            // requests that were queued while a previous iteration ran).
+            g_pluginLoadActive.store(true, std::memory_order_release);
             const auto t0 = std::chrono::steady_clock::now();
             // ─── Stage 3d-4: instantiate the requested set, entry by entry ───
             // Per-entry independence: one broken binary must not kill the
@@ -4236,6 +4499,12 @@ int main(int argc, char** argv) {
             engineLog("[plugin] publish: done | seq " + std::to_string(req.seq) +
                       " retired=" + std::to_string(retiredNow.size()) +
                       " elapsed=" + std::to_string(pubMs()) + "ms");
+            // Stage 3f-7: the load iteration is over — clear the probe pause
+            // unless ANOTHER request is already queued behind it.
+            {
+                std::lock_guard<std::mutex> lock(g_pluginInitMutex);
+                g_pluginLoadActive.store(g_pluginInitPending, std::memory_order_release);
+            }
         }
     });
 
@@ -4280,21 +4549,73 @@ int main(int argc, char** argv) {
     // probe failure, timeout or crash sends a capabilitiesError scan_probe —
     // it can NEVER remove or change a row (rows were already sent with
     // scan_result; the frontend merges by classId).
+    // Stage 3f-7: probing must not compete with the user — the pause gate is
+    // evaluated CONTINUOUSLY (every loop pass AND during a running child's
+    // 250 ms wait slices): a load in progress, ANY open editor window, or a
+    // rolling transport holds the gate; dequeueing stays blocked and "[probe]
+    // paused (reason=…)" / "[probe] resumed" are logged ONCE per state change
+    // while there is probe activity to gate. A probe already RUNNING finishes
+    // normally (the gate never touches a running child — it only blocks the
+    // next dequeue); resume waits 2 s after every condition has cleared.
     std::thread scan_probe_thread([&server]() {
         const juce::String exePath =
             juce::File::getSpecialLocation(juce::File::currentExecutableFile).getFullPathName();
+        bool pausedLogged = false;
+        std::chrono::steady_clock::time_point allClearAt{};
+        auto pauseReason = []() -> std::string {
+            std::string reason;
+            if (g_pluginLoadActive.load(std::memory_order_acquire)) reason = "load in progress";
+            {
+                std::lock_guard<std::mutex> lk(g_editorMutex);
+                if (!g_editors.empty()) reason += reason.empty() ? "editor window open" : " + editor window open";
+            }
+            if (g_engine.playing.load(std::memory_order_relaxed))
+                reason += reason.empty() ? "transport playing" : " + transport playing";
+            return reason;
+        };
+        // One gate evaluation. Returns true when the gate is HOLDING (paused).
+        auto pauseUpdate = [&pausedLogged, &allClearAt, &pauseReason]() -> bool {
+            const std::string reason = pauseReason();
+            if (!reason.empty()) {
+                if (!pausedLogged) {
+                    engineLog("[probe] paused (reason=" + reason + ")");
+                    pausedLogged = true;
+                }
+                allClearAt = {};
+                return true;
+            }
+            if (pausedLogged) {
+                const auto now = std::chrono::steady_clock::now();
+                if (allClearAt.time_since_epoch().count() == 0) allClearAt = now;
+                if (std::chrono::duration_cast<std::chrono::milliseconds>(now - allClearAt).count() < 2000) {
+                    return true;   // 2 s all-clear delay before resuming
+                }
+                engineLog("[probe] resumed");
+                pausedLogged = false;
+                allClearAt = {};
+            }
+            return false;
+        };
         while (!g_should_exit.load()) {
             ScanProbeJob job;
+            bool haveJob = false;
             {
                 std::unique_lock<std::mutex> lock(g_scanProbeMutex);
                 g_scanProbeCv.wait_for(lock, std::chrono::milliseconds(200), [] {
                     return !g_scanProbeQueue.empty() || g_should_exit.load();
                 });
                 if (g_should_exit.load()) break;
-                if (g_scanProbeQueue.empty()) continue;
-                job = g_scanProbeQueue.front();
-                g_scanProbeQueue.erase(g_scanProbeQueue.begin());
+                if (!g_scanProbeQueue.empty()) {
+                    // Dequeue gate: a holding gate keeps the job QUEUED (a
+                    // probe already running finishes normally).
+                    if (!pauseUpdate()) {
+                        job = g_scanProbeQueue.front();
+                        g_scanProbeQueue.erase(g_scanProbeQueue.begin());
+                        haveJob = true;
+                    }
+                }
             }
+            if (!haveJob) continue;
             const auto t0 = std::chrono::steady_clock::now();
             const auto elapsedMs = [&t0]() {
                 return std::chrono::duration_cast<std::chrono::milliseconds>(
@@ -4318,10 +4639,14 @@ int main(int argc, char** argv) {
             } else {
                 // 90 s cap — 360 × 250 ms slices; g_should_exit checked between
                 // slices so engine shutdown never waits behind a hung probe.
+                // Stage 3f-7: the pause gate is re-evaluated on EVERY slice —
+                // a load/editor/transport starting MID-PROBE still logs its
+                // transition (the child itself finishes normally either way).
                 bool finished = false;
                 for (int i = 0; i < 360 && !finished; ++i) {
                     finished = child.waitForProcessToFinish(250);
                     if (g_should_exit.load()) break;
+                    pauseUpdate();
                 }
                 if (!finished) {
                     child.kill();
@@ -4393,6 +4718,14 @@ int main(int argc, char** argv) {
                 logLine += " stderrTail=" + tail;
             }
             engineLog(logLine);
+            // Stage 3f-7: record the outcome for probe-on-load's dedupe — a
+            // SUCCEEDED probe (2) is never repeated by a load; a FAILED one
+            // (0) is retried the next time the plugin loads (its earlier
+            // failure is stale once the plugin actually hosts).
+            {
+                std::lock_guard<std::mutex> lock(g_scanProbeMutex);
+                g_probeOutcomeByClassId[job.classId] = (std::string(outcome) == "ok") ? 2 : 0;
+            }
             std::cout << "[engine] scan_probe " << outcome
                       << " (" << elapsedMs() << "ms)" << std::endl;
         }
@@ -4418,6 +4751,8 @@ int main(int argc, char** argv) {
     // Stage 3f-6: the watchdog sleeps in 1 s slices and re-checks
     // g_should_exit — join is bounded.
     plugin_init_watchdog.join();
+    // Stage 3f-7 (4a): the heartbeat sleeps in 1 s slices — join is bounded.
+    mm_heartbeat_thread.join();
     // Stage 3f-2: the probe thread checks g_should_exit between its 250 ms
     // wait slices and kills any in-flight probe child — join is bounded.
     scan_probe_thread.join();

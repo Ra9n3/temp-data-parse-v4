@@ -1737,3 +1737,77 @@ Falcon/BBCSO behaviour — whether their getStateInformation blocks, for how
 long, and whether the patches survive a rapid replace — can only be verified
 by hand on real Windows with the shipped installer (stated in the commit
 message).
+
+## Stage 3f-7 — scan/probe robustness + stall diagnostics (tag `probe-safe-v1`, engine 0.8.3)
+
+**Non-finite numbers are null, and null tailSeconds is "infinite".** A
+plugin's `getTailLengthSeconds` is the only plugin-reported double in the
+capability record, and a synth may honestly report an infinite tail. The old
+`%.6g` serialization emitted bare `inf` — invalid JSON that the frontend's
+`JSON.parse` (and juce::JSON in the CI probe) rejects WHOLE. The fix is
+deliberately at `buildCapabilityFields`, the single serializer behind the
+probe worker, the load-path handshake, and (via the probe) the scan rows:
+non-finite in, `null` out. The frontend treats null (and any non-finite that
+slips through) as infinite and renders ∞. No numeric field other than
+tailSeconds can be non-finite today; the helper is generic so a future
+plugin-reported double inherits the contract.
+
+**The pause gate is a state machine around the WHOLE probe activity, not
+just the dequeue instant.** Evaluating the gate only when dequeuing would
+miss a load/editor/transport that starts while a 90 s probe child is already
+running (the gate would next evaluate a minute later, when the condition had
+already cleared) — so the gate re-evaluates on every loop pass AND inside
+the child-wait's 250 ms slices, logging each transition once. The child
+itself is never touched ("probes already running finish normally" — the
+gate's only power is to keep the NEXT job queued). Resume requires 2 s of
+ALL conditions clear, so a load burst does not flap the state. The
+`g_pluginLoadActive` flag spans the load from WS-queue time to the init
+worker's iteration end (re-asserted at dequeue, cleared only when no newer
+request is pending) — probe-on-load therefore ALWAYS logs its
+"load in progress" pause deterministically: the job is queued while the
+flag is provably held.
+
+**Lazy probing trades completeness for politeness, with three doors back.**
+The scan used to probe every row automatically — an uninvited
+library-full of instantiates that competed with the user (item 2 exists
+because of it). Now: rows visible in the scan dialog or the picker are
+probed on request (the dialogs ask for exactly the rows they render that
+have neither capabilities nor a capabilitiesError; the app dedupes across
+dialogs), "Probe all" re-probes everything explicitly, and probe-on-load
+probes whatever actually gets hosted. Probe-on-load's dedupe is
+three-state (never / in-flight / succeeded): a two-instance load of the
+same plugin must queue exactly ONE child, and a FAILED probe is retried on
+the next load because a successful hosting makes the earlier failure stale.
+
+**The heartbeat is diagnostic only (4d amendment honored).** The heartbeat
+measures exactly one thing: no posted message ran for >3 s. It does NOT
+name a cause (a plugin wedged in getStateInformation or an editor
+destructor is the classic shape, but the log line and the engineDiagnostic
+broadcast only report the measured unresponsiveness and the recovery) — no
+killing, no skipping, no inference. The recovery line's <n> is the FULL
+stall; the unresponsive line's <n> is the staleness at detection (~3-4 s).
+
+**The closing-requested receipt exists on BOTH request paths.** The spec's
+4c is the close-button handler; CI cannot click the X, so the protocol
+`closeEditor` message logs the identical receipt (with a suffix naming the
+path). Both are honest "a close was requested" receipts at the earliest
+possible moment; the BEGIN/END pair around the destructor (4b) is what
+shows whether the close COMPLETED.
+
+**Late-loadAck causes use only signals the frontend genuinely has.** The
+mm-unresponsive cause rides the additive `engineDiagnostic` broadcast (the
+frontend cannot read engine.log); the "previous load in progress" cause is
+the client's own load bookkeeping (a sent load whose seq is older than the
+current one AND for which NO plugin_state receipt has arrived — one receipt
+proves the pipeline is moving and clears it). With neither signal the toast
+keeps today's plain text; the causes are APPENDED, never invented.
+
+**What CI proves and what only hands can.** The probe receipt for an
+infinite-tail fixture (outcome=ok, tailSeconds null), the three pause
+reasons (transport/editor/load), the lazy silence window, probeAll, the
+[mm] heartbeat against D2's real 10 s message-thread stall, the BEGIN/END
+and arrival log lines — all engine.log- or wire-asserted. The REAL
+Falcon/BBCSO stall behaviour — where it wedges, how long, what the user
+feels during it, and whether the new toasts help — can only be verified by
+hand on real Windows with the shipped installer (stated in the commit
+message).

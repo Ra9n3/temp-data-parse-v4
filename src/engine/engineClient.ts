@@ -295,7 +295,10 @@ export interface PluginCapabilitiesMessage {
   hasEditor: boolean;
   numPrograms: number;
   latencySamples: number;
-  tailSeconds: number;
+  /** Stage 3f-7: a plugin may report a NON-FINITE tail (inf/-inf/nan are
+   * invalid JSON — the engine serializes them as null). null means
+   * "infinite"; the Plugin info tooltip renders ∞. */
+  tailSeconds: number | null;
   supportsDoublePrecision: boolean;
   inputBuses: number;
   outputBuses: number;
@@ -303,6 +306,14 @@ export interface PluginCapabilitiesMessage {
    * "loaded" carries (the preferred load-matching key). */
   classId: string;
   buses: PluginBusInfo[];
+}
+
+/** Stage 3f-7 — format the tail for the Plugin info tooltip. A plugin may
+ * report a non-finite tail (inf/-inf/nan); the engine serializes those as
+ * null, and null means "infinite" — rendered as ∞. PURE, deterministic. */
+export function formatTailSeconds(tailSeconds: number | null | undefined): string {
+  if (tailSeconds === null || tailSeconds === undefined || !Number.isFinite(tailSeconds)) return "∞";
+  return `${Number(tailSeconds.toFixed(3))}s`;
 }
 
 /** Stage 3e-1 — format a capability record as the read-only "Plugin info"
@@ -321,7 +332,7 @@ export function formatPluginInfo(c: PluginCapabilitiesMessage): string {
   if (c.hasEditor) flags.push("editor");
   if (c.supportsDoublePrecision) flags.push("64-bit");
   if (flags.length) lines.push(`type: ${flags.join(", ")}`);
-  lines.push(`programs: ${c.numPrograms} · latency: ${c.latencySamples} samples · tail: ${Number(c.tailSeconds.toFixed(3))}s`);
+  lines.push(`programs: ${c.numPrograms} · latency: ${c.latencySamples} samples · tail: ${formatTailSeconds(c.tailSeconds)}`);
   lines.push(`buses: ${c.inputBuses} in / ${c.outputBuses} out`);
   for (const b of c.buses) {
     const attrs: string[] = [];
@@ -332,6 +343,38 @@ export function formatPluginInfo(c: PluginCapabilitiesMessage): string {
   }
   if (c.classId) lines.push(`class: ${c.classId}`);
   return lines.join("\n");
+}
+
+/** Stage 3f-7 — the scan rows whose capability probe has not run yet (no
+ * capabilities AND no capabilitiesError): the dialogs request probes for
+ * EXACTLY these — lazy probing (the engine no longer probes every row
+ * automatically). PURE: rows are neither mutated nor reordered. */
+export function rowsNeedingProbe(rows: ScannedPlugin[]): string[] {
+  return rows
+    .filter((p) => p.classId !== undefined && p.capabilities === undefined && p.capabilitiesError === undefined)
+    .map((p) => p.classId as string);
+}
+
+/** Stage 3f-7 — compose the late-loadAck failure reason (item 5): the toast
+ * must name the LIKELY CAUSE using engine messages already available — the
+ * message-thread heartbeat (engineDiagnostic mm=unresponsive) and an earlier
+ * load still in progress (no plugin_state receipt has followed its ack) —
+ * instead of only "never acknowledged". PURE, deterministic. */
+export function describeLateLoadAck(
+  timeoutMs: number,
+  mm: { seconds: number; ageMs: number } | null,
+  previousLoadUnsettled: boolean,
+): string {
+  const base = `loadAck timeout after ${timeoutMs}ms — engine never acknowledged the load`;
+  const causes: string[] = [];
+  if (mm !== null) {
+    const ageS = Math.round(mm.ageMs / 1000);
+    causes.push(`the engine's message thread was reported unresponsive ${mm.seconds}s ago (${ageS}s since the report) — see its [mm] log lines`);
+  }
+  if (previousLoadUnsettled) {
+    causes.push("a previous plugin load is still in progress (no plugin_state receipt has followed its ack)");
+  }
+  return causes.length > 0 ? `${base}; likely cause: ${causes.join("; ")}` : base;
 }
 
 /** Stage 3d-1 — the hosted plugin's editor window is up. A repeat openEditor
@@ -372,7 +415,17 @@ export interface PluginSavedStateMessage {
   state?: "too_large";
 }
 
-type EngineMessage = HelloMessage | PongMessage | ErrorMessage | StateMessage | ScanResultMessage | ScanProbeMessage | PluginStateMessage | LoadAckMessage | EditorEventMessage | PluginSavedStateMessage | PluginCapabilitiesMessage;
+/** Stage 3f-7 (4a) — the message-thread heartbeat, DIAGNOSTIC ONLY: the
+ * engine measures that no callAsync ran for >3 s (it does NOT claim a
+ * cause). The frontend stores the last unresponsive report so a
+ * late-loadAck toast can name the condition (item 5). */
+export interface EngineDiagnosticMessage {
+  type: "engineDiagnostic";
+  mm: "unresponsive" | "recovered";
+  seconds: number;
+}
+
+type EngineMessage = HelloMessage | PongMessage | ErrorMessage | StateMessage | ScanResultMessage | ScanProbeMessage | PluginStateMessage | LoadAckMessage | EditorEventMessage | PluginSavedStateMessage | PluginCapabilitiesMessage | EngineDiagnosticMessage;
 
 // Deterministic backoff sequence (seconds): 1, 2, 4, 8, 16 — no jitter.
 const BACKOFF_SEQUENCE = [1, 2, 4, 8, 16] as const;
@@ -462,6 +515,13 @@ export class EngineClient {
     timer: number;
   } | null = null;
   private static readonly LOAD_ACK_TIMEOUT_MS = 4000;
+  // Stage 3f-7 (item 5): the message-thread heartbeat's last unresponsive
+  // report (engineDiagnostic mm=unresponsive; cleared by mm=recovered) and
+  // the seq of the oldest load that has been SENT but has produced NO
+  // plugin_state receipt yet — the two "already available" signals the
+  // late-loadAck toast names as likely causes.
+  private mmUnresponsive: { seconds: number; atMs: number } | null = null;
+  private loadSentSeqAwaitingPluginState = 0;
 
   constructor(onStatusChange: (status: EngineStatus, rtt: number | null) => void) {
     this.onStatusChange = onStatusChange;
@@ -580,7 +640,18 @@ export class EngineClient {
           // Stage 3f-2: one per row AFTER scan_result — the app merges it
           // into the stored row by classId (failures never remove rows).
           this.onScanProbeChange?.(msg);
+        } else if (msg.type === "engineDiagnostic") {
+          // Stage 3f-7 (4a/5): the message-thread heartbeat, DIAGNOSTIC ONLY.
+          // Stored so a late-loadAck toast can name the condition.
+          if (msg.mm === "unresponsive" && typeof msg.seconds === "number") {
+            this.mmUnresponsive = { seconds: msg.seconds, atMs: Date.now() };
+          } else if (msg.mm === "recovered") {
+            this.mmUnresponsive = null;
+          }
         } else if (msg.type === "plugin_state") {
+          // Stage 3f-7 (item 5): ANY plugin_state receipt proves the engine's
+          // pipeline is moving — clears the "previous load unsettled" signal.
+          this.loadSentSeqAwaitingPluginState = 0;
           this.onPluginStateChange?.(msg);
         } else if (msg.type === "editorOpened" || msg.type === "editorClosed") {
           // Stage 3d-1: engine-owned editor window lifecycle.
@@ -719,12 +790,20 @@ export class EngineClient {
       const timer = window.setTimeout(() => {
         if (this.pendingLoad && this.pendingLoad.seq === seq) {
           this.pendingLoad = null;
-          const reason = `loadAck timeout after ${EngineClient.LOAD_ACK_TIMEOUT_MS}ms — engine never acknowledged the load`;
+          // Stage 3f-7 (item 5): name the LIKELY CAUSE from engine messages
+          // already available, not only "never acknowledged".
+          const mm = this.mmUnresponsive !== null
+            ? { seconds: this.mmUnresponsive.seconds, ageMs: Date.now() - this.mmUnresponsive.atMs }
+            : null;
+          const previousLoadUnsettled =
+            this.loadSentSeqAwaitingPluginState !== 0 && this.loadSentSeqAwaitingPluginState < seq;
+          const reason = describeLateLoadAck(EngineClient.LOAD_ACK_TIMEOUT_MS, mm, previousLoadUnsettled);
           writeErrorLog("engine", `load FAILED: ${reason} (sent ${events.length} events, ${bytes} bytes, seq ${seq})`);
           reject({ ok: false, reason, sentEvents: events.length, sentBytes: bytes });
         }
       }, EngineClient.LOAD_ACK_TIMEOUT_MS);
       this.pendingLoad = { seq, sentEvents: events.length, sentBytes: bytes, resolve, reject, timer };
+      this.loadSentSeqAwaitingPluginState = seq;
       this.ws.send(payload);
     });
   }
@@ -775,6 +854,23 @@ export class EngineClient {
       const msg: Record<string, unknown> = { type: "scan" };
       if (dirs && dirs.length) msg.dirs = dirs;
       this.ws.send(JSON.stringify(msg));
+    }
+  }
+
+  /** Stage 3f-7 (item 3): request the capability probe for ONE scan row —
+   * the dialogs call this for the rows they actually show (lazy probing;
+   * the engine no longer probes every row after a scan). */
+  probe(classId: string): void {
+    if (this.ws && this.ws.readyState === WebSocket.OPEN) {
+      this.ws.send(JSON.stringify({ type: "probe", classId }));
+    }
+  }
+
+  /** Stage 3f-7 (item 3): probe EVERY row of the last scan — the scan
+   * dialog's "Probe all" button. */
+  probeAll(): void {
+    if (this.ws && this.ws.readyState === WebSocket.OPEN) {
+      this.ws.send(JSON.stringify({ type: "probeAll" }));
     }
   }
 

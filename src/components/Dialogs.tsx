@@ -9,7 +9,7 @@ import {
   type PluginScanState,
 } from "../plugins/mockService";
 import type { ScanFailedEntry, ScannedPlugin } from "../engine/engineClient";
-import { swapPickerRows } from "../engine/engineClient";
+import { rowsNeedingProbe, swapPickerRows } from "../engine/engineClient";
 import { BUILT_IN_PROFILES } from "../plugins/expressionMaps";
 import type { ExportTrackMode } from "../export/midi";
 import { exportMergedMidi, exportPerTrackMidi } from "../export/midi";
@@ -78,9 +78,11 @@ export function VstBrowser({
    * name + vendor), and failed entries come from the scan's isolation report.
    * Stage 3f-2: onScan carries the dialog's extra folder paths (one per line,
    * persisted under localStorage "scorch.scanDirs") alongside the shell's
-   * defaults.
+   * defaults. Stage 3f-7 (item 3): the dialog requests capability probes for
+   * the rows it actually SHOWS (lazy probing — the engine no longer probes
+   * every row after a scan), and "Probe all" probes every row explicitly.
    */
-  desktop?: { result: { plugins: ScannedPlugin[]; failed: ScanFailedEntry[] } | null; onScan: (extraDirs?: string[]) => void } | null;
+  desktop?: { result: { plugins: ScannedPlugin[]; failed: ScanFailedEntry[] } | null; onScan: (extraDirs?: string[]) => void; onRequestProbe?: (classId: string) => void; onProbeAll?: () => void } | null;
 }) {
   const [query, setQuery] = useState("");
   const [loaded, setLoaded] = useState(0);
@@ -121,6 +123,17 @@ export function VstBrowser({
     );
   }, [query, isDesktop, realPlugins]);
 
+  // Stage 3f-7 (item 3): LAZY probing — request a capability probe for every
+  // VISIBLE row that has neither capabilities nor a capabilitiesError yet.
+  // Rows the user never sees are never probed; the engine's pause gate keeps
+  // even these probes off a running load/editor/transport. The requested
+  // set lives in the app (dedupes across dialogs).
+  const onRequestProbe = isDesktop ? desktop?.onRequestProbe : undefined;
+  useEffect(() => {
+    if (!open || !isDesktop || onRequestProbe === undefined) return;
+    for (const classId of rowsNeedingProbe(realPlugins)) onRequestProbe(classId);
+  }, [open, isDesktop, realPlugins, onRequestProbe]);
+
   if (!open) return null;
 
   return (
@@ -148,6 +161,16 @@ export function VstBrowser({
             <option value="empty">Empty</option>
             <option value="loaded">Loaded</option>
           </select>
+        )}
+        {isDesktop && (
+          <button
+            type="button"
+            title="Probe every row of the last scan (capability details for the whole list) — probing pauses while a load, an editor, or playback is active"
+            onClick={() => desktop?.onProbeAll?.()}
+            className="shrink-0 rounded-md bg-white/10 px-2.5 py-1.5 text-xs text-stone-100 hover:bg-white/15"
+          >
+            Probe all
+          </button>
         )}
       </div>
       <div className="text-[11px] text-stone-500">
@@ -307,6 +330,7 @@ export function PluginSwapDialog({
   onClose,
   onReplace,
   onRemove,
+  onRequestProbe,
 }: {
   open: boolean;
   /** The plugin currently bound to the track (the <old> in the confirm). */
@@ -315,6 +339,9 @@ export function PluginSwapDialog({
   onClose: () => void;
   onReplace: (pick: ScannedPlugin) => void;
   onRemove: () => void;
+  /** Stage 3f-7 (item 3): the picker requests capability probes for the rows
+   * it shows (lazy probing) — the app dedupes across dialogs. */
+  onRequestProbe?: (classId: string) => void;
 }) {
   const [query, setQuery] = useState("");
   const [pending, setPending] = useState<"remove" | ScannedPlugin | null>(null);
@@ -327,6 +354,12 @@ export function PluginSwapDialog({
     }
   }, [open]);
   const rows = useMemo(() => swapPickerRows(plugins, query), [plugins, query]);
+  // Stage 3f-7 (item 3): the picker requests probes for the VISIBLE rows
+  // (the filtered pipeline) that have not been probed yet — lazy probing.
+  useEffect(() => {
+    if (!open || onRequestProbe === undefined) return;
+    for (const classId of rowsNeedingProbe(rows)) onRequestProbe(classId);
+  }, [open, rows, onRequestProbe]);
   if (!open) return null;
   return (
     <Modal title={pending ? "Confirm" : "Swap plugin"} onClose={onClose}>

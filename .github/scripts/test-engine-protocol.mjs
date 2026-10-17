@@ -356,10 +356,14 @@ const timeout = setTimeout(() => {
 // 10 s message-thread stalls run ASYNCHRONOUSLY to the assertions — the 5 s
 // loaded-receipt bound is asserted EXPLICITLY per phase below — but the
 // wall-clock budget still covers them: 90 s.
-}, mode === "scan" ? 180000 : mode === "host" ? 40000 : mode === "multi" ? 90000 : 30000);
+}, mode === "scan" ? 180000 : mode === "host" ? 60000 : mode === "multi" ? 90000 : 30000);
 
 // scan-mode flags
 let scanSent = false, scanResultOk = false, aliveAfterCrashOk = false, defaultScanOk = false;
+// Stage 3f-7: lazy-probe phase machine (silence → explicit-synth →
+// explicit-crash → probeAll), the silence deadline, the probeAll receipt
+// count, and whether the transport-pause probe ran.
+let scanLazyPhase = "silence", scanLazyDeadline = 0, scanProbeAllCount = 0, scanPauseProbed = false;
 // 3f-2 — background probe collection: classId → {kind, capabilities|error}
 const scanProbes = {};
 let scanProbesAsserted = false;
@@ -367,6 +371,9 @@ let scanSynthClassId = null, scanCrashClassId = null, scanHangClassId = null;
 let postProbePongOk = false;
 // host-mode flags + shared collection
 let hostScanSent = false, hostPluginStateOk = false, hostPhase = 0;
+// Stage 3f-7: the probe receipt (probe-on-load + the editor-pause probe) and
+// whether the phase-31 probe was sent while the editor window was open.
+let hostProbeReceiptOk = false, hostEditorPauseProbeSent = false;
 // Stage 3d-1: editor-window contract flags.
 let hostEditorNegOk = false, hostEditorOpenOk = false, hostEditorFocusOk = false, hostEditorCloseOk = false;
 let hostHeadlessSkip = false;   // editor_unavailable("no display") tolerated like multi M-7
@@ -604,9 +611,9 @@ ws.addEventListener("message", (event) => {
     }
     if (msg.type === "hello" && multiPhase === 0) {
       if (msg.protocol !== 1) fail(`expected protocol 1, got ${msg.protocol}`);
-      if (msg.engineVersion !== "0.8.2") fail(`expected 0.8.2, got ${msg.engineVersion}`);
+      if (msg.engineVersion !== "0.8.3") fail(`expected 0.8.3, got ${msg.engineVersion}`);
       if (!fixtureDir) fail("multi mode requires a fixture dir argument");
-      console.log("[test] hello OK (0.8.2) — scanning for the stand-in host plugin...");
+      console.log("[test] hello OK (0.8.3) — scanning for the stand-in host plugin...");
       multiPhase = 1;
       ws.send(JSON.stringify({ type: "scan", dirs: [fixtureDir] }));
     } else if (msg.type === "scan_result" && multiPhase === 1) {
@@ -807,7 +814,27 @@ ws.addEventListener("message", (event) => {
     } else if (msg.type === "plugin_capabilities") {
       const iid = msg.instanceId || "hosted";
       hostCapsCount[iid] = (hostCapsCount[iid] ?? 0) + 1;
+      // Stage 3f-7 (item 1): this engine runs with SCORCH_TESTVST_INFTAIL=1 —
+      // the fixture reports an INFINITE tail; the engine must serialize it as
+      // null ("infinite"), never a bare inf (invalid JSON).
+      if (msg.tailSeconds !== null) fail(`3f-7: tailSeconds must serialize as null for an infinite tail, got ${msg.tailSeconds}`);
       if (!hostFirstCaps) hostFirstCaps = msg;
+    } else if (msg.type === "scan_probe") {
+      // Stage 3f-7 (items 1+3): probe-ON-LOAD queues this automatically (the
+      // engine probed the plugin it just loaded), and phase 31's explicit
+      // probe (sent while the editor window is OPEN — the pause-gate proof)
+      // answers after the editor closes + the 2 s resume delay. The receipt
+      // must be a SUCCESS with tailSeconds null (infinite tail, valid JSON).
+      if (msg.classId === hostClassId && msg.capabilities !== undefined) {
+        if (msg.capabilities.tailSeconds !== null) fail(`3f-7: probe receipt tailSeconds must be null (infinite), got ${msg.capabilities.tailSeconds}`);
+        if (typeof msg.capabilities.latencySamples !== "number") fail("probe receipt capabilities must carry numeric latencySamples");
+        hostProbeReceiptOk = true;
+        console.log(`[test] scan_probe ✓ probe receipt: capabilities with tailSeconds=null (infinite tail, valid JSON) — outcome=ok`);
+        if (hostPhase === 33) {
+          console.log("[test] phase L2 ✓ the editor-pause probe answered AFTER the editor closed (+ 2 s resume) — shutdown");
+          finishAndShutdown();
+        }
+      }
     }
     if (msg.type === "hello" && !hostScanSent) {
       helloOk = true;
@@ -1115,13 +1142,23 @@ ws.addEventListener("message", (event) => {
     } else if (msg.type === "editorOpened" && hostPhase === 31) {
       if (msg.focused !== true) fail(`repeat openEditor must re-echo editorOpened with focused=true (one editor per instance), got ${JSON.stringify(msg)}`);
       hostEditorFocusOk = true;
-      console.log("[test] phase K ✓ repeat openEditor focused the existing window (ONE editor per instance) — closing");
+      console.log("[test] phase K ✓ repeat openEditor focused the existing window (ONE editor per instance) — requesting a probe DURING the open editor (pause gate), then closing");
       hostPhase = 32;
+      hostEditorPauseProbeSent = true;
+      ws.send(JSON.stringify({ type: "probe", classId: hostClassId }));   // 3f-7: must PAUSE while the editor is open
       ws.send(JSON.stringify({ type: "closeEditor", instanceId: "hosted" }));
     } else if (msg.type === "editorClosed" && hostPhase === 32) {
       hostEditorCloseOk = true;
-      console.log("[test] phase L ✓ editor CLOSED cleanly (protocol close; the X button and plugin unload converge on the same path) — shutdown");
-      finishAndShutdown();
+      // Stage 3f-7 (item 2): the probe requested in phase 31 sat behind the
+      // pause gate (editor open); it resumes 2 s after this close and its
+      // receipt answers in phase 33 (the scan_probe branch above).
+      console.log("[test] phase L ✓ editor CLOSED cleanly (protocol close; the X button and plugin unload converge on the same path) — waiting for the paused probe to resume and answer…");
+      hostPhase = 33;
+      setTimeout(() => {
+        if (hostPhase === 33 && !hostProbeReceiptOk) fail("3f-7: the probe requested during the open editor never answered after the close — the pause gate stalled it");
+      }, 15000);
+    } else if (msg.type === "scan_probe" && hostPhase === 33 && hostEditorPauseProbeSent && !hostProbeReceiptOk) {
+      fail(`the paused probe's receipt arrived without capabilities: ${JSON.stringify(msg).slice(0, 160)}`);
     } else if (msg.type === "error" && msg.code === "editor_unavailable" && hostPhase === 30 && !hostEditorOpenOk) {
       // Headless tolerance — SAME contract as multi M-7: a display-less host
       // (this box, disconnected RDP) cannot create a window; the engine's
@@ -1143,7 +1180,7 @@ ws.addEventListener("message", (event) => {
     if (msg.type === "hello" && !helloOk) {
       helloOk = true;
       if (msg.protocol !== 1) fail(`expected protocol 1, got ${msg.protocol}`);
-      if (msg.engineVersion !== "0.8.2") fail(`expected 0.8.2, got ${msg.engineVersion}`);
+      if (msg.engineVersion !== "0.8.3") fail(`expected 0.8.3, got ${msg.engineVersion}`);
       if (!fixtureDir) fail("scan mode requires a fixture dir argument");
       console.log("[test] hello OK — sending scan of fixture dir + nested dir (dedup proof):", fixtureDir);
       scanSent = true;
@@ -1198,45 +1235,92 @@ ws.addEventListener("message", (event) => {
       if (failed.some((f) => f.path.includes("CorruptDummy"))) fail("corrupt dummy must fail gracefully (zero types), not as a scan failure");
       if (plugins.some((p) => p.path.includes("CorruptDummy"))) fail("corrupt dummy must not yield plugin types");
       console.log("[test] corrupt dummy isolated silently (graceful zero-type load) ✓");
-      // 6. Engine alive after the crash: ping must answer. The background
-      //    probes stream in while we wait (ProbeHangDummy will take 90 s).
+      // 6. Engine alive after the crash: ping must answer. 3f-7: probes are
+      //    now LAZY — nothing streams until this script asks.
       ws.send(JSON.stringify({ type: "ping" }));
     } else if (msg.type === "pong" && scanResultOk && !aliveAfterCrashOk) {
       aliveAfterCrashOk = true;
-      console.log("[test] engine alive after crash isolation (ping→pong) ✓ — waiting for 3 background scan_probes (ProbeHangDummy eats its 90s timeout)…");
-    } else if (msg.type === "scan_probe" && scanResultOk) {
-      // 3f-2: exactly ONE scan_probe per row classId, carrying EXACTLY ONE
-      // of capabilities / capabilitiesError.
-      if (!msg.classId) fail(`scan_probe without classId: ${JSON.stringify(msg).slice(0, 200)}`);
+      // Stage 3f-7 (item 3) LAZY PROOF: after scan_result the engine must
+      // NOT probe any row on its own. The OLD engine would have the first
+      // probe receipt here within ~1 s (the crash dummy probes fast); a
+      // 3 s silence window with ZERO scan_probe messages is the proof.
+      console.log("[test] engine alive (ping→pong) ✓ — 3f-7: asserting 3 s of probe SILENCE (lazy — nothing probed without a request)…");
+      scanLazyDeadline = Date.now() + 3000;
+      // Drive the silence window: a ping at the deadline makes the phase
+      // advance (the silence proof = NO scan_probe arrived in between).
+      setTimeout(() => { if (scanLazyPhase === "silence") ws.send(JSON.stringify({ type: "ping" })); }, 3200);
+    } else if (msg.type === "scan_probe" && scanResultOk && !scanProbesAsserted && scanLazyPhase === "silence") {
+      fail(`3f-7 LAZY probing violated: a scan_probe arrived WITHOUT any probe request (${JSON.stringify(msg).slice(0, 160)}) — the engine still auto-probes rows`);
+    } else if (msg.type === "pong" && scanLazyPhase === "silence" && Date.now() >= scanLazyDeadline) {
+      // 3 s of pongs-driven time passed without any scan_probe — LAZY proven.
+      scanLazyPhase = "explicit-synth";
+      console.log("[test] phase L-1 ✓ 3 s of silence, ZERO scan_probes — probing is LAZY — requesting the visible synth row…");
+      ws.send(JSON.stringify({ type: "probe", classId: scanSynthClassId }));
+    } else if (msg.type === "scan_probe" && scanLazyPhase === "explicit-synth") {
+      if (msg.classId !== scanSynthClassId) fail(`explicit probe must answer the synth row, got ${msg.classId}`);
+      if (msg.capabilities === undefined) fail(`synth probe must SUCCEED, got: ${msg.capabilitiesError}`);
+      const caps = msg.capabilities;
+      const mainOut = (caps.buses ?? []).find((b) => !b.input && b.isMain);
+      if (!mainOut || mainOut.name !== "Output" || mainOut.channels !== 2) {
+        fail(`synth probe capabilities: main out bus must be "Output" 2ch, got ${JSON.stringify(mainOut ?? null)}`);
+      }
+      scanLazyPhase = "explicit-crash";
+      console.log("[test] phase L-2 ✓ explicit probe → synth capabilities (Output 2ch main) — probing the crash row…");
+      ws.send(JSON.stringify({ type: "probe", classId: scanCrashClassId }));
+    } else if (msg.type === "scan_probe" && scanLazyPhase === "explicit-crash") {
+      if (msg.classId !== scanCrashClassId) fail(`explicit probe must answer the crash row, got ${msg.classId}`);
+      if (typeof msg.capabilitiesError !== "string" || msg.capabilitiesError.length === 0) fail("ProbeCrashDummy probe must FAIL (it aborts in GetPluginFactory)");
+      scanLazyPhase = "probeAll";
+      console.log(`[test] phase L-3 ✓ explicit probe → crash isolated ("${msg.capabilitiesError.slice(0, 60)}") — loading a minimal score (the transport only rolls with one), then "Probe all"…`);
+      // The transport only plays with a loaded score — load 2 events (no
+      // plugins, so no probe-on-load) BEFORE the pause proof.
+      ws.send(JSON.stringify({
+        type: "load", seq: 100,
+        events: [
+          { eventType: "NOTE_ON", channel: 1, data1: 60, data2: 100, timestampTicks: 0 },
+          { eventType: "NOTE_OFF", channel: 1, data1: 60, data2: 0, timestampTicks: 480 },
+        ],
+        meta: { bpm: 120, ppqn: 960, timeSignature: { numerator: 4, denominator: 4 }, endTick: 1920 },
+      }));
+      ws.send(JSON.stringify({ type: "probeAll" }));
+      // Mid-probeAll pause proof (item 2): roll the transport WHILE the
+      // remaining probe children run. The play lands ~100 ms after probeAll —
+      // the FIRST job dequeues instantly, but every LATER dequeue evaluates
+      // the gate and must log "[probe] paused (reason=transport playing)"
+      // (≥1 job is always still queued: 3 rows, the hang child runs 90 s).
+      // Stop 4 s later → "[probe] resumed" 2 s after (PowerShell asserts the
+      // engine.log lines).
+      setTimeout(() => {
+        console.log("[test] phase P-1 — rolling the transport DURING the probe batch (the probe thread must pause)…");
+        ws.send(JSON.stringify({ type: "transport", command: "play", tick: 0 }));
+      }, 100);
+      setTimeout(() => {
+        console.log("[test] phase P-2 — stopping after 4 s (the probe thread resumes 2 s after all conditions clear)…");
+        ws.send(JSON.stringify({ type: "transport", command: "stop" }));
+      }, 4100);
+    } else if (msg.type === "scan_probe" && scanLazyPhase === "probeAll") {
+      // probeAll re-probes every row: crash (~1s), hang (90s), synth (~0.5s).
+      // Duplicates are EXPECTED here (user intent); record per classId.
       const hasCaps = msg.capabilities !== undefined && typeof msg.capabilities === "object" && !Array.isArray(msg.capabilities);
       const hasErr = typeof msg.capabilitiesError === "string" && msg.capabilitiesError.length > 0;
       if (hasCaps === hasErr) fail(`scan_probe must carry EXACTLY ONE of capabilities/capabilitiesError: ${JSON.stringify(msg).slice(0, 200)}`);
-      if (scanProbes[msg.classId]) fail(`duplicate scan_probe for classId ${msg.classId} (probes are one-per-row)`);
       scanProbes[msg.classId] = hasCaps
         ? { kind: "capabilities", capabilities: msg.capabilities }
         : { kind: "error", error: msg.capabilitiesError };
-      console.log(`[test] scan_probe [${Object.keys(scanProbes).length}/3] classId="${msg.classId}" → ${hasCaps ? "capabilities" : `capabilitiesError("${msg.capabilitiesError.slice(0, 80)}")`}`);
-      // All three expected probes arrived → assert their contents.
+      scanProbeAllCount++;
+      console.log(`[test] scan_probe (probeAll ${scanProbeAllCount}/3) classId="${msg.classId}" → ${hasCaps ? "capabilities" : `capabilitiesError("${msg.capabilitiesError.slice(0, 80)}")`}`);
       const expected = [scanSynthClassId, scanCrashClassId, scanHangClassId].filter(Boolean);
       if (!scanProbesAsserted && expected.length === 3 && expected.every((c) => scanProbes[c])) {
         const synthProbe = scanProbes[scanSynthClassId];
         if (synthProbe.kind !== "capabilities") fail(`test synth probe must SUCCEED, got: ${synthProbe.error}`);
         const caps = synthProbe.capabilities;
         if (typeof caps.outputBuses !== "number" || caps.outputBuses < 1) fail(`synth probe capabilities must include an output bus: ${JSON.stringify(caps).slice(0, 200)}`);
-        // The 3e-1 capability contract, RELOCATED to scan_probe (rows no
-        // longer carry it): main out bus "Output", 2 channels.
-        const mainOut = (caps.buses ?? []).find((b) => !b.input && b.isMain);
-        if (!mainOut || mainOut.name !== "Output" || mainOut.channels !== 2) {
-          fail(`synth probe capabilities: main out bus must be "Output" 2ch, got ${JSON.stringify(mainOut ?? null)}`);
-        }
         if (typeof caps.latencySamples !== "number") fail("synth probe capabilities must carry numeric latencySamples");
-        const crashProbe = scanProbes[scanCrashClassId];
-        if (crashProbe.kind !== "error") fail("ProbeCrashDummy probe must FAIL (it aborts in GetPluginFactory) — probe-crash isolation");
         const hangProbe = scanProbes[scanHangClassId];
         if (hangProbe.kind !== "error") fail("ProbeHangDummy probe must FAIL (90s timeout)");
         if (!/timeout/i.test(hangProbe.error)) fail(`ProbeHangDummy error must name the timeout, got: ${hangProbe.error}`);
         scanProbesAsserted = true;
-        console.log("[test] probe contract asserted: synth=capabilities(Output 2ch main), crash=isolated error, hang=timeout error — rows never removed ✓ — default-dir scan");
+        console.log("[test] probe contract asserted: synth=capabilities, crash=isolated error, hang=timeout error — rows never removed ✓ — default-dir scan");
         ws.send(JSON.stringify({ type: "ping" }));
       }
     } else if (msg.type === "pong" && scanProbesAsserted && !postProbePongOk) {
@@ -1257,7 +1341,7 @@ ws.addEventListener("message", (event) => {
     if (msg.type === "hello" && !helloOk) {
       helloOk = true;
       if (msg.protocol !== 1) fail(`expected protocol 1, got ${msg.protocol}`);
-      if (msg.engineVersion !== "0.8.2") fail(`expected 0.8.2, got ${msg.engineVersion}`);
+      if (msg.engineVersion !== "0.8.3") fail(`expected 0.8.3, got ${msg.engineVersion}`);
       // Stage 3c close-out: the dispatch ledger streams what the engine
       // ACTUALLY dispatched — the replay-burst and re-attack asserts read it.
       ws.send(JSON.stringify({ type: "dispatch_log", enable: true }));
