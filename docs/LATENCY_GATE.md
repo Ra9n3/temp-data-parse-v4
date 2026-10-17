@@ -163,3 +163,55 @@ reuse-receipt latencyMs chain [14.51, 14.51, 34.83, 11.61, 58.05, 34.83] ms
 | exactly 1 load-path publish, exactly 5 reuse receipts | no re-instantiate: every correction rode the republish |
 | the FINAL reuse receipt carries `latencySamples=1024` | THE RESURRECTION PROOF IN THE LOG: the no-command reload inherited the watchdog-corrected value, never the pre-correction one |
 | mjs wire chain `[14.51, 14.51, 34.83, 11.61, 58.05, 34.83]` + transport continuity | the same story on the wire; ticks advance through every correction window |
+
+
+---
+
+## Stage 3k — the Phase 2 pre-roll receipts (engine 0.8.7)
+
+Phase 2 (the downbeat-late fix) adds transport receipts to the same
+greppable discipline.
+
+### Receipt grammar (additions)
+
+| Receipt | Emitter | Meaning |
+| --- | --- | --- |
+| `[transport] pre-roll N samples (max plugin latency) — start-tick events pre-fire muted, audible downbeat lands on the grid` | transport play, N = the max-latency mirror at play time (omitted when N = 0) | the muted pre-roll window armed; the transport timeline begins at -N and the audible transport begins at sample 0 = the grid |
+| `[seek] to tick T (rolling — musical release + resume re-attacks) \| pre-roll N samples (downbeat pre-fire)` | rolling seek, N > 0 | the same window re-armed for the seek target's downbeat |
+
+### Expected engine.log sequence for a latency-loaded play (the downbeat gate)
+
+```
+[transport] pre-roll 128 samples (max plugin latency) — start-tick events pre-fire muted, audible downbeat lands on the grid
+[play] rendering from tick 0, 1 voices scheduled (of 1 events) (explicit tick)
+```
+
+and on the dispatch ledger (dispatch_log enabled): the downbeat NOTE_ON at
+`s = -128`, `t = 0` (the raw negative sample is the pre-fire truth channel;
+the tick is clamped to the start tick). NO downbeat dispatch at `s = 0`
+exists any more — an s=0 downbeat is the DEFECT signature (the old clamp).
+
+### The manual by-ear procedure (extends the convolver check)
+
+1. Host a plugin whose latency changes at runtime (a convolver loading its
+   IR), let it settle, note the reported latency from the reuse receipt.
+2. Press play on a score with a note exactly on the downbeat.
+3. Grep: `[transport] pre-roll` (N = the reported latency) and the ledger
+   downbeat at `s = -N, t = <start tick>`.
+4. Hear: the attack lands ON the grid. Pre-Phase-2 it arrived one plugin
+   latency late; a mid-play IR-load correction (3i) keeps future downbeats
+   aligned through the F4 shift, and the NEXT transport start re-arms the
+   window at the corrected max.
+5. The one-buffer discontinuity rule from the 3i gate applies unchanged:
+   a latency correction mid-play may shift one buffer once; the transport
+   never stalls.
+
+### CI mapping (additions to Test D3)
+
+| Assertion | Proves |
+| --- | --- |
+| `>= 1` `[transport] pre-roll 128 samples (max plugin latency)` | the window armed at play with the play-time max (the fixture's 128) |
+| mjs: the tick-0 NOTE_ON at ledger `s === -128`, `t === 0` | THE DOWNBEAT PRE-FIRE PROOF on the wire: the attack's dispatch + 128 = sample 0 = the grid |
+| mjs: NO tick-0 NOTE_ON at `s === 0` | the downbeat-late clamp is gone (the defect signature) |
+| host mode: resume re-attacks at `s === -128` | the resume is a transport re-start — its downbeat pre-fires too |
+| host mode: the burst check scoped by tick at the resume tick | a resurrection inside the muted window (negative s) cannot hide from it |

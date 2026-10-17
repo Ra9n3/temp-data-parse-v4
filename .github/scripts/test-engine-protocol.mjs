@@ -416,6 +416,7 @@ let latLoadedReceipts = [];    // latencyMs per plugin_state "loaded" (1 initial
 let latLastTick = 0;           // last observed transport tick (playing states)
 let latTickAtLoad = {};        // seq → tick when that load was SENT (each CC rides lastTick + 960)
 let latErrorAfterLoad = false;
+let latLedger = [];            // Phase 2: dispatch ledger entries (dispatch_log enabled after hello; the downbeat pre-fire proof reads it at close)
 
 // The fixture's plugin_state latencyMs = (h->latencySamples + 512) / 44100 * 1000
 // (the engine's standing receipts formula) — this helper is the EXPECTED value
@@ -544,26 +545,33 @@ function assertResumeLedger() {
   const PLUGIN_LATENCY = 128;
   const dispatchTick = (gridTick) => Math.round((Math.floor(gridTick * spt) - PLUGIN_LATENCY) / spt);
   // Gentle re-attacks of the straddling held notes, at the resume tick
-  // (= stop 1's tick), dispatched at sample 0 of the resume buffer. Pitch 62
-  // (gated at its grid time, audible again after the unmute) re-attacks too —
-  // the straddle scan works on the authored score; the CURRENT mute state
-  // decides audibility (the same unmute-restores-sound contract as phase C).
+  // (= stop 1's tick). Pitch 62 (gated at its grid time, audible again after
+  // the unmute) re-attacks too — the straddle scan works on the authored
+  // score; the CURRENT mute state decides audibility (the same unmute-
+  // restores-sound contract as phase C).
+  // Phase 2 (downbeat-late pre-roll): the resume is a transport re-start —
+  // the re-attacks PRE-FIRE into the muted pre-roll window at
+  // s = -PLUGIN_LATENCY (the play-time max latency the play handler
+  // snapshot), e.t clamps to the start tick (the position never precedes
+  // it), and the audible attacks land exactly on the resume grid.
   for (const [ch, pitch] of [[1, 60], [1, 62], [2, 64], [2, 67]]) {
-    const re = hostEntries.find((e) => e.k === 1 && e.c === ch && e.a === pitch && e.b === 80 && e.s === 0 && e.t === hostStopTick1);
-    if (!re) fail(`resume: no GENTLE re-attack of ch${ch} pitch ${pitch} (vel 80, s=0, t=${hostStopTick1}) — straddling sustain not resumed`);
+    const re = hostEntries.find((e) => e.k === 1 && e.c === ch && e.a === pitch && e.b === 80 && e.s === -PLUGIN_LATENCY && e.t === hostStopTick1);
+    if (!re) fail(`resume: no GENTLE re-attack of ch${ch} pitch ${pitch} (vel 80, s=${-PLUGIN_LATENCY}, t=${hostStopTick1}) — straddling sustain not resumed (or the downbeat pre-roll is broken)`);
   }
-  // No replay burst: NO past event may re-dispatch at the resume buffer. The
-  // pre-resume note-ons (480/960/6144... plus the ORIGINAL vel-100 sends) must
-  // not reappear with s=0 at the resume tick.
-  const burst = hostEntries.filter((e) => e.s === 0 && e.t === hostStopTick1 && e.b === 100);
-  if (burst.length > 0) fail(`resume: ${burst.length} FULL-VELOCITY events re-dispatched at sample 0 of the resume buffer — the replay burst is back`);
+  // No replay burst: NO past event may re-dispatch at the resume transport.
+  // The pre-resume note-ons (480/960/6144... plus the ORIGINAL vel-100 sends)
+  // must not reappear at the resume tick — Phase 2: scoped by TICK, because
+  // a resurrection inside the muted pre-roll window would carry a NEGATIVE
+  // e.s and the old s===0 scope would miss it.
+  const burst = hostEntries.filter((e) => e.t === hostStopTick1 && e.b === 100);
+  if (burst.length > 0) fail(`resume: ${burst.length} FULL-VELOCITY events re-dispatched at the resume tick ${hostStopTick1} — the replay burst is back`);
   // Redundant CC#32 suppressed (ledger kind 6) at its compensated position.
   const suppressed = hostEntries.find((e) => e.k === 6 && e.c === 1 && e.a === 32 && e.b === 42 && e.t === dispatchTick(7200));
   if (!suppressed) fail(`resume: CC#32=42@7200 was not SUPPRESSED (expected a kind-6 record at t=${dispatchTick(7200)}) — the bow-scrape pluck is back`);
   // Genuine change SENT at its compensated position.
   const sent = hostEntries.find((e) => e.k === 2 && e.c === 1 && e.a === 32 && e.b === 20 && e.t === dispatchTick(7600));
   if (!sent) fail(`resume: genuine CC#32 change (42→20) not dispatched at t=${dispatchTick(7600)} — articulation suppression is over-eager`);
-  console.log(`[test] resume ✓ 3 gentle re-attacks (vel 80 @ s=0, t=${hostStopTick1}); CC#32=42@7200 SUPPRESSED (k=6); genuine CC#32=20@7600 SENT`);
+  console.log(`[test] resume ✓ 3 gentle re-attacks (vel 80 @ s=${-PLUGIN_LATENCY} pre-fired, t=${hostStopTick1}); CC#32=42@7200 SUPPRESSED (k=6); genuine CC#32=20@7600 SENT`);
 }
 
 // Tick-correlated phase assertions (latency-immune): the mute flush leaves a
@@ -753,9 +761,9 @@ ws.addEventListener("message", (event) => {
     }
     if (msg.type === "hello" && multiPhase === 0) {
       if (msg.protocol !== 1) fail(`expected protocol 1, got ${msg.protocol}`);
-      if (msg.engineVersion !== "0.8.6") fail(`expected 0.8.6, got ${msg.engineVersion}`);
+      if (msg.engineVersion !== "0.8.7") fail(`expected 0.8.7, got ${msg.engineVersion}`);
       if (!fixtureDir) fail("multi mode requires a fixture dir argument");
-      console.log("[test] hello OK (0.8.6) — scanning for the stand-in host plugin...");
+      console.log("[test] hello OK (0.8.7) — scanning for the stand-in host plugin...");
       multiPhase = 1;
       ws.send(JSON.stringify({ type: "scan", dirs: [fixtureDir] }));
     } else if (msg.type === "scan_result" && multiPhase === 1) {
@@ -1363,7 +1371,7 @@ ws.addEventListener("message", (event) => {
     if (msg.type === "hello" && !helloOk) {
       helloOk = true;
       if (msg.protocol !== 1) fail(`expected protocol 1, got ${msg.protocol}`);
-      if (msg.engineVersion !== "0.8.6") fail(`expected 0.8.6, got ${msg.engineVersion}`);
+      if (msg.engineVersion !== "0.8.7") fail(`expected 0.8.7, got ${msg.engineVersion}`);
       if (!fixtureDir) fail("scan mode requires a fixture dir argument");
       console.log("[test] hello OK — sending scan of fixture dir + nested dir (dedup proof):", fixtureDir);
       scanSent = true;
@@ -1523,11 +1531,12 @@ ws.addEventListener("message", (event) => {
     // ── Stage 3i: runtime latency tracking (detect, then mini-republish) ──
     if (msg.type === "hello" && latPhase === 0) {
       if (msg.protocol !== 1) fail(`expected protocol 1, got ${msg.protocol}`);
-      if (msg.engineVersion !== "0.8.6") fail(`expected 0.8.6, got ${msg.engineVersion}`);
+      if (msg.engineVersion !== "0.8.7") fail(`expected 0.8.7, got ${msg.engineVersion}`);
       if (!fixtureDir) fail("latency mode requires a fixture dir argument");
       helloOk = true;
       latPhase = 1;
-      console.log("[test] hello OK (0.8.6) — scanning for the stand-in host plugin...");
+      console.log("[test] hello OK (0.8.7) — scanning for the stand-in host plugin...");
+      ws.send(JSON.stringify({ type: "dispatch_log", enable: true }));   // Phase 2: the pre-fire proof is ledger-based
       ws.send(JSON.stringify({ type: "scan", dirs: [fixtureDir] }));
     } else if (msg.type === "scan_result" && latPhase === 1) {
       const valid = (msg.plugins ?? []).find((p) => p.name === "Scorch Test Synth");
@@ -1569,6 +1578,10 @@ ws.addEventListener("message", (event) => {
       fail(`latency mode: engine sent error ${msg.code} mid-sequence — a correction disrupted the protocol`);
     } else if (msg.type === "load_rejected") {
       fail(`latency mode: mid-play load rejected — the same-set reload must take the reuse fast path: ${JSON.stringify(msg)}`);
+    } else if (msg.type === "dispatch") {
+      for (const e of msg.entries ?? []) latLedger.push(e);
+    } else if (msg.type === "dispatch_log") {
+      // ledger enable ack — entries stream alongside the run
     }
     return;
   }
@@ -1578,7 +1591,7 @@ ws.addEventListener("message", (event) => {
     if (msg.type === "hello" && !helloOk) {
       helloOk = true;
       if (msg.protocol !== 1) fail(`expected protocol 1, got ${msg.protocol}`);
-      if (msg.engineVersion !== "0.8.6") fail(`expected 0.8.6, got ${msg.engineVersion}`);
+      if (msg.engineVersion !== "0.8.7") fail(`expected 0.8.7, got ${msg.engineVersion}`);
       // Stage 3c close-out: the dispatch ledger streams what the engine
       // ACTUALLY dispatched — the replay-burst and re-attack asserts read it.
       ws.send(JSON.stringify({ type: "dispatch_log", enable: true }));
@@ -1896,7 +1909,18 @@ ws.addEventListener("close", () => {
     // tick — the transport kept rolling through all five correction windows.
     const ticksOk = [11, 12, 13, 14, 15].every((sq) =>
       latLastTick > (latTickAtLoad[sq] ?? Number.MAX_SAFE_INTEGER) + 960);
-    allOk = helloOk && countOk && seqOk && ticksOk && !latErrorAfterLoad && latPhase >= 4;
+    // Phase 2 (downbeat-late pre-roll) — the WIRE proof: the score's tick-0
+    // NOTE_ON (ch1, plugin-routed, the play-time max latency is the
+    // fixture's 128) must have PRE-FIRED into the muted pre-roll window at
+    // s = -128 with the tick clamped to the start tick (0), and the old
+    // clamp-to-0 dispatch must be GONE (a downbeat dispatched at s=0 lands
+    // 128 samples late — the defect this stage fixes).
+    const prefire = latLedger.find((e) => e.k === 1 && e.c === 1 && e.a === 60 && e.s === -128);
+    const clamped0 = latLedger.some((e) => e.k === 1 && e.c === 1 && e.a === 60 && e.s === 0);
+    if (!prefire) fail(`phase-2 pre-fire proof missing: no tick-0 NOTE_ON dispatched at s=-128 (pre-roll broken?) — ledger head: ${JSON.stringify(latLedger.slice(0, 8))}`);
+    if (clamped0) fail("phase-2: the tick-0 NOTE_ON dispatched at s=0 — the downbeat-late clamp is back");
+    if (prefire && prefire.t !== 0) fail(`phase-2: the pre-fired NOTE_ON carries t=${prefire.t}, expected the clamped start tick 0`);
+    allOk = helloOk && countOk && seqOk && ticksOk && !latErrorAfterLoad && latPhase >= 4 && !!prefire && !clamped0;
     if (allOk) {
       console.log("");
       console.log("========================================");
@@ -1904,6 +1928,7 @@ ws.addEventListener("close", () => {
       console.log("  detected+republished: 128->1024 (notified), 1024->0 (notified), 0->1024->2048 (rapid pair — the 2048 enqueue rate-limited, landed by the 2000ms safety-net walk), flicker 0<->1024 rate-limited to settle 1024");
       console.log(`  reuse receipt latencyMs chain: [${latLoadedReceipts.map((v) => v.toFixed(2)).join(", ")}] — every correction survived a mid-play load (no re-instantiate)`);
       console.log(`  transport continuity: tick ${latLastTick} past every CC dispatch tick; playing never dropped; no error mid-sequence`);
+      console.log(`  phase-2 downbeat pre-roll: tick-0 NOTE_ON pre-fired at s=${prefire ? prefire.s : "?"} (t=${prefire ? prefire.t : "?"}) — the audible attack lands on the grid; engine.log [transport] pre-roll receipt asserted by desktop.yml`);
       console.log("  engine.log receipts ([latency] republish old->new, deferred rate-limit, publish summaries) asserted by desktop.yml");
       console.log("========================================");
       process.exit(0);

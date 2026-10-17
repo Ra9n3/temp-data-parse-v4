@@ -490,7 +490,18 @@ jobs:
             $reuseLines = @(Select-String -Path $engineLog -Pattern "\[plugin\] reuse while playing.*instance=inst-lat")
             $lastReuseLat = if ($reuseLines.Count -gt 0 -and $reuseLines[-1].Line -match "latencySamples=(\d+)") { [int]$Matches[1] } else { -1 }
             if ($lastReuseLat -ne 1024) { throw "3j resurrection proof failed: the final no-CC reuse receipt carries latencySamples=$lastReuseLat, expected 1024 — a reload resurrected the pre-correction value (one-write-discipline broken)" }
-            Write-Host "3j gate receipts: $latSaw saw, $latConfirmed debounce confirmed, final reuse latencySamples=$lastReuseLat (corrected value survived the reload)"
+            Write-Host "3j gate receipts: $latConfirmed debounce confirmed, final reuse latencySamples=$lastReuseLat (corrected value survived the reload)"
+
+            # ── Phase 2 (downbeat-late pre-roll) ──
+            # The transport's play receipt: the engine must have armed a
+            # muted pre-roll of EXACTLY the play-time max plugin latency
+            # (128 = the fixture's default before any CC#23 command). The
+            # window pre-fires the tick-0 events so the downbeat lands on
+            # the grid; the wire-side proof (the tick-0 NOTE_ON dispatched
+            # at ledger s=-128, never s=0) is asserted by the harness close.
+            $preRoll = (Select-String -Path $engineLog -Pattern "\[transport\] pre-roll 128 samples \(max plugin latency\)").Count
+            if ($preRoll -lt 1) { throw "phase-2 receipt missing: no '[transport] pre-roll 128 samples' in engine.log — the downbeat-late pre-roll did not arm at play" }
+            Write-Host "phase-2 receipts: $preRoll pre-roll window(s) armed at play (128 samples = the play-time max plugin latency)"
 
             # NO-DISRUPTION proof: no editor traffic for this engine session —
             # the correction path must never touch editors (the D3 engine opens

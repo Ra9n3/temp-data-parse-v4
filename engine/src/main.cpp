@@ -210,7 +210,7 @@
 
 namespace {
 
-constexpr const char* kEngineVersion = "0.8.6";
+constexpr const char* kEngineVersion = "0.8.7";
 constexpr int kProtocolVersion = 1;
 constexpr int kDefaultPort = 9377;
 constexpr int kMaxVoices = 64;
@@ -449,6 +449,17 @@ struct EngineState {
     // samplesProcessed/lastTick afterwards — a pre-seek/pre-play in-flight
     // buffer would otherwise clobber the new transport position.
     std::atomic<uint64_t> transportGen{0};
+    // Phase 2 (downbeat-late pre-roll): the muted pre-roll window in samples
+    // — the max plugin latency snapshot taken at play / rolling-seek time.
+    // samplesProcessed BEGINS at -preRollSamples: the window primes the
+    // plugins' latency lines with silence and PRE-FIRES the start-tick
+    // events, so an attack dispatched at -latency becomes audible exactly at
+    // sample 0 = the grid position of playStartTick. Position reporting
+    // (currentTick, lastTick, the playhead, ledger ticks) clamps the window
+    // at the start tick: the transport's POSITION never precedes it. Stable
+    // for one transport generation (written only by play + rolling seek,
+    // before the transportGen bump; read by the audio callback).
+    std::atomic<int64_t> preRollSamples{0};
 
     // Audio-thread-owned. External code NEVER touches these: stop/seek/panic
     // set g_voiceKillPending and the next buffer performs the kill.
@@ -460,8 +471,10 @@ struct EngineState {
         ScoreSnapshot* s = g_score.load(std::memory_order_acquire);
         const double b = s ? s->bpm : 120.0;
         const int q = s ? s->ppqn : 960;
+        // Phase 2: the pre-roll window holds samplesProcessed < 0 — the
+        // reported position stays pinned at the start tick until sample 0.
         return playStartTick.load() +
-               static_cast<int64_t>(samplesProcessed.load() /
+               static_cast<int64_t>(std::max<int64_t>(0, samplesProcessed.load()) /
                    (sampleRate.load() * 60.0 / (b * q)));
     }
 };
@@ -1679,6 +1692,10 @@ public:
         // play/seek that lands after this point invalidates this buffer's
         // commit (gen mismatch at the end), never half-updated state.
         const uint64_t gen0 = g_engine.transportGen.load(std::memory_order_relaxed);
+        // Phase 2: the transport's pre-roll window — fixed at play/seek time,
+        // part of the gen-guarded parameter set (a mid-play latency
+        // republish never resizes it; the snapshot IS the window).
+        const int64_t preRoll = g_engine.preRollSamples.load(std::memory_order_relaxed);
         const double spt = score
             ? g_engine.sampleRate.load() * 60.0 / (score->bpm * score->ppqn)
             : (44100.0 * 60.0 / (120.0 * 960));
@@ -1699,7 +1716,8 @@ public:
             const int den = score ? score->tsDenominator : 4;
             const double spq = g_engine.sampleRate.load() * 60.0 / bpmNow;
             const int64_t tlSample = static_cast<int64_t>(std::llround(
-                static_cast<double>(playStartTick) * spt)) + startSample;
+                static_cast<double>(playStartTick) * spt)) +
+                std::max<int64_t>(0, startSample);   // Phase 2: pinned at the start tick through the pre-roll
             const double ppqNow = static_cast<double>(tlSample) / spq;
             const double barQ = static_cast<double>(num) * 4.0 / static_cast<double>(den);
             playHead.publish(true, tlSample, bpmNow, ppqNow,
@@ -1735,34 +1753,42 @@ public:
             const uint64_t idx = g_ledgerWrite.load(std::memory_order_relaxed);
             if (idx - g_ledgerRead.load(std::memory_order_relaxed) < kLedgerSize) {
                 DispatchEntry& e = g_ledger[idx % kLedgerSize];
-                e.s = startSample;
-                e.t = playStartTick + static_cast<int64_t>(std::llround(static_cast<double>(startSample) / spt));
+                e.s = startSample;   // raw: a pre-roll flush marker carries the negative sample truth
+                e.t = playStartTick + static_cast<int64_t>(std::llround(
+                    static_cast<double>(std::max<int64_t>(0, startSample)) / spt));
                 e.k = kEvCC; e.ch = 0; e.d1 = 120; e.d2 = 0;
                 g_ledgerWrite.store(idx + 1, std::memory_order_release);
             }
         }
         size_t eventIdx = 0;
         // Skip events before the current position. THE CLAMP RULE (3c
-        // close-out receipt — the resume-replay bug): the F4 latency shift
-        // may pull an event BEFORE buffer start only when its grid position
-        // is at/after the transport start tick (those have not fired yet —
-        // the just-in-time pre-trigger case; clamp to 0 and fire now). An
-        // event BEFORE the start tick is PAST — it must NEVER resurrect:
-        // clamping it to 0 used to re-dispatch the ENTIRE pre-resume score
-        // at sample 0 on every resume/seek (the pluck + glitch receipt:
-        // ~630 stale events into BBCSO, every past CC#32 re-firing = the
-        // bow-scrape). Past events keep their negative sample and skip.
+        // close-out receipt — the resume-replay bug), Phase 2 revision: the
+        // F4 latency shift may pull an event BEFORE buffer start only when
+        // its grid position is at/after the transport start tick — now into
+        // the MUTED PRE-ROLL window (floor = -preRoll, not 0): a start-tick
+        // event dispatches at -latency during the pre-roll and its audible
+        // attack lands exactly on sample 0 = the grid. An event BEFORE the
+        // start tick is PAST — it must NEVER resurrect: clamping it used to
+        // re-dispatch the ENTIRE pre-resume score on every resume/seek (the
+        // pluck + glitch receipt: ~630 stale events into BBCSO, every past
+        // CC#32 re-firing = the bow-scrape). The past test is TICK-based
+        // (ev.tick < playStartTick continues past), NOT sample-based: with
+        // the timeline beginning at -preRoll, a past event's raw sample can
+        // sit ABOVE startSample (a synth event one tick before the start is
+        // at -spt, inside the window) and would resurrect if only samples
+        // were compared.
         for (; eventIdx < eventCount; ++eventIdx) {
             const EngineEvent& ev = events[eventIdx];
+            if (ev.tick < playStartTick) continue;   // PAST: never resurrects
             const int64_t raw = static_cast<int64_t>((ev.tick - playStartTick) * spt) -
-                (ev.tick >= playStartTick && isPluginRouted(ev) ? latencyFor(ev) : 0);
-            // Events AT/AFTER the start tick may be pulled before buffer start
-            // by the latency shift — they have NOT fired yet (the tick-0
-            // pre-set / just-in-time pre-trigger case): clamp to 0, fire now.
-            // Events BEFORE the start tick are PAST: keep the negative sample
-            // and skip — they must never resurrect.
-            const int64_t eventSample = ev.tick >= playStartTick
-                ? std::max<int64_t>(0, raw) : raw;
+                (isPluginRouted(ev) ? latencyFor(ev) : 0);
+            // At/after the start tick: floor at -preRoll (the play-time max
+            // latency snapshot). Events whose raw falls below it — a
+            // mid-play latency growth past the snapshot — clamp and land
+            // below the read position, i.e. skip as past (the same
+            // never-resurrect semantics as the old clamp-to-0, with the
+            // boundary moved by the pre-roll width).
+            const int64_t eventSample = std::max<int64_t>(-preRoll, raw);
             if (eventSample >= startSample) break;
         }
 
@@ -1773,10 +1799,11 @@ public:
             while (eventIdx < eventCount) {
                 const EngineEvent& ev = events[eventIdx];
                 const bool toPlugin = isPluginRouted(ev);
-                // Same clamp rule as the skip walk above: only events AT/AFTER
-                // the transport start tick get the latency shift + clamp —
-                // past events never reach here (the skip walk consumed them).
-                const int64_t eventSample = std::max<int64_t>(0,
+                // Same clamp rule as the skip walk above (Phase 2 floor: the
+                // muted pre-roll window, -preRoll — start-tick events
+                // pre-fire into it; past events never reach here, the skip
+                // walk consumed them by tick).
+                const int64_t eventSample = std::max<int64_t>(-preRoll,
                     static_cast<int64_t>((ev.tick - playStartTick) * spt) -
                     (ev.tick >= playStartTick && toPlugin ? latencyFor(ev) : 0));
                 if (eventSample > absSample) break;
@@ -1838,6 +1865,21 @@ public:
                         outputChannelData[ch][s] += out;
                 }
             }
+            // Phase 2 — MUTED PRE-ROLL, sample-accurate: samples before
+            // timeline zero rendered the latency-line priming + the
+            // pre-fired start-tick events into the buffer; they are
+            // discarded here. The audible transport begins at sample 0 =
+            // the grid position of playStartTick. The peak truth pass below
+            // measures the POST-mute buffer — a muted pre-roll reports
+            // peak 0 (honest silence, no phantom pre-roll peak).
+            const int64_t muteCount = startSample < 0
+                ? std::min<int64_t>(static_cast<int64_t>(numSamples), -startSample) : 0;
+            if (muteCount > 0) {
+                for (int ch = 0; ch < numOutputChannels; ++ch)
+                    std::memset(outputChannelData[ch], 0,
+                                sizeof(float) * static_cast<size_t>(muteCount));
+                peak = 0.0f;   // the pre-mute loose per-source bounds are discarded with the window
+            }
             // Stage 3d-4: the session peak is measured on the SUMMED device
             // buffer (Σ instances + synth), NOT per-source — two 0.79 sources
             // are a 1.57 mix, and the receipt must say so. Single-source peaks
@@ -1861,16 +1903,18 @@ public:
         // Commit — but only if no play/seek invalidated this buffer meanwhile.
         if (g_engine.transportGen.load(std::memory_order_relaxed) == gen0) {
             const int64_t committed = startSample + numSamples;
-            g_engine.samplesProcessed.store(committed);
+            g_engine.samplesProcessed.store(committed);   // RAW: the dispatch timeline must traverse the pre-roll
+            // Phase 2: the reported position clamps the pre-roll window —
+            // lastTick stays at the start tick until sample 0.
             g_engine.lastTick.store(playStartTick +
-                static_cast<int64_t>(static_cast<double>(committed) / spt));
+                static_cast<int64_t>(static_cast<double>(std::max<int64_t>(0, committed)) / spt));
 
             // Stop at endTick — MUSICAL (3c close-out): the synth voices fade
             // (allNotesOff = release), and the plugin path gets real note-offs
             // via the release flag on the next buffer (score-authored offs
             // have normally already fired; this catches anything still held).
             const int64_t nowTick = playStartTick +
-                static_cast<int64_t>(static_cast<double>(committed) / spt);
+                static_cast<int64_t>(static_cast<double>(std::max<int64_t>(0, committed)) / spt);
             if (endTick > 0 && nowTick >= endTick) {
                 g_engine.playing.store(false);
                 allNotesOff();
@@ -2147,8 +2191,9 @@ private:
         const uint64_t idx = g_ledgerWrite.load(std::memory_order_relaxed);
         if (idx - g_ledgerRead.load(std::memory_order_relaxed) >= kLedgerSize) return; // full — drop
         DispatchEntry& e = g_ledger[idx % kLedgerSize];
-        e.s = absSample;
-        e.t = playStartTick + static_cast<int64_t>(std::llround(static_cast<double>(absSample) / spt));
+        e.s = absSample;   // RAW: a negative sample = a pre-roll pre-fire dispatch (the Phase 2 truth channel)
+        e.t = playStartTick + static_cast<int64_t>(std::llround(
+            static_cast<double>(std::max<int64_t>(0, absSample)) / spt));   // the position clamps the pre-roll
         e.k = kindOverride != 0 ? kindOverride : ev.kind; e.ch = ev.channel; e.d1 = ev.data1; e.d2 = ev.data2;
         g_ledgerWrite.store(idx + 1, std::memory_order_release);
     }
@@ -3947,11 +3992,27 @@ void handle_transport(const juce::var& json, ix::WebSocket& ws) {
         // standard DAW contract and stays.
         g_voiceKillPending.store(true, std::memory_order_relaxed);
         g_pendingPanic.store(true);  // hosted plugin gets the CC120 flush too
-        g_engine.samplesProcessed.store(0);
+        // Phase 2 — DOWNBEAT-LATE PRE-ROLL: a start-tick event's F4 shift
+        // (dispatch minus slotLatency) used to clamp at sample 0, so the
+        // downbeat's audible attack landed `latency` samples late (the
+        // plugin needs that many input samples before its first output
+        // emerges). The transport timeline now BEGINS at -preRoll: the
+        // window primes the latency lines with silence and pre-fires the
+        // start-tick events muted, so dispatch + latency = 0 = the grid
+        // position of startTick. playing goes true immediately; the POSITION
+        // stays pinned at startTick until sample 0 (currentTick / lastTick /
+        // playhead / ledger-t clamp the negative window).
+        const int64_t preRoll = static_cast<int64_t>(
+            g_pluginLatencySamples.load(std::memory_order_acquire));
+        g_engine.samplesProcessed.store(-preRoll);
+        g_engine.preRollSamples.store(preRoll, std::memory_order_release);
         g_engine.playStartTick.store(startTick);
         g_engine.transportGen.fetch_add(1);  // invalidate pre-play buffer commits
         g_playPeakMax.store(0.0f, std::memory_order_relaxed);  // fresh session peak
         g_engine.playing.store(true);
+        if (preRoll > 0)
+            engineLog("[transport] pre-roll " + std::to_string(preRoll) +
+                      " samples (max plugin latency) — start-tick events pre-fire muted, audible downbeat lands on the grid");
         std::cout << "[engine] transport play from tick " << startTick
                   << (hasTick ? " (explicit" : " (resume")
                   << (reattacks > 0 ? ", " + std::to_string(reattacks) + " re-attacks)" : ")")
@@ -4013,7 +4074,14 @@ void handle_transport(const juce::var& json, ix::WebSocket& ws) {
         // republish (the next play re-scans straddles for its own start tick;
         // dormant synthetic tails would be dead weight).
         const bool wasPlaying = g_engine.playing.load();
-        g_engine.samplesProcessed.store(0);
+        // Phase 2: a ROLLING seek is a transport re-start — the seek
+        // target's downbeat gets the same muted pre-roll (its re-attacks
+        // pre-fire into the window and land on the grid). A stopped seek
+        // defers to the next play, which pre-rolls for its own start tick.
+        const int64_t preRoll = wasPlaying ? static_cast<int64_t>(
+            g_pluginLatencySamples.load(std::memory_order_acquire)) : 0;
+        g_engine.samplesProcessed.store(-preRoll);
+        g_engine.preRollSamples.store(preRoll, std::memory_order_release);
         g_engine.playStartTick.store(tick);
         g_engine.lastTick.store(tick);
         g_engine.transportGen.fetch_add(1);  // pre-seek buffers must not commit
@@ -4025,7 +4093,10 @@ void handle_transport(const juce::var& json, ix::WebSocket& ws) {
         std::cout << "[engine] transport seek to tick " << tick
                   << (wasPlaying ? " (rolling — musical release + re-attacks)" : " (stopped)") << std::endl;
         engineLog("[seek] to tick " + std::to_string(tick) +
-                  (wasPlaying ? " (rolling — musical release + resume re-attacks)" : " (stopped)"));
+                  (wasPlaying ? " (rolling — musical release + resume re-attacks)" : " (stopped)") +
+                  (wasPlaying && preRoll > 0
+                       ? " | pre-roll " + std::to_string(preRoll) + " samples (downbeat pre-fire)"
+                       : ""));
     }
 }
 

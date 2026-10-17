@@ -2210,3 +2210,75 @@ by-ear check (IR load mid-play on real Windows, one-buffer discontinuity
 audibility) remains the manual gate the new document exists to serve.
 Engine 0.8.5 → 0.8.6; protocol 1 unchanged; frontend and shell
 byte-untouched.
+
+
+---
+
+## Stage 3k — Phase 2: the downbeat-late pre-roll (engine 0.8.7)
+
+**The defect.** F4 dispatches plugin-routed events EARLY by the owning
+instance's latency so the audible attack lands on the grid — but at the
+transport start the shift has no room: `(ev.tick - playStartTick) * spt -
+slotLatency` is negative for start-tick events and the old clamp floor (0)
+pinned the dispatch to sample 0, so the downbeat's audible attack landed
+`latency` samples late on every play and every rolling seek. The F4
+machinery was defeated at the one position it exists to protect.
+
+**The design decision (interpretation of the task wording).** The task said
+"the transport pre-rolls muted with the max latency, THEN sets playing".
+Implemented as: `playing=true` immediately, the transport timeline begins at
+`-preRoll`, and the POSITION REPORTING (currentTick, the lastTick commit,
+the playhead, ledger ticks) clamps the negative window at the start tick —
+so the observable "the transport begins playing (its position advances)
+only after the muted pre-roll" holds, while the 30 Hz state stream never
+shows a playing:false dip and the D3 transport-continuity assertions keep
+their meaning. The alternative (playing=false during the window) would
+flicker the state flag for ~one buffer and weaken the continuity contract.
+
+**The window's semantics.** `preRollSamples` is the play-time
+`g_pluginLatencySamples` max snapshot, taken on the WS thread AFTER
+ensureAudioReady (so the first play sees the post-AboutToStart mirror) and
+written BEFORE the transportGen bump with the rest of the transport
+parameters. It is stable for one transport generation: mid-play latency
+republishes (3i) never resize it. `samplesProcessed` goes negative and the
+dispatch timeline traverses the window RAW — the mute is sample-accurate
+(samples before zero are discarded after rendering, before the peak truth
+pass). The clamp floors use `-preRoll` exactly so that a start-tick event's
+`-slotLatency` shift always has room: slotLatency is never above the
+play-time max mirror.
+
+**The tick-based past test.** Making the timeline negative BROKE the old
+skip walk's implicit guarantee: a PAST event's raw sample could sit above
+`startSample` (a synth event one tick before the start is at -spt, inside
+the window), and the sample-based skip would have resurrected it. The past
+test is now `ev.tick < playStartTick` (tick-truth, immune to the window);
+at/after-startTick events keep the shift + floor. Past never resurrects —
+the 3c close-out contract unchanged, now stated by tick instead of sample.
+
+**The latency-growth dead zone (accepted, documented).** A mid-play latency
+growth BEYOND the play-time snapshot puts future near-position events below
+the floor; they clamp and land below the read position, i.e. skip as past.
+Same class as 3i's accepted "past never resurrects" trade for latency
+growth, with the boundary moved by the window width (the pre-roll makes the
+dead zone NARROWER than the old clamp-to-0, never wider).
+
+**Pre-roll 0 identity.** No plugin / zero latency (null-audio, no-device,
+scale, a latency-free set) gives preRoll=0: every new clamp degenerates to
+the old constant, the walk's tick-based past test skips exactly the set the
+old sample-based test skipped, and the mute window is empty. Behavior is
+byte-identical (proven locally: all four no-plugin modes re-run green).
+
+**CI-proven vs by-ear at commit time.** CI-proven (this tag's run is the
+gate): the `[transport] pre-roll 128 samples` receipt in Test D3 (128 = the
+fixture's play-time max mirror); the latency-mode WIRE proof — the tick-0
+NOTE_ON pre-fired at ledger s=-128 with t clamped 0 and NO s=0 downbeat
+dispatch; the host-mode resume re-attacks pre-firing at s=-128 (the
+assertions moved from s=0 — the pre-fire is itself asserted now) with the
+replay-burst check tick-scoped; every 3i/3j D3 assertion set unchanged
+(republish counts/pairs, deferred reachability, debounce confirmed, the
+resurrection reuse receipt). By-ear: whether the corrected downbeat actually
+LANDS on the grid when heard — the manual Windows procedure in
+docs/LATENCY_GATE.md (Stage 3k section) extends the convolver check with the
+downbeat: play a score whose first note is on the downbeat through a
+latency-loaded plugin and hear the attack on the grid (pre-fix it arrived
+one latency late).
