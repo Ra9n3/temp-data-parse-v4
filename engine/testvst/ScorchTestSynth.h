@@ -47,9 +47,14 @@
 //   0  → setLatencySamples(0)    + updateHostDisplay(latencyChanged)  (NOTIFIED)
 //   1  → setLatencySamples(1024) + updateHostDisplay(latencyChanged)  (NOTIFIED)
 //   2  → setLatencySamples(2048) + updateHostDisplay(latencyChanged)  (NOTIFIED)
-//   10 → setLatencySamples(2048) with NO notification — the engine's 2000 ms
-//        message-thread safety-net timer must detect it (2-identical-reads
-//        debounce) — the silent-change CI proof
+//   10 → setLatencySamples(2048). NOT silent at the JUCE level: JUCE's
+//        setLatencySamples itself calls updateHostDisplay(latencyChanged)
+//        (Stage 3j discovery — the engine's flagged path always sees a bare
+//        v=10 instantly). The HARNESS sends v=1 and v=10 half a second apart
+//        as a RAPID PAIR: the pair's second enqueue hits the one-per-second
+//        rate limit, stays pending, and the engine's 2000 ms safety-net walk
+//        lands it with a "debounce confirmed" receipt — the deterministic
+//        rate-limit + debounce-landing CI proof.
 //   20 → NOTIFIED FLICKER: 40 toggles 0↔1024, one every 4 blocks (~46 ms at
 //        44100/512 ≈ 1.9 s total), each one notified (updateHostDisplay from
 //        INSIDE processBlock — the realtime-notification shape a real plugin
@@ -355,8 +360,10 @@ private:
                     updateHostDisplay(juce::AudioProcessorListener::ChangeDetails().withLatencyChanged(true));
                     logLatency("cc", target, 1);
                 } else if (val == 10) {
-                    // SILENT change: no updateHostDisplay — only the engine's
-                    // 2000 ms safety-net timer can detect this one.
+                    // Part 2 of the harness's rapid pair (header table): this
+                    // DOES notify (JUCE's setLatencySamples calls
+                    // updateHostDisplay internally), but the pair's second
+                    // enqueue is rate-limited — the safety-net walk lands it.
                     setLatencySamples(2048);
                     logLatency("silent", 2048, 0);
                 } else if (val == 20) {

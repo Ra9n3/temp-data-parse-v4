@@ -210,7 +210,7 @@
 
 namespace {
 
-constexpr const char* kEngineVersion = "0.8.5";
+constexpr const char* kEngineVersion = "0.8.6";
 constexpr int kProtocolVersion = 1;
 constexpr int kDefaultPort = 9377;
 constexpr int kMaxVoices = 64;
@@ -754,7 +754,8 @@ struct LatencyCorrection { std::string instanceId; int newValue; };
 // thread (the listener callback is a bare atomic store).
 std::mutex g_latencyJobMutex;
 std::vector<std::vector<LatencyCorrection>> g_latencyJobs;       // queued mini-republish jobs
-struct LatencyPending { int value = 0; bool deferNamed = false; };
+struct LatencyPending { int value = 0; bool deferNamed = false;
+                         bool confirmedNamed = false; };   // 3j: receipt naming guards
 std::unordered_map<std::string, LatencyPending> g_latencyPending;    // guarded by g_latencyJobMutex
 std::unordered_map<std::string, std::chrono::steady_clock::time_point> g_latencyLastEnqueue;  // guarded by g_latencyJobMutex
 
@@ -821,12 +822,30 @@ void latencyDrain(bool safetyWalk) {
             // Decide under the lock, act OUTSIDE it (latencyTryEnqueue takes
             // the same non-recursive mutex — a nested call would deadlock).
             bool act = false;
+            std::string sawLine, confirmedLine;
             {
                 std::lock_guard<std::mutex> lock(g_latencyJobMutex);
                 auto pit = g_latencyPending.find(h->instanceId);
-                if (pit != g_latencyPending.end() && pit->second.value == v) act = true;   // second identical poll
-                else g_latencyPending[h->instanceId] = {v, false};                         // first sighting — wait one poll
+                if (pit != g_latencyPending.end() && pit->second.value == v) {
+                    act = true;   // second identical poll
+                    if (!pit->second.confirmedNamed) {
+                        pit->second.confirmedNamed = true;
+                        confirmedLine = "[latency] debounce confirmed instance=" + h->instanceId +
+                                        " value=" + std::to_string(v) +
+                                        " samples (2 identical safety-net polls)";
+                    }
+                } else {
+                    g_latencyPending[h->instanceId] = {v, false, false};   // (re)armed — wait one poll
+                    sawLine = "[latency] saw instance=" + h->instanceId +
+                              " current=" + std::to_string(v) +
+                              " published=" + std::to_string(published) +
+                              " samples — safety-net poll armed";
+                }
             }
+            // Log OUTSIDE the lock (engineLog takes its own mutex); the enqueue
+            // takes g_latencyJobMutex again — order: log, then act.
+            if (!sawLine.empty()) engineLog(sawLine);
+            if (!confirmedLine.empty()) engineLog(confirmedLine);
             if (act) latencyTryEnqueue(h->instanceId, v);
         }
     }
@@ -871,6 +890,17 @@ void latencyRepublishJob(std::vector<LatencyCorrection> candidates) {
             const int oldV = nextSet->slotLatency[h->slot];
             if (oldV == c.newValue) continue;                 // converged — no-op
             nextSet->slotLatency[h->slot] = c.newValue;
+            // ONE WRITE DISCIPLINE (Stage 3j field invariant): the
+            // h->latencySamples refresh happens BEFORE (not after) the set
+            // swap — the same ordering as the load path (prepare writes it,
+            // then the set publishes from it) and audioDeviceAboutToStart. It
+            // is the value a future load rebuilds retained slotLatency from,
+            // so a load racing this job must see the CORRECTED value, never
+            // the pre-correction one — the resurrection window is closed,
+            // not narrowed. If the CAS ultimately gives up, the safety net
+            // re-detects (getLatencySamples still differs from the published
+            // slot) and re-enqueues — the speculative write self-heals.
+            h->latencySamples = static_cast<double>(c.newValue);
             applied.push_back({h, oldV, c.newValue});
         }
         if (applied.empty()) {
@@ -883,11 +913,11 @@ void latencyRepublishJob(std::vector<LatencyCorrection> candidates) {
         if (g_instances.compare_exchange_strong(cur, nextSet,
                                                 std::memory_order_acq_rel,
                                                 std::memory_order_acquire)) {
-            // Committed. The receipt-only member is ALSO the value future
-            // load publishes rebuild slotLatency from (fresh + retained
-            // instances) — refresh it so a later load keeps the correction.
+            // Committed — receipts only here. The h->latencySamples refresh already
+            // happened in the collection loop, BEFORE the swap (the Stage 3j
+            // one-write discipline: h never lags the published set on this
+            // thread, so no later load can rebuild the stale value).
             for (auto& a : applied) {
-                a.h->latencySamples = static_cast<double>(a.newV);
                 engineLog("[latency] republish instance=" + a.h->instanceId +
                           " old=" + std::to_string(a.oldV) +
                           " new=" + std::to_string(a.newV) +
@@ -3653,6 +3683,7 @@ void handle_load(const juce::var& json, ix::WebSocket& ws, size_t byteSize) {
                     }
                     engineLog("[plugin] reuse while playing — no re-instantiate | seq " +
                               std::to_string(seq) + " instance=" + r.instanceId +
+                              " latencySamples=" + std::to_string(static_cast<int>(h->latencySamples)) +
                               " channels=[" + chansJsonPerInst[r.instanceId] + "]");
                 }
                 std::cout << "[engine] plugin set reused (mid-play, seq " << seq

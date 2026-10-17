@@ -131,7 +131,8 @@
 //     arrives EXACTLY 6× (1 initial + 5 mid-play reuse) — the corrections
 //     ride the mini-republish, never a re-instantiate.
 //     The engine.log receipts themselves ([latency] republish old→new pairs,
-//     the deferred rate-limit receipt, publish summaries) are asserted by
+//     the deferred rate-limit receipt, publish summaries, and the Stage 3j
+//     saw / debounce-confirmed lines + the final reuse latencySamples) are asserted by
 //     desktop.yml after the session.
 
 // Stage 3f-3a runner-only imports: the Windows host-hwnd holder spawns a
@@ -423,7 +424,16 @@ const latLatencyMs = (samples) => (samples + 512) / 44100.0 * 1000.0;
 
 function latEvents(ccVal) {
   const evs = [{ eventType: "NOTE_ON", channel: 1, data1: 60, data2: 100, timestampTicks: 0, trackId: "t1" }];
-  if (ccVal !== undefined)
+  if (ccVal === 10) {
+    // Stage 3j: the RAPID PAIR — v=1 then v=10 half a second apart. The
+    // second enqueue hits the one-per-second rate limit, stays pending, and
+    // the engine's safety-net walk lands it ("debounce confirmed" receipt).
+    // (A bare v=10 is NOT silent: JUCE's setLatencySamples auto-notifies.)
+    evs.push({ eventType: "CONTROL_CHANGE", channel: 1, data1: 23, data2: 1,
+               timestampTicks: latLastTick + 960, trackId: "t1" });
+    evs.push({ eventType: "CONTROL_CHANGE", channel: 1, data1: 23, data2: 10,
+               timestampTicks: latLastTick + 1920, trackId: "t1" });
+  } else if (ccVal !== undefined)
     evs.push({ eventType: "CONTROL_CHANGE", channel: 1, data1: 23, data2: ccVal,
                timestampTicks: latLastTick + 960, trackId: "t1" });
   return evs;
@@ -444,7 +454,9 @@ function latSendLoad(ccVal) {
 // NEXT load's reuse receipt reads h->latencySamples):
 //   +0.5s  v=1  notified 1024   → lands ≤ ~3.2s (flag drain ≤ 2s timer + 100ms job)
 //   +5.0s  v=0  notified 0
-//   +9.5s  v=10 SILENT 2048     → safety net: 2 debounce polls (2s each) → ≤ ~14.5s
+//   +9.5s  RAPID PAIR v=1+v=10  → 1024 republishes; the 2048 enqueue is
+//          rate-limited, stays pending → the 2000 ms safety-net walk lands
+//          it ("debounce confirmed") ≤ ~14.5s
 //   +17.0s v=20 NOTIFIED FLICKER (40 toggles ≈ 1.9s, settles 1024) → rate-limited
 //          publishes + final convergence ≤ ~4.5s post-settle
 //   +26.0s probe load (no CC)   → its reuse receipt PROVES the settled 1024
@@ -741,9 +753,9 @@ ws.addEventListener("message", (event) => {
     }
     if (msg.type === "hello" && multiPhase === 0) {
       if (msg.protocol !== 1) fail(`expected protocol 1, got ${msg.protocol}`);
-      if (msg.engineVersion !== "0.8.5") fail(`expected 0.8.5, got ${msg.engineVersion}`);
+      if (msg.engineVersion !== "0.8.6") fail(`expected 0.8.6, got ${msg.engineVersion}`);
       if (!fixtureDir) fail("multi mode requires a fixture dir argument");
-      console.log("[test] hello OK (0.8.5) — scanning for the stand-in host plugin...");
+      console.log("[test] hello OK (0.8.6) — scanning for the stand-in host plugin...");
       multiPhase = 1;
       ws.send(JSON.stringify({ type: "scan", dirs: [fixtureDir] }));
     } else if (msg.type === "scan_result" && multiPhase === 1) {
@@ -1351,7 +1363,7 @@ ws.addEventListener("message", (event) => {
     if (msg.type === "hello" && !helloOk) {
       helloOk = true;
       if (msg.protocol !== 1) fail(`expected protocol 1, got ${msg.protocol}`);
-      if (msg.engineVersion !== "0.8.5") fail(`expected 0.8.5, got ${msg.engineVersion}`);
+      if (msg.engineVersion !== "0.8.6") fail(`expected 0.8.6, got ${msg.engineVersion}`);
       if (!fixtureDir) fail("scan mode requires a fixture dir argument");
       console.log("[test] hello OK — sending scan of fixture dir + nested dir (dedup proof):", fixtureDir);
       scanSent = true;
@@ -1511,11 +1523,11 @@ ws.addEventListener("message", (event) => {
     // ── Stage 3i: runtime latency tracking (detect, then mini-republish) ──
     if (msg.type === "hello" && latPhase === 0) {
       if (msg.protocol !== 1) fail(`expected protocol 1, got ${msg.protocol}`);
-      if (msg.engineVersion !== "0.8.5") fail(`expected 0.8.5, got ${msg.engineVersion}`);
+      if (msg.engineVersion !== "0.8.6") fail(`expected 0.8.6, got ${msg.engineVersion}`);
       if (!fixtureDir) fail("latency mode requires a fixture dir argument");
       helloOk = true;
       latPhase = 1;
-      console.log("[test] hello OK (0.8.5) — scanning for the stand-in host plugin...");
+      console.log("[test] hello OK (0.8.6) — scanning for the stand-in host plugin...");
       ws.send(JSON.stringify({ type: "scan", dirs: [fixtureDir] }));
     } else if (msg.type === "scan_result" && latPhase === 1) {
       const valid = (msg.plugins ?? []).find((p) => p.name === "Scorch Test Synth");
@@ -1566,7 +1578,7 @@ ws.addEventListener("message", (event) => {
     if (msg.type === "hello" && !helloOk) {
       helloOk = true;
       if (msg.protocol !== 1) fail(`expected protocol 1, got ${msg.protocol}`);
-      if (msg.engineVersion !== "0.8.5") fail(`expected 0.8.5, got ${msg.engineVersion}`);
+      if (msg.engineVersion !== "0.8.6") fail(`expected 0.8.6, got ${msg.engineVersion}`);
       // Stage 3c close-out: the dispatch ledger streams what the engine
       // ACTUALLY dispatched — the replay-burst and re-attack asserts read it.
       ws.send(JSON.stringify({ type: "dispatch_log", enable: true }));
@@ -1889,7 +1901,7 @@ ws.addEventListener("close", () => {
       console.log("");
       console.log("========================================");
       console.log("ALL RUNTIME-LATENCY TESTS PASSED (3i):");
-      console.log("  detected+republished: 128->1024 (notified), 1024->0 (notified), 0->2048 (SILENT — 2000ms safety net + 2-identical-reads debounce), flicker 0<->1024 rate-limited to settle 1024");
+      console.log("  detected+republished: 128->1024 (notified), 1024->0 (notified), 0->1024->2048 (rapid pair — the 2048 enqueue rate-limited, landed by the 2000ms safety-net walk), flicker 0<->1024 rate-limited to settle 1024");
       console.log(`  reuse receipt latencyMs chain: [${latLoadedReceipts.map((v) => v.toFixed(2)).join(", ")}] — every correction survived a mid-play load (no re-instantiate)`);
       console.log(`  transport continuity: tick ${latLastTick} past every CC dispatch tick; playing never dropped; no error mid-sequence`);
       console.log("  engine.log receipts ([latency] republish old->new, deferred rate-limit, publish summaries) asserted by desktop.yml");

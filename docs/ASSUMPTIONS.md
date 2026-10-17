@@ -2111,3 +2111,102 @@ their latency, how the correction sounds under a rolling transport, whether
 the one-buffer discontinuity is audible in mix context — remains by-ear on
 real Windows with the shipped installer. Engine 0.8.4 → 0.8.5; protocol 1
 unchanged; frontend and shell byte-untouched.
+
+---
+
+## Stage 3j — latency gate closure (latency-gate-v1, engine 0.8.6)
+
+**The field invariant, made verbatim.** The review checklist pinned the
+one-write discipline: the watchdog path updates `h->latencySamples` BEFORE
+(or atomically with) publishing the new set, same as the load/AboutToStart
+paths. 3i had it AFTER the CAS commit. Both orderings are race-free for the
+load rebuild (the republish job and the load path run sequentially on the
+one init worker thread, so no load can observe the in-between state), but
+the after-ordering had two real blemishes: a WS-thread reuse receipt reading
+the mirror between the swap and the refresh would report the stale value on
+the wire, and a load racing the watchdog would rebuild the retained
+instance's slotLatency from the stale mirror and the job would need another
+CAS round to re-apply. The refresh now happens in the candidate-collection
+loop, BEFORE `compare_exchange_strong` — the exact load/AboutToStart
+ordering. If the CAS ultimately gives up after 8 retries, the speculative
+write stands but self-heals: `getLatencySamples()` still differs from the
+published slot, the safety net re-detects and re-enqueues. A pleasant
+consequence: a load racing the watchdog now inherits the correction
+IMMEDIATELY from the mirror (the load's rebuild reads `h->latencySamples`
+for retained instances), so the resurrection scenario — watchdog corrects
+mid-play, a reload resurrects the pre-correction value — is closed by
+construction, not narrowed.
+
+**The resurrection proof moved into the engine log.** The 3i proof that a
+corrected value survives a reload lived on the WIRE only (the mjs reuse
+latencyMs chain, whose final no-command entry must read the corrected
+1024). The review asked for it in the log: the mid-play reuse receipt now
+carries `latencySamples=`, and desktop.yml asserts the FINAL reuse receipt
+(the no-command probe load) carries the watchdog-corrected 1024. A
+regression of the write discipline now fails CI with a named message
+("a reload resurrected the pre-correction value") instead of hiding in a
+wire number.
+
+**The JUCE discovery that reshaped the fixture.** Building the greppable
+gate exposed a 3i misassumption: `AudioProcessor::setLatencySamples` ITSELF
+calls `updateHostDisplay(ChangeDetails().withLatencyChanged(true))`
+internally (juce_AudioProcessor.cpp), and the VST3 wrapper routes EVERY
+latency-member write through `setLatencySamples` — the kLatencyChanged
+handler AND the prepare path both end there. Consequences, each proven in
+the local gate run before any code moved: (a) 3i's "SILENT" v=10 fixture
+mode was never silent — the flagged fast path republished it instantly (the
+run showed old=0 new=2048 landing with zero debounce delay); (b) the timer
+walk's "saw" arming (first sighting with no pending record) is
+STRUCTURALLY UNREACHABLE in steady state — every real diff either has a
+live flag the walk itself consumes, or a pending record the rate limit left
+behind; the saw fires only in the listener pre-attach window or a
+wrapper-bypass path. Honest positions taken: the saw stays in the receipt
+grammar and docs/LATENCY_GATE.md documents exactly when it can appear, but
+it is deliberately NOT CI-asserted (an unprovable assertion is a flake
+factory, not a gate); the walk's deterministic, asserted behavior is the
+landing of a rate-limited candidate.
+
+**The rapid pair — reachability made deterministic.** The review's
+reachability demand: the oscillation test must PROVE the rate limit fires.
+3i's flicker already forced deferrals deterministically (40 toggles in
+~1.9 s against a one-per-second cap), but the walk's "debounce confirmed"
+landing depended on a 2 s poll landing inside the episode — locally true,
+CI-flaky by construction. The harness's load #4 became a RAPID PAIR: v=1
+and v=10 half a second apart. The first half republishes through the
+flagged path (and stamps the rate window); the second half's enqueue
+provably hits the closed window (deferred receipt, deterministic), stays
+pending with no further notifications, and the FIRST safety-net poll after
+the window opens both names the confirmation and lands the candidate. Both
+receipts are now order-deterministic. The fixture's v=10 comments were
+rewritten to tell the truth (it notifies; the pair is the point), and the
+commanded-pairs assertion grew to four (the pair contributes
+old=0 new=1024 and old=1024 new=2048). The reuse latencyMs chain is
+UNCHANGED — receipt #4 reads the mirror before its pair dispatches, #5
+reads the landed 2048.
+
+**The gate doc.** docs/LATENCY_GATE.md (new) is the reusable artifact the
+review asked for: the full receipt grammar with emitters and meanings, the
+expected engine.log sequences for notified changes, the rapid pair, a true
+steady-state convolver (should a future wrapper bypass notification), the
+flicker's rate-limited convergence, and the resurrection probe; the REAL
+captured local sequence as the reference; the manual Windows convolver
+procedure (what to grep, what to hear — one buffer of discontinuity
+accepted, transport never stalls, attacks back on the grid); and the
+CI-assertion-to-proof mapping, including the rate-limit reachability
+assertion as THE proof the cap is not unreachable.
+
+**CI-proven vs by-ear at commit time.** CI-proven at 0.8.5 (web #60 /
+Desktop #56, b162409): the 3i machinery — wire chain, transport
+continuity, no-reload, republish discipline, deferred receipt, bounds.
+New at 0.8.6, by-ear at commit (this tag's CI run is the gate): the
+h-first write, the reuse receipt's latencySamples field and the log-side
+resurrection assertion, the saw/confirmed receipts, the rapid pair and the
+four-pair assertion, the LATENCY_GATE.md artifact. Local validation before
+commit: full latency mode green with every gate assertion replicated in
+python (republish x7 in bounds, all four pairs, deferred x3, confirmed x2,
+reuse x5, FINAL reuse latencySamples=1024, no editor receipts, engine exit
+0) plus a host-mode regression run green at 0.8.6. The REAL convolver
+by-ear check (IR load mid-play on real Windows, one-buffer discontinuity
+audibility) remains the manual gate the new document exists to serve.
+Engine 0.8.5 → 0.8.6; protocol 1 unchanged; frontend and shell
+byte-untouched.

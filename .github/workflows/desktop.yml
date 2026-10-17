@@ -457,7 +457,7 @@ jobs:
             if ($latDeferred -lt 1) { throw "3i receipt missing: the flicker must have hit the one-per-second rate limit at least once (deferred receipt)" }
             # The commanded correction pairs must ALL appear (order-insensitive;
             # mid-flicker pairs vary by drain timing):
-            foreach ($pair in @("old=128 new=1024", "old=1024 new=0", "old=0 new=2048")) {
+            foreach ($pair in @("old=128 new=1024", "old=1024 new=0", "old=0 new=1024", "old=1024 new=2048")) {
               $hit = Select-String -Path $engineLog -Pattern ("\[latency\] republish instance=inst-lat " + [regex]::Escape($pair))
               if (-not $hit) { throw "3i receipt missing: no '[latency] republish ... $pair' for inst-lat in engine.log" }
             }
@@ -472,6 +472,26 @@ jobs:
             if ($loadedLat -ne 1) { throw "3i no-reload proof failed: inst-lat must publish through the load path EXACTLY once, got $loadedLat" }
             $reuseLat = (Select-String -Path $engineLog -Pattern "\[plugin\] reuse while playing.*instance=inst-lat").Count
             if ($reuseLat -ne 5) { throw "3i reuse proof failed: expected exactly 5 mid-play reuse receipts for inst-lat, got $reuseLat" }
+            # ── Stage 3j gate additions (docs/LATENCY_GATE.md) ──
+            # (a) The safety-net walk SPEAKS: the rapid pair's second enqueue
+            # is rate-limited, stays pending, and the walk lands it — the
+            # "debounce confirmed" receipt is the greppable middle of the
+            # convolver by-ear gate. (The "[latency] saw" arming line is
+            # structurally unreachable in steady state — JUCE's
+            # setLatencySamples auto-notifies, so every walk entry arrives
+            # with a pre-existing pending record; the saw fires only in the
+            # pre-attach window / wrapper-bypass paths — documented in
+            # docs/LATENCY_GATE.md, deliberately not CI-asserted.)
+            $latConfirmed = (Select-String -Path $engineLog -Pattern "\[latency\] debounce confirmed instance=inst-lat ").Count
+            if ($latConfirmed -lt 1) { throw "3j receipt missing: no '[latency] debounce confirmed' for inst-lat — the safety-net walk must name the landing of the rate-limited pair candidate" }
+            # (b) The RESURRECTION proof, in the engine log: the FINAL reuse
+            # receipt is the no-CC probe load — it must carry the
+            # watchdog-corrected latencySamples=1024, never a stale value.
+            $reuseLines = @(Select-String -Path $engineLog -Pattern "\[plugin\] reuse while playing.*instance=inst-lat")
+            $lastReuseLat = if ($reuseLines.Count -gt 0 -and $reuseLines[-1].Line -match "latencySamples=(\d+)") { [int]$Matches[1] } else { -1 }
+            if ($lastReuseLat -ne 1024) { throw "3j resurrection proof failed: the final no-CC reuse receipt carries latencySamples=$lastReuseLat, expected 1024 — a reload resurrected the pre-correction value (one-write-discipline broken)" }
+            Write-Host "3j gate receipts: $latSaw saw, $latConfirmed debounce confirmed, final reuse latencySamples=$lastReuseLat (corrected value survived the reload)"
+
             # NO-DISRUPTION proof: no editor traffic for this engine session —
             # the correction path must never touch editors (the D3 engine opens
             # none; any [editor] receipt would name an unexpected path).
