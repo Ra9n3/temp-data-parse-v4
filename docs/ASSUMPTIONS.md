@@ -1905,3 +1905,27 @@ harmful; left as is.
 tier proves the build and re-proves the engine fast-path receipts (pre-existing
 D-mode assertions). The share dialog, channel bookkeeping, dropdown filtering
 and unlink flow are UI — by-ear on real Windows with the shipped installer.
+
+### Stage 3g CI fix — the M-13 probe's marker arm raced the message-thread capture queue
+
+The failure on Desktop 39028028194 was NOT in the engine and NOT in the 3g
+frontend (both byte-identical to their last green runs): it was a race in the
+3f-6 TEST PROBE. The probe armed the slow-state marker as soon as it had seen
+pluginSavedState for two distinct instance ids — but those receipts can come
+from the M-9 closeEditor captures while M-11's captureState jobs are still
+QUEUED on the message thread. The marker then applied to a queued job's
+getStateInformation, which stalled the MM for its full 10 s; because JUCE's
+createPluginInstance round-trips the MM, the seq-4 instantiate (inst-slow,
+init=10016 ms) waited behind it and the M-13 receipts missed their 5 s window.
+Run #51 passed with identical sources purely on interleaving luck.
+
+Fix (test script only): a one-shot 600 ms quiesce between the two-distinct-ids
+observation and the marker arm — every already-queued capture is fast (marker
+off) and a free MM runs it in milliseconds, so at arm time the only stalling
+captures are the ones the probe itself is about to create (the replace's retire
+captures — the M-13 design's actual subject). The M-13 5 s window and all
+desktop.yml receipt assertions are unchanged. Honest limitation: a 600 ms
+quiesce is a practical drain, not a formal proof of an empty MM queue; if a
+future runner stalls a queued capture's START beyond it, the same failure
+shape would return — the engine-side alternative (deferring loads while the MM
+is busy) is a design change out of scope here.

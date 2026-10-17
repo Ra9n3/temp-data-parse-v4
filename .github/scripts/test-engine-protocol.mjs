@@ -200,6 +200,9 @@ const multiLoadedCount = {};
 // sides agree on the exact path; the tmpdir default covers local runs.
 const multiSlowMarker = process.env.SCORCH_TESTVST_SLOWSTATE_FILE || path.join(os.tmpdir(), "scorch-3f6-slowstate.marker");
 let multiTSlowLoad = 0, multiTFastLoad = 0, multiTFinalLoad = 0;
+// Stage 3g CI fix: one-shot timer that DRAINS the message thread's queued
+// capture jobs before the slow-state marker is armed (see the M-12 branch).
+let multiArmTimer = null;
 // Stage 3f-6 drain-wait: the stalled retire captures complete LATER on the
 // message thread (each stall occupies the MM for its full 10 s — unkillable
 // from the host side, exactly like the real Falcon symptom) and each
@@ -717,7 +720,7 @@ ws.addEventListener("message", (event) => {
         fail(`multi: pluginSavedState must carry a known instanceId, got ${msg.instanceId}`);
       }
       multiCapIds.add(msg.instanceId);
-      if (multiCapIds.size === 2) {
+      if (multiCapIds.size === 2 && multiArmTimer === null) {
         // Stage 3f-6 PUBLISH-SAFE probe: arm the slow-state marker, then
         // replace BOTH live instances. Every PREPARED test-synth instance's
         // getStateInformation now stalls 10 s (a being-created instance is
@@ -726,18 +729,33 @@ ws.addEventListener("message", (event) => {
         // all instances, then NO loaded receipts and every later load stuck
         // behind "init started (async)"). The worker must publish the new
         // set and speak within 5 s REGARDLESS.
-        console.log("[test] phase M-12 ✓ state captured PER INSTANCE (inst-a + inst-b, distinct ids) — 3f-6 publish-safe probe: arming slow-state marker, replacing the set");
-        multiPhase = 13;
-        try { fs.unlinkSync(multiSlowMarker); } catch {}
-        fs.writeFileSync(multiSlowMarker, "slow");
-        multiTSlowLoad = Date.now();
-        ws.send(JSON.stringify({
-          type: "load", seq: 4, events: multiEvents, meta: MULTI_META,
-          plugins: [
-            { instanceId: "inst-slow", uid: multiScanPlugin.uid, path: multiScanPlugin.path, name: multiScanPlugin.name },
-          ],
-          routing: { t1: { inst: "inst-slow", ch: 1 } },
-        }));
+        console.log("[test] phase M-12 ✓ state captured PER INSTANCE (inst-a + inst-b, distinct ids) — draining the message thread before arming the slow-state marker");
+        // Stage 3g CI fix (Desktop 39028028194): the M-9 closeEditor calls
+        // already queued the 3d-3 editor-close captures and M-11's
+        // captureState queued two more; the CLOSE captures' receipts can
+        // satisfy this size===2 check while a captureState job is STILL
+        // PENDING on the message thread. Arming the marker at that instant
+        // made the pending job's getStateInformation stall 10 s — and since
+        // JUCE's createPluginInstance round-trips the MM, the seq-4
+        // instantiate waited behind it (inst-slow init=10016ms) and the NEW
+        // set's receipts arrived 10021 ms late. The marker must only affect
+        // THIS replace's retire captures: drain first — every queued capture
+        // is fast (marker off) and a free MM runs it in milliseconds.
+        multiArmTimer = setTimeout(() => {
+          multiArmTimer = null;
+          multiPhase = 13;
+          try { fs.unlinkSync(multiSlowMarker); } catch {}
+          fs.writeFileSync(multiSlowMarker, "slow");
+          multiTSlowLoad = Date.now();
+          console.log("[test] MM drained — arming slow-state marker, replacing the set (seq 4)");
+          ws.send(JSON.stringify({
+            type: "load", seq: 4, events: multiEvents, meta: MULTI_META,
+            plugins: [
+              { instanceId: "inst-slow", uid: multiScanPlugin.uid, path: multiScanPlugin.path, name: multiScanPlugin.name },
+            ],
+            routing: { t1: { inst: "inst-slow", ch: 1 } },
+          }));
+        }, 600);
       }
     } else if (msg.type === "plugin_state" && multiPhase === 13 && msg.state === "loaded") {
       if (msg.instanceId !== "inst-slow") fail(`multi: publish-safe load must report inst-slow, got ${msg.instanceId}`);
