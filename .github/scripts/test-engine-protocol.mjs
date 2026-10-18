@@ -974,7 +974,14 @@ ws.addEventListener("message", (event) => {
       console.log(`[test] plugin_state LOADED: "${msg.name}" vendor="${msg.vendor}" latency=${msg.latencyMs}ms channels=${JSON.stringify(msg.channels)} ✓ (<100ms)`);
       hostPhase = 2;
       ws.send(JSON.stringify({ type: "transport", command: "play", tick: 0 }));
-    } else if (msg.type === "dispatch" && hostPhase >= 2) {
+    } else if (msg.type === "dispatch" && hostPhase >= 2 && hostCycPhase < 5) {
+      // hostCycPhase < 5: the cycle machine's FINAL-PROOF branch below
+      // (phase 5 — "dispatch receipts flowing after N reloads" → stop →
+      // shutdown) must see the dispatch receipts FIRST. This collector sits
+      // earlier in the chain and would otherwise swallow every dispatch,
+      // leaving the final proof waiting forever — invisible locally (the
+      // headless host skips the editor phases and everything after, so the
+      // final proof never ran until the full Windows CI path).
       for (const e of msg.entries ?? []) hostEntries.push(e);
     } else if (hostCycPhase === 2 && msg.type === "error" && msg.code === "editor_unavailable") {
       // The unload WIRE proof: after {"plugins": []}, nothing is hosted —
