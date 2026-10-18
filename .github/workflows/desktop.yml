@@ -605,10 +605,13 @@ jobs:
           if ($nodeRemoved -lt 10) { throw "engine.log missing vendor node-removed receipts (got $nodeRemoved, need >= 10: the x10 cycle unloads)" }
           # The x10 cycle's retire path: editor close -> state capture ->
           # removeNode, all inline on the message thread (the 3f-6 budget
-          # machinery is gone — no TIMEOUT receipts exist any more).
-          $retireBegins = (Select-String -Path $engineLog -Pattern "\[plugin\] retire capture BEGIN instance=").Count
+          # machinery is gone — no TIMEOUT receipts exist any more). The
+          # capture receipts under the vendored core are the 3f-7 4b pair
+          # "[plugin] capture BEGIN/END instance=... (replace)" — the OLD
+          # "retire capture" strings died with the set-retire machinery.
+          $retireBegins = (Select-String -Path $engineLog -Pattern "\[plugin\] capture BEGIN instance=.*\(replace\)").Count
           if ($retireBegins -lt 10) { throw "engine.log missing retire-capture BEGIN receipts (got $retireBegins, need >= 10: the cycle unloads must capture the outgoing state)" }
-          $retireEnds = (Select-String -Path $engineLog -Pattern "\[plugin\] retire capture END instance=").Count
+          $retireEnds = (Select-String -Path $engineLog -Pattern "\[plugin\] capture END instance=.*\(replace\)").Count
           if ($retireEnds -lt 10) { throw "engine.log missing retire-capture END receipts (got $retireEnds, need >= 10)" }
           # Milestone 1: the multi test's refused multi-entry load must name
           # the deferral in the log (the wire-side plugin_state error is
