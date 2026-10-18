@@ -536,8 +536,18 @@ function hostCycleSendUnload() {
     // The unload runs on the engine's async worker (retire = editor close ->
     // state capture -> vendor removeNode). The editor probe below is the
     // wire proof it landed; poll-retry absorbs the queue latency.
-    setTimeout(() => { hostCycPhase = 2; hostCycEditorTries = 0;
-      ws.send(JSON.stringify({ type: "openEditor", instanceId: "hosted" })); }, 700);
+    // STALE-TIMER GUARD (the cycle-11 CI wedge): when the unload lands fast,
+    // the machine moves on (reload -> the final editor round-trip + play
+    // proof) — a probe timer firing after that must NOT re-arm phase 2 mid-
+    // proof (it would re-open an editor over a ROLLING transport and the
+    // retry loop can never see editor_unavailable, because nothing was
+    // unloaded). Only arm the probe if the machine still waits for it.
+    const cycleAtSend = hostCycIdx;
+    setTimeout(() => {
+      if (hostCycPhase !== 1 || hostCycIdx !== cycleAtSend) return;
+      hostCycPhase = 2; hostCycEditorTries = 0;
+      ws.send(JSON.stringify({ type: "openEditor", instanceId: "hosted" }));
+    }, 700);
   }, 120);
 }
 function hostCycleReload() {
@@ -974,12 +984,15 @@ ws.addEventListener("message", (event) => {
       hostCycleReload();
     } else if (hostCycPhase === 2 && msg.type === "editorOpened") {
       // RACE ABSORBER: the unload job had not landed yet when the probe ran.
-      // Close the window and retry the probe (bounded).
+      // Close the window and retry the probe (bounded). The re-probe timer
+      // carries the same stale-fire guard as the send timer: if the unload
+      // lands while this timer is pending, the machine has moved on (phase
+      // 3+) and the re-probe must NOT re-arm phase 2 over a moved-on state.
       if (++hostCycEditorTries > 15) fail("cycle: the unload never landed (editor still opens after 15 retries)");
       console.log(`[test] cycle ${hostCycIdx + 1}: editor still open (unload in flight) — closing + retrying (${hostCycEditorTries}/15)`);
       ws.send(JSON.stringify({ type: "closeEditor", instanceId: "hosted" }));
       setTimeout(() => {
-        hostCycPhase = 2;
+        if (hostCycPhase !== 2) return;
         ws.send(JSON.stringify({ type: "openEditor", instanceId: "hosted" }));
       }, 500);
     } else if (hostCycPhase === 3 && msg.type === "plugin_state" && msg.state === "loaded") {
