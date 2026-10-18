@@ -686,6 +686,12 @@ jobs:
               if (Test-Path engine-d5-stdout.txt) { Get-Content engine-d5-stdout.txt }
               Write-Host "Engine D5 stderr:"
               if (Test-Path engine-d5-stderr.txt) { Get-Content engine-d5-stderr.txt }
+              # 0.9.2 forensics: the engine.log slice names the stuck phase —
+              # without it a D5 failure is only a timeout (the D5 CI finding).
+              if (Test-Path $engineLogD5) {
+                Write-Host "Engine D5 engine.log slice (last 120 lines):"
+                Get-Content $engineLogD5 | Select-Object -Last 120
+              }
               throw "Engine D5 terminal-receipt test failed"
             }
             # Fixture-side proof: the jam actually ran (create call=1 slept

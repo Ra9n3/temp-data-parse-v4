@@ -73,12 +73,16 @@
 //       engine's loadAck must arrive WHILE the constructor is still
 //       sleeping (async ack — the WS thread never waits behind plugin init).
 //   SCORCH_TESTVST_SLOW_CREATE_N=<call#> — 0.9.2: when set to N >= 1, only
-//       the Nth create PROCESS-WIDE sleeps (a static counter — each
-//       instance's constructor is one create call); absent or 0 = every
-//       create sleeps (the original behavior). The terminal-receipt test
-//       jams the FIRST create for 20 s (the watchdog declares the jammed
-//       init failed and the queued-behind ones) while every later create is
-//       instant — a jam-once-then-recover session.
+//       the Nth create sleeps — but counting per MODULE INSTANCE, not per
+//       process: a module that gets UNLOADED and RELOADED (the Windows
+//       FreeLibrary after the last instance dies — the D5 CI finding) RESETS
+//       the static counter, so "N=1 jams only the first create" silently
+//       re-armed and the CLEAN reload jammed too. The latch below fixes the
+//       class: the jam fires at most ONCE per ENGINE SESSION, tracked by a
+//       latch FILE keyed with SCORCH_TESTVST_JAM_TOKEN (the engine sets a
+//       per-session token; probe children inherit it, so a probe that
+//       creates the fixture also sees the latch). Absent or 0 = every
+//       create sleeps (the original behavior, unchanged for slowload).
 //   SCORCH_TESTVST_SLOW_PREPARE_N=<call#> + SCORCH_TESTVST_SLOW_PREPARE_S=<seconds>
 //       — the Nth prepareToPlay call (1-based; 0 = disabled) sleeps that
 //       long. EMPIRICAL (measured 2026-10-18): JUCE 8.0.4's VST3 wrapper
@@ -119,9 +123,12 @@ public:
         // inside the fixture's mute-window margins).
         setLatencySamples(128);
         // M1-hotfix: the cold-instantiate shape (see the header table above).
-        // 0.9.2: SCORCH_TESTVST_SLOW_CREATE_N gates the sleep to the Nth
-        // create process-wide (static counter) — the terminal-receipt test
-        // jams create #1 for 20 s and leaves every later create instant.
+        // 0.9.2: SCORCH_TESTVST_SLOW_CREATE_N gates the sleep to a single jam
+        // per ENGINE SESSION via a token-keyed latch file — the static
+        // counter alone is per MODULE INSTANCE and a Windows FreeLibrary +
+        // reload (the D5 CI finding: the abandoned instance frees the module)
+        // silently re-arms it. The engine sets SCORCH_TESTVST_JAM_TOKEN;
+        // probe children inherit it, so they share the latch.
         {
             static std::atomic<int> createCallCount{0};
             const int createIdx = createCallCount.fetch_add(1) + 1;
@@ -132,7 +139,24 @@ public:
                     createSleeps = true;
                     if (const char* sn = std::getenv("SCORCH_TESTVST_SLOW_CREATE_N")) {
                         const int n = std::atoi(sn);
-                        if (n > 0 && createIdx != n) createSleeps = false;
+                        if (n > 0) {
+                            // Session-latch: exactly ONE jammed create per token.
+                            std::string tok = "default";
+                            if (const char* t = std::getenv("SCORCH_TESTVST_JAM_TOKEN")) tok = t;
+                            std::string latchPath = "/tmp/scorch-testvst-jam-latch-" + tok;
+                            if (const char* td = std::getenv("TEMP")) latchPath = std::string(td) + "\\scorch-testvst-jam-latch-" + tok;
+                            else if (const char* td2 = std::getenv("TMP")) latchPath = std::string(td2) + "\\scorch-testvst-jam-latch-" + tok;
+                            else if (const char* td3 = std::getenv("TMPDIR")) latchPath = std::string(td3) + "/scorch-testvst-jam-latch-" + tok;
+                            if (std::FILE* lf = std::fopen(latchPath.c_str(), "r")) {
+                                std::fclose(lf);
+                                createSleeps = false;   // already jammed this session
+                            } else if (createIdx != n) {
+                                createSleeps = false;   // the legacy per-module N gating
+                            } else if (std::FILE* wl = std::fopen(latchPath.c_str(), "w")) {
+                                std::fputs("jam", wl);
+                                std::fclose(wl);   // latch BEFORE the sleep: a crash mid-jam still counts
+                            }
+                        }
                     }
                     if (createSleeps) {
                         std::fprintf(stdout, "[testvst] slow-create call=%d sleeping %d s (SCORCH_TESTVST_SLOW_CREATE_S)\n",

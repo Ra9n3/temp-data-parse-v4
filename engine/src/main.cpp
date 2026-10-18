@@ -4862,6 +4862,22 @@ int main(int argc, char** argv) {
             return runScanWorker(argv[i + 1]);
         }
         if (std::string(argv[i]) == "--probe-worker" && i + 2 < argc) {
+            // 0.9.2: the probe measures CAPABILITIES, not load timing — the
+            // M1-hotfix slow knobs shape the ENGINE's load path and must not
+            // make a probe sleep (a 20 s probe child overlapping the next
+            // create was the D5 CI failure's timing hazard). Strip them
+            // (an empty value reads as 0 = disabled in the fixture).
+#ifdef _WIN32
+            _putenv_s("SCORCH_TESTVST_SLOW_CREATE_S", "");
+            _putenv_s("SCORCH_TESTVST_SLOW_CREATE_N", "");
+            _putenv_s("SCORCH_TESTVST_SLOW_PREPARE_N", "");
+            _putenv_s("SCORCH_TESTVST_SLOW_PREPARE_S", "");
+#else
+            setenv("SCORCH_TESTVST_SLOW_CREATE_S", "", 1);
+            setenv("SCORCH_TESTVST_SLOW_CREATE_N", "", 1);
+            setenv("SCORCH_TESTVST_SLOW_PREPARE_N", "", 1);
+            setenv("SCORCH_TESTVST_SLOW_PREPARE_S", "", 1);
+#endif
             return runProbeWorker(argv[i + 1], argv[i + 2]);
         }
     }
@@ -4917,6 +4933,22 @@ int main(int argc, char** argv) {
     // so the audio thread's per-buffer check is a plain string compare.
     if (const char* stallFile = std::getenv("SCORCH_TEST_AUDIO_STALL_FILE"))
         g_testAudioStallFile = stallFile;
+
+    // 0.9.2: the fixture's create-jam latch token — a per-session value the
+    // fixture (and any probe child, which inherits the env) uses to key its
+    // "jam at most once" latch FILE (see ScorchTestSynth.h: a Windows
+    // FreeLibrary + module reload resets the fixture's static create counter,
+    // so a counter alone re-arms the jam; the FILE survives module reloads).
+    // Port + monotonic clock: unique per engine session, deterministic enough.
+    {
+        const long long tok = std::chrono::steady_clock::now().time_since_epoch().count();
+        const std::string jamToken = std::to_string(port) + "-" + std::to_string(tok);
+#ifdef _WIN32
+        _putenv_s("SCORCH_TESTVST_JAM_TOKEN", jamToken.c_str());
+#else
+        setenv("SCORCH_TESTVST_JAM_TOKEN", jamToken.c_str(), 1);
+#endif
+    }
 
     ix::initNetSystem();
 
