@@ -88,15 +88,19 @@
 //         whose uid IS the class identifier string MATCHES (the preferred
 //         key, phase R). Scan rows carry classId + capabilities too.
 //       Stage 3e-3: MULTI-OUTPUT BUSES — the fixture's aux bus is armed via
-//         score CC#22; default routing sums main+aux into the master (peak
-//         ≈1.287), outputRouting [{busIndex:1,mute:true}] leaves main only
-//         (peak ≈0.787) — both proven by peaks (phases MO-1..MO-5).
+//         score CC#22; M1: the aux-bus master fold AND the legacy ×2.0
+//         hosted-output gain are BOTH named deferrals (aux buses stay
+//         unconnected — only the main stereo bus drives the master; the
+//         graph renders at unity). Default and muted-routing loads both
+//         render main-only ≈0.394 (phases MO-1..MO-5 prove the main bus
+//         through routing-bearing reloads; the fold/gain asserts return
+//         with the routing milestone).
 //       Stage 3d-3: state persistence — captureState of the DEFAULT state is
 //         byte-EXACT (the fixture's state is one raw float32 masterScale,
 //         4 bytes = 1.0f); a re-host WITH an embedded state (masterScale
-//         0.5) must APPLY it (the play peak HALVES to ≈0.787) and the
-//         capture→restore→capture round-trip must be byte-IDENTICAL — the
-//         proof that a project-embedded state survives a restart.
+//         0.5) must APPLY it (the play peak HALVES to ≈0.397 at unity) and
+//         the capture→restore→capture round-trip must be byte-IDENTICAL —
+//         the proof that a project-embedded state survives a restart.
 //   scale — Stage 3c-hotfix: REAL-PROJECT-SIZED load. The CI gap was scale;
 //     this closes it. A deterministic full-density fixture (16 channels × 27
 //     bars, 13,824 events ≈ 1.1 MB serialized) is sent as ONE load message
@@ -402,7 +406,7 @@ const timeout = setTimeout(() => {
 // loaded-receipt bound is asserted EXPLICITLY per phase below — but the
 // wall-clock budget still covers them, plus the Stage 3h stall probe (a 2.5 s
 // audio freeze + its tail): 120 s.
-}, mode === "scan" ? 180000 : mode === "host" ? 60000 : mode === "multi" ? 120000 : mode === "latency" ? 90000 : 30000);
+}, mode === "scan" ? 180000 : mode === "host" ? 150000 : mode === "multi" ? 120000 : mode === "latency" ? 90000 : 30000);
 
 // scan-mode flags
 let scanSent = false, scanResultOk = false, aliveAfterCrashOk = false, defaultScanOk = false;
@@ -509,6 +513,39 @@ let hostPeakA = 0, hostPeakB = 0, hostPeakC = 0;   // assertion results
 let hostLatency = 0, hostDeltaSamples = 0;
 let hostStopTick1 = 0, hostStopTick2 = 0;          // 3c close-out stop positions
 let hostReleaseWait = 0;                           // ledger-arrival wait (observation race)
+// ── Milestone 1: the x10 clean unload/reload cycle (the lifetime gate) ──
+// Each cycle: {"plugins": []} unload (state captured first) -> the editor
+// probe answers editor_unavailable (the unload WIRE proof: nothing hosted)
+// -> a fresh load -> a FRESH plugin_state loaded (new instance). Ten of
+// them, then one final editor round-trip + play + dispatch proof.
+const HOST_CYCLES = 10;
+let hostCycIdx = 0;            // completed reloads
+let hostCycPhase = 0;          // 0 idle | 1 unloading | 2 probing | 3 reloading
+let hostCycEditorTries = 0;
+let hostCycUnloadOk = 0, hostCycReloadOk = 0;
+let hostCycEdOpen = false, hostCycEdClose = false;
+let hostCycPlayOk = false, hostCycAdvOk = false, hostCycDispatch = 0, hostCycStopOk = false;
+
+function hostCycleSendUnload() {
+  hostCycPhase = 1;
+  // The unload ride-along: a valid score (the engine's load gate parses
+  // events before hosting) + the EXPLICIT empty plugins[] array = host zero.
+  setTimeout(() => {
+    ws.send(JSON.stringify({ type: "load", seq: 10000 + hostCycIdx * 10,
+      events: HOST_EVENTS, meta: HOST_META, plugins: [] }));
+    // The unload runs on the engine's async worker (retire = editor close ->
+    // state capture -> vendor removeNode). The editor probe below is the
+    // wire proof it landed; poll-retry absorbs the queue latency.
+    setTimeout(() => { hostCycPhase = 2; hostCycEditorTries = 0;
+      ws.send(JSON.stringify({ type: "openEditor", instanceId: "hosted" })); }, 700);
+  }, 120);
+}
+function hostCycleReload() {
+  hostCycPhase = 3;
+  ws.send(JSON.stringify({ type: "load", seq: 10001 + hostCycIdx * 10,
+    events: HOST_EVENTS, meta: HOST_META, channels: { t1: 1, t2: 2 },
+    plugin: { uid: hostValidUid, path: hostValidPath, name: hostValidName } }));
+}
 
 // Stage 3c close-out — MUSICAL STOP proof: at the stop tick the ledger must
 // carry the release marker (ch=0 CC123 semantics — distinct from panic/mute
@@ -750,8 +787,13 @@ ws.addEventListener("message", (event) => {
   step++;
 
   if (mode === "multi") {
-    // ── Stage 3d-4: MULTI-INSTANCE hosting proof (see header docs) ──
-    // Stage 3e-1 collection: per-instance capability handshake counts.
+    // ── Milestone 1: the DEFERRAL contract ──
+    // A plugins[] array with more than one valid entry is refused by the
+    // protocol-shaped plugin_state error (multi-instance hosting is a later
+    // milestone); the score itself still loads, every track falls back to
+    // the built-in synth (the app never dead-ends), and a subsequent SINGLE
+    // legacy-plugin load works normally: loaded receipt, transport play,
+    // dispatch ledger, clean stop. Engine functional throughout.
     if (msg.type === "plugin_state" && msg.state === "loaded") {
       const iid = msg.instanceId || "hosted";
       multiLoadedCount[iid] = (multiLoadedCount[iid] ?? 0) + 1;
@@ -761,16 +803,16 @@ ws.addEventListener("message", (event) => {
     }
     if (msg.type === "hello" && multiPhase === 0) {
       if (msg.protocol !== 1) fail(`expected protocol 1, got ${msg.protocol}`);
-      if (msg.engineVersion !== "0.8.7") fail(`expected 0.8.7, got ${msg.engineVersion}`);
+      if (msg.engineVersion !== "0.9.0") fail(`expected 0.9.0, got ${msg.engineVersion}`);
       if (!fixtureDir) fail("multi mode requires a fixture dir argument");
-      console.log("[test] hello OK (0.8.7) — scanning for the stand-in host plugin...");
+      console.log("[test] hello OK (0.9.0) — deferral contract: scanning for the stand-in host plugin...");
       multiPhase = 1;
       ws.send(JSON.stringify({ type: "scan", dirs: [fixtureDir] }));
     } else if (msg.type === "scan_result" && multiPhase === 1) {
       const valid = (msg.plugins ?? []).find((p) => p.name === "Scorch Test Synth");
       if (!valid) fail(`multi mode: stand-in plugin not found in scan (${JSON.stringify(msg.plugins)})`);
       multiScanPlugin = valid;
-      console.log(`[test] stand-in found: "${valid.name}" — loading TWO instances (inst-a + inst-b, both ch1)`);
+      console.log(`[test] stand-in found: "${valid.name}" — loading TWO instances (must be REFUSED, seq 1)`);
       multiPhase = 2;
       ws.send(JSON.stringify({ type: "dispatch_log", enable: true }));
       ws.send(JSON.stringify({
@@ -785,213 +827,53 @@ ws.addEventListener("message", (event) => {
         routing: { t1: { inst: "inst-a", ch: 1 }, t2: { inst: "inst-b", ch: 1 } },
       }));
     } else if (msg.type === "dispatch" && multiPhase >= 2) {
-      for (const e of msg.entries ?? []) {
-        multiLedger.push(e);
-        if (e.k === 1 && e.c === 1) multiWideA = true;    // inst-a wide channel 1
-        if (e.k === 1 && e.c === 17) multiWideB = true;   // inst-b wide channel 17 (slot 1 + ch 1)
-      }
-    } else if (msg.type === "plugin_state" && multiPhase === 2 && msg.state === "loaded") {
-      if (msg.instanceId !== "inst-a" && msg.instanceId !== "inst-b") {
-        fail(`multi: plugin_state loaded must carry a known instanceId, got ${msg.instanceId}`);
-      }
-      if (multiLoaded.has(msg.instanceId)) fail(`multi: duplicate plugin_state for ${msg.instanceId}`);
-      multiLoaded.add(msg.instanceId);
-      if (JSON.stringify(msg.channels) !== "[1]") fail(`multi: ${msg.instanceId} channels must be [1], got ${JSON.stringify(msg.channels)}`);
-      if (typeof msg.latencyMs !== "number" || msg.latencyMs >= 100) fail(`multi: ${msg.instanceId} latencyMs must be < 100, got ${msg.latencyMs}`);
-      if (multiLoaded.size === 2) {
-        multiStateOk = 2;
-        console.log("[test] phase M-1 ✓ BOTH instances loaded (inst-a + inst-b, each channels [1], latency < 100ms) — playing");
-        multiPhase = 3;
-        ws.send(JSON.stringify({ type: "transport", command: "play", tick: 0 }));
-      }
-    } else if (msg.type === "state" && multiPhase === 3 && msg.playing) {
-      multiPeak = Math.max(multiPeak, msg.peak ?? 0);
-      if (msg.tick >= 2400) {
-        // Peak + routing asserts — then the mid-play reload probes.
-        if (multiPeak <= 1.0) fail(`multi: peak ${multiPeak.toFixed(3)} does not exceed 1.0 — single-instance contributions cap at ≈0.787, so the second instance is not audible in the SUMMED mix`);
-        if (!multiWideA || !multiWideB) fail(`multi: dispatch ledger missing wide-channel proof (c1=${multiWideA} c17=${multiWideB}) — per-instance routing broken`);
-        console.log(`[test] phase M-2 ✓ both instances audible (summed peak ${multiPeak.toFixed(3)} > 1.0, single-source cap ≈0.787) + wide-channel ledger proof (c=1 AND c=17)`);
-        console.log("[test] phase M-3 — SAME-set reload mid-play (reuse fast path, seq 2)...");
-        multiPhase = 4;
-        ws.send(JSON.stringify(multiReloadSame()));
-      }
-    } else if (msg.type === "plugin_state" && multiPhase === 4 && msg.state === "loaded") {
-      multiReuseOk++;
-      if (multiReuseOk === 2) {
-        console.log("[test] phase M-4 ✓ SAME-set reload REUSED both live instances (no re-instantiate) — sending CHANGED set (must REJECT, seq 3)");
-        multiPhase = 5;
-        ws.send(JSON.stringify(multiReloadChanged()));
-      }
-    } else if (msg.type === "error" && multiPhase === 5 && msg.code === "load_rejected") {
+      for (const e of msg.entries ?? []) multiLedger.push(e);
+    } else if (msg.type === "loadAck" && multiPhase === 2) {
+      // The SCORE is accepted even when the plugin set is refused.
+      if (msg.seq !== 1) fail(`multi: loadAck.seq must echo 1, got ${msg.seq}`);
+      console.log(`[test] loadAck OK while the plugin set is refused (${msg.loaded} events, byteSize ${msg.byteSize})`);
+    } else if (msg.type === "plugin_state" && multiPhase === 2 && msg.state === "error") {
+      const deferred = (msg.detail ?? "").includes("multi-instance hosting is deferred");
+      if (!deferred) fail(`multi: expected the deferral error, got: ${msg.detail}`);
       multiRejectOk = true;
-      console.log(`[test] phase M-5 ✓ changed plugin set REJECTED while playing ("${msg.detail}") — stopping`);
-      multiPhase = 6;
-      ws.send(JSON.stringify({ type: "transport", command: "stop" }));
+      console.log(`[test] phase D-1 ✓ multi-instance load REFUSED with the named deferral error ("${msg.detail.slice(0, 60)}…")`);
+      multiPhase = 3;
+      ws.send(JSON.stringify({ type: "ping" }));
+    } else if (msg.type === "plugin_state" && multiPhase <= 2 && msg.state === "loaded") {
+      fail(`multi: a multi-entry load must NEVER produce a loaded receipt, got one for ${msg.instanceId}`);
+    } else if (msg.type === "pong" && multiPhase === 3) {
+      // Engine fully functional after the refusal — single legacy load next.
+      multiReuseOk = 1;
+      console.log("[test] phase D-2 ✓ engine functional (pong) — loading ONE plugin via the legacy field");
+      multiPhase = 4;
+      ws.send(JSON.stringify({
+        type: "load", seq: 2, events: multiEvents, meta: MULTI_META,
+        channels: { t1: 1 },
+        plugin: { uid: multiScanPlugin.uid, path: multiScanPlugin.path, name: multiScanPlugin.name },
+      }));
+    } else if (msg.type === "plugin_state" && multiPhase === 4 && msg.state === "loaded") {
+      if (msg.instanceId !== "hosted") fail(`multi: single load instanceId must be "hosted", got ${msg.instanceId}`);
+      if (JSON.stringify(msg.channels) !== "[1]") fail(`multi: hosted channels must be [1], got ${JSON.stringify(msg.channels)}`);
+      multiStateOk = 1;
+      console.log("[test] phase D-3 ✓ single load OK (plugin_state loaded, channels [1]) — playing");
+      multiPhase = 5;
+      ws.send(JSON.stringify({ type: "transport", command: "play", tick: 0 }));
+    } else if (msg.type === "state" && multiPhase === 5 && msg.playing) {
+      multiPeak = Math.max(multiPeak, msg.peak ?? 0);
+      if (msg.tick >= 1600) {
+        if (multiPeak <= 0.05) fail(`multi: peak ${multiPeak.toFixed(3)} — nothing audible after the refused set + single reload`);
+        const notes = multiLedger.filter((e) => e.k === 1);
+        if (notes.length === 0) fail("multi: no NOTE_ON dispatch entries after the single load — dispatch broken");
+        console.log(`[test] phase D-4 ✓ transport plays after refusal+reload (peak ${multiPeak.toFixed(3)}, ${notes.length} NOTE_ON ledger entries) — stopping`);
+        multiPhase = 6;
+        ws.send(JSON.stringify({ type: "transport", command: "stop" }));
+      }
     } else if (msg.type === "state" && multiPhase === 6 && msg.playing === false) {
-      console.log("[test] phase M-6 ✓ clean stop after the guard sequence — editor windows (per-instance)...");
+      console.log("[test] phase D-5 ✓ clean stop — deferral contract complete");
       multiPhase = 7;
-      ws.send(JSON.stringify({ type: "openEditor", instanceId: "inst-b" }));
-    } else if (msg.type === "editorOpened" && multiPhase === 7) {
-      if (msg.instanceId !== "inst-b") fail(`multi: editorOpened must echo inst-b, got ${msg.instanceId}`);
-      if (!msg.width || msg.width <= 0 || !msg.height || msg.height <= 0) fail(`multi: editorOpened lacks real geometry: ${JSON.stringify(msg)}`);
-      multiEdOpenB = true;
-      console.log(`[test] phase M-7 ✓ inst-b editor OPENED ${msg.width}x${msg.height} — repeat must RAISE, then inst-a must open a SECOND window`);
-      multiPhase = 8;
-      ws.send(JSON.stringify({ type: "openEditor", instanceId: "inst-b" }));
-    } else if (msg.type === "editorOpened" && multiPhase === 8) {
-      if (msg.instanceId !== "inst-b" || msg.focused !== true) fail(`multi: repeat openEditor must focus inst-b, got ${JSON.stringify(msg)}`);
-      multiEdFocusB = true;
-      console.log("[test] phase M-8 ✓ repeat RAISED inst-b's window (focused, one editor per instance) — opening inst-a's editor SIMULTANEOUSLY");
-      multiPhase = 9;
-      ws.send(JSON.stringify({ type: "openEditor", instanceId: "inst-a" }));
-    } else if (msg.type === "editorOpened" && multiPhase === 9) {
-      if (msg.instanceId !== "inst-a") fail(`multi: second editor must be inst-a, got ${msg.instanceId}`);
-      if (msg.focused === true) fail("multi: inst-a's first open must OPEN, not focus");
-      multiEdOpenA = true;
-      console.log("[test] phase M-9 ✓ TWO SIMULTANEOUS editors (inst-a + inst-b) — closing each by id");
-      multiPhase = 10;
-      ws.send(JSON.stringify({ type: "closeEditor", instanceId: "inst-a" }));
-    } else if (msg.type === "editorClosed" && multiPhase === 10) {
-      if (msg.instanceId !== "inst-a") fail(`multi: editorClosed must echo inst-a, got ${msg.instanceId}`);
-      multiEdCloseA = true;
-      multiPhase = 11;
-      ws.send(JSON.stringify({ type: "closeEditor", instanceId: "inst-b" }));
-    } else if (msg.type === "editorClosed" && multiPhase === 11) {
-      if (msg.instanceId !== "inst-b") fail(`multi: editorClosed must echo inst-b, got ${msg.instanceId}`);
-      multiEdCloseB = true;
-      console.log("[test] phase M-11 ✓ editors closed cleanly per instance — state capture (per instance)...");
-      multiPhase = 12;
-      ws.send(JSON.stringify({ type: "captureState" }));
-    } else if (msg.type === "pluginSavedState" && multiPhase === 12) {
-      if (!msg.instanceId || (msg.instanceId !== "inst-a" && msg.instanceId !== "inst-b")) {
-        fail(`multi: pluginSavedState must carry a known instanceId, got ${msg.instanceId}`);
-      }
-      multiCapIds.add(msg.instanceId);
-      if (multiCapIds.size === 2 && multiArmTimer === null) {
-        // Stage 3f-6 PUBLISH-SAFE probe: arm the slow-state marker, then
-        // replace BOTH live instances. Every PREPARED test-synth instance's
-        // getStateInformation now stalls 10 s (a being-created instance is
-        // not prepared yet — JUCE's creation handshake stays fast) — the
-        // exact shape the user's engine.log showed ("prepared (async)" for
-        // all instances, then NO loaded receipts and every later load stuck
-        // behind "init started (async)"). The worker must publish the new
-        // set and speak within 5 s REGARDLESS.
-        console.log("[test] phase M-12 ✓ state captured PER INSTANCE (inst-a + inst-b, distinct ids) — draining the message thread before arming the slow-state marker");
-        // Stage 3g CI fix (Desktop 39028028194): the M-9 closeEditor calls
-        // already queued the 3d-3 editor-close captures and M-11's
-        // captureState queued two more; the CLOSE captures' receipts can
-        // satisfy this size===2 check while a captureState job is STILL
-        // PENDING on the message thread. Arming the marker at that instant
-        // made the pending job's getStateInformation stall 10 s — and since
-        // JUCE's createPluginInstance round-trips the MM, the seq-4
-        // instantiate waited behind it (inst-slow init=10016ms) and the NEW
-        // set's receipts arrived 10021 ms late. The marker must only affect
-        // THIS replace's retire captures: drain first — every queued capture
-        // is fast (marker off) and a free MM runs it in milliseconds.
-        multiArmTimer = setTimeout(() => {
-          multiArmTimer = null;
-          multiPhase = 13;
-          try { fs.unlinkSync(multiSlowMarker); } catch {}
-          fs.writeFileSync(multiSlowMarker, "slow");
-          multiTSlowLoad = Date.now();
-          console.log("[test] MM drained — arming slow-state marker, replacing the set (seq 4)");
-          ws.send(JSON.stringify({
-            type: "load", seq: 4, events: multiEvents, meta: MULTI_META,
-            plugins: [
-              { instanceId: "inst-slow", uid: multiScanPlugin.uid, path: multiScanPlugin.path, name: multiScanPlugin.name },
-            ],
-            routing: { t1: { inst: "inst-slow", ch: 1 } },
-          }));
-        }, 600);
-      }
-    } else if (msg.type === "plugin_state" && multiPhase === 13 && msg.state === "loaded") {
-      if (msg.instanceId !== "inst-slow") fail(`multi: publish-safe load must report inst-slow, got ${msg.instanceId}`);
-      if (JSON.stringify(msg.channels) !== "[1]") fail(`multi: inst-slow channels must be [1], got ${JSON.stringify(msg.channels)}`);
-      const dt = Date.now() - multiTSlowLoad;
-      if (dt > 5000) fail(`multi: 3f-6 publish-safe FAILED — the NEW set's loaded receipts took ${dt} ms (> 5000 ms) — the init worker blocked behind the retired instances' captures`);
-      console.log(`[test] phase M-13 ✓ NEW set live + loaded receipts in ${dt} ms (< 5000 ms) while BOTH retired captures stall 10 s on the message thread — sending the FOLLOWING load (pre-fix, the worker never got here)`);
-      multiPhase = 14;
-      multiTFastLoad = Date.now();
-      ws.send(JSON.stringify({
-        type: "load", seq: 5, events: multiEvents, meta: MULTI_META,
-        plugins: [
-          { instanceId: "inst-fast", uid: multiScanPlugin.uid, path: multiScanPlugin.path, name: multiScanPlugin.name },
-        ],
-        routing: { t1: { inst: "inst-fast", ch: 1 } },
-      }));
-    } else if (msg.type === "plugin_state" && multiPhase === 14 && msg.state === "loaded") {
-      if (msg.instanceId !== "inst-fast") fail(`multi: following load must report inst-fast, got ${msg.instanceId}`);
-      const dt = Date.now() - multiTFastLoad;
-      if (dt > 30000) fail(`multi: FOLLOWING load not processed in ${dt} ms — the init worker is still wedged`);
-      console.log(`[test] phase M-14 ✓ FOLLOWING load processed (${dt} ms after send) — the worker survived the slow captures. Disarming marker, waiting for the message thread to DRAIN (deferred captures complete)...`);
-      multiPhase = 15;
-      try { fs.unlinkSync(multiSlowMarker); } catch {}
-      maybeFinish3f6Drain();
-    } else if (msg.type === "plugin_state" && multiPhase === 16 && msg.state === "loaded") {
-      if (msg.instanceId !== "inst-final") fail(`multi: post-drain load must report inst-final, got ${msg.instanceId}`);
-      const dt = Date.now() - multiTFinalLoad;
-      if (dt > 5000) fail(`multi: post-drain load took ${dt} ms (> 5000 ms) — capture path did not recover`);
-      console.log(`[test] phase M-17 ✓ post-drain load processed (${dt} ms; its retire capture completes — END receipt, not TIMEOUT) — holding, then the 3h stall probe`);
-      // Hold the shutdown ~1500 ms so seq-6's retire capture OBSERVABLY
-      // completes (as before), then run the Stage 3h proof-based reclamation
-      // probe instead of shutting down directly.
-      setTimeout(run3hStallProbe, 1500);
-      multiPhase = 17;
-    } else if (msg.type === "plugin_state" && multiPhase === 18 && msg.state === "loaded") {
-      if (msg.instanceId !== "inst-stall") fail(`multi: 3h stall load must report inst-stall, got ${msg.instanceId}`);
-      multi3hLoaded++;
-      console.log("[test] phase M-18 ✓ seq-7 published WHILE the audio thread is frozen (loaded receipt during the stall — the publish path is audio-independent) — rapid swap #2 (seq 8), still frozen...");
-      multiPhase = 19;
-      ws.send(JSON.stringify({
-        type: "load", seq: 8, events: multiEvents, meta: MULTI_META,
-        plugins: [
-          { instanceId: "inst-stall2", uid: multiScanPlugin.uid, path: multiScanPlugin.path, name: multiScanPlugin.name },
-        ],
-        routing: { t1: { inst: "inst-stall2", ch: 1 } },
-      }));
-    } else if (msg.type === "plugin_state" && multiPhase === 19 && msg.state === "loaded") {
-      if (msg.instanceId !== "inst-stall2") fail(`multi: 3h rapid swap must report inst-stall2, got ${msg.instanceId}`);
-      multi3hLoaded++;
-      console.log("[test] phase M-19 ✓ seq-8 published while STILL frozen — both retired entries queued unprovable (frozen seq < swapSeq + 2). Holding the freeze, then un-stalling...");
-      multiPhase = 20;
-      // Hold the freeze ~800 more ms (a time-based 250 ms grace would have
-      // freed BOTH retired entries inside this window — engine.log must
-      // instead show the audio-proof deferrals), then remove the marker. The
-      // stalled buffer finishes its FULL sleep regardless; two buffers then
-      // tick past both swapSeqs and the janitor frees both at its next poll.
-      setTimeout(() => {
-        try { fs.unlinkSync(multiStallMarker); } catch {}
-        console.log("[test] phase M-20 — marker removed (un-stall); waiting out the freeze tail + two buffers + the janitor poll before shutdown (the freed receipts are engine.log assertions)...");
-        setTimeout(finishAndShutdown, 3500);
-      }, 800);
-    } else if (msg.type === "pluginSavedState" && multiPhase >= 13) {
-      // Deferred retire captures broadcast their blob when the message thread
-      // finally gets to them (up to ~10 s after the init thread stopped
-      // waiting). Collect them for the M-15 drain proof.
-      if (msg.instanceId && multiDrainTargets.has(msg.instanceId)) {
-        multiDrained.add(msg.instanceId);
-        console.log(`[test] deferred capture completed on the message thread: ${msg.instanceId} (${multiDrained.size}/${multiDrainTargets.size})`);
-      }
-      maybeFinish3f6Drain();
-    } else if (msg.type === "error" && msg.code === "editor_unavailable" && multiPhase === 7 && !multiHeadlessSkip) {
-      // Headless host (local validation): the display guard answers
-      // editor_unavailable — tolerate ONLY that detail and skip the window
-      // phases (Windows CI proves the real geometry path via host-mode J/K/L
-      // AND this mode's strict branches).
-      if (!/no display/i.test(msg.detail ?? "")) fail(`multi: unexpected editor_unavailable detail: ${msg.detail}`);
-      multiHeadlessSkip = true;
-      console.log(`[test] phase M-7 (headless) editor_unavailable tolerated ("${msg.detail}") — skipping to state capture`);
-      multiPhase = 12;
-      ws.send(JSON.stringify({ type: "captureState" }));
-    } else if (msg.type === "error" && multiPhase >= 13) {
-      fail(`multi: 3f-6 publish-safe phase got error: ${msg.code} ${msg.detail ?? ""}`);
-    } else if (msg.type === "error" && multiPhase >= 2 && !multiRejectOk) {
-      fail(`multi mode: unexpected error: ${msg.code} ${msg.detail ?? ""}`);
+      finishAndShutdown();
     }
-    return;
-  }
-
-  if (mode === "host") {
+  } else if (mode === "host") {
     // ── Stage 3c-2: hosting proof against the free test VST3 ──
     // COLLECT-then-ASSERT: state peaks are correlated to dispatch-ledger
     // markers by ENGINE TICK (never by arrival time), so runner-speed-dependent
@@ -1022,8 +904,12 @@ ws.addEventListener("message", (event) => {
         hostProbeReceiptOk = true;
         console.log(`[test] scan_probe ✓ probe receipt: capabilities with tailSeconds=null (infinite tail, valid JSON) — outcome=ok`);
         if (hostPhase === 33) {
-          console.log("[test] phase L2 ✓ the editor-pause probe answered AFTER the editor closed (+ 2 s resume) — shutdown");
-          finishAndShutdown();
+          // Milestone 1: instead of shutting down, run the lifetime gate —
+          // the x10 clean unload/reload cycle (the definition-of-done loop,
+          // CI-side). finishAndShutdown fires after the cycle's final stop.
+          console.log("[test] phase L2 ✓ the editor-pause probe answered AFTER the editor closed (+ 2 s resume)");
+          console.log(`[test] milestone-1 cycle: ${HOST_CYCLES}× clean unload/reload starting...`);
+          hostCycleSendUnload();
         }
       }
     }
@@ -1080,6 +966,55 @@ ws.addEventListener("message", (event) => {
       ws.send(JSON.stringify({ type: "transport", command: "play", tick: 0 }));
     } else if (msg.type === "dispatch" && hostPhase >= 2) {
       for (const e of msg.entries ?? []) hostEntries.push(e);
+    } else if (hostCycPhase === 2 && msg.type === "error" && msg.code === "editor_unavailable") {
+      // The unload WIRE proof: after {"plugins": []}, nothing is hosted —
+      // openEditor must answer editor_unavailable (the normal reply).
+      hostCycUnloadOk++;
+      console.log(`[test] cycle ${hostCycIdx + 1}/${HOST_CYCLES} ✓ unload landed (editor_unavailable: "${msg.detail}") — reloading`);
+      hostCycleReload();
+    } else if (hostCycPhase === 2 && msg.type === "editorOpened") {
+      // RACE ABSORBER: the unload job had not landed yet when the probe ran.
+      // Close the window and retry the probe (bounded).
+      if (++hostCycEditorTries > 15) fail("cycle: the unload never landed (editor still opens after 15 retries)");
+      console.log(`[test] cycle ${hostCycIdx + 1}: editor still open (unload in flight) — closing + retrying (${hostCycEditorTries}/15)`);
+      ws.send(JSON.stringify({ type: "closeEditor", instanceId: "hosted" }));
+      setTimeout(() => {
+        hostCycPhase = 2;
+        ws.send(JSON.stringify({ type: "openEditor", instanceId: "hosted" }));
+      }, 500);
+    } else if (hostCycPhase === 3 && msg.type === "plugin_state" && msg.state === "loaded") {
+      hostCycReloadOk++;
+      if (msg.instanceId !== "hosted") fail(`cycle reload: instanceId must be "hosted", got ${msg.instanceId}`);
+      hostCycIdx++;
+      if (hostCycIdx < HOST_CYCLES) {
+        console.log(`[test] cycle ${hostCycIdx}/${HOST_CYCLES} ✓ reloaded (fresh plugin_state loaded) — next unload`);
+        setTimeout(hostCycleSendUnload, 150);
+      } else {
+        console.log(`[test] milestone-1 cycle ✓ ${HOST_CYCLES}/${HOST_CYCLES} clean unload/reload cycles — final editor round-trip + play proof`);
+        hostCycPhase = 4;
+        ws.send(JSON.stringify({ type: "openEditor", instanceId: "hosted" }));
+      }
+    } else if (hostCycPhase === 4 && msg.type === "editorOpened") {
+      hostCycEdOpen = true;
+      console.log("[test] cycle final ✓ editor reopens after the last reload — closing");
+      ws.send(JSON.stringify({ type: "closeEditor", instanceId: "hosted" }));
+    } else if (hostCycPhase === 4 && msg.type === "editorClosed") {
+      hostCycEdClose = true;
+      console.log("[test] cycle final ✓ editor closed — play + dispatch proof");
+      hostCycPhase = 5;
+      ws.send(JSON.stringify({ type: "transport", command: "play", tick: 0 }));
+    } else if (hostCycPhase === 5 && msg.type === "dispatch") {
+      hostCycDispatch += (msg.entries ?? []).length;
+      if (hostCycDispatch >= 3 && !hostCycPlayOk) {
+        hostCycPlayOk = true;
+        console.log(`[test] cycle final ✓ dispatch receipts flowing after ${HOST_CYCLES} reloads (${hostCycDispatch} entries) — stopping`);
+        hostCycPhase = 6;
+        ws.send(JSON.stringify({ type: "transport", command: "stop" }));
+      }
+    } else if (hostCycPhase === 6 && msg.type === "state" && msg.playing === false) {
+      hostCycStopOk = true;
+      console.log("[test] cycle final ✓ clean stop — shutdown");
+      finishAndShutdown();
     } else if (msg.type === "state" && hostPhase >= 2 && hostPhase <= 4) {
       if (msg.playing) hostStates.push({ tick: msg.tick, peak: msg.peak ?? 0 });
       // Phase DRIVING only — all assertions run at the end.
@@ -1216,9 +1151,13 @@ ws.addEventListener("message", (event) => {
         hostStatePlayStates.push(msg.peak ?? 0);
         if (msg.tick >= 1700) {
           const peakMax = Math.max(...hostStatePlayStates);
-          // CC#21=64 → masterScale 64/127 ≈ 0.504 ⇒ peak ≈ 1.574×0.504 ≈ 0.793.
-          if (!(peakMax > 0.65 && peakMax < 0.90)) fail(`CC-diverged state did not apply in-render — peak must be ≈0.79, got ${peakMax.toFixed(3)} (frames: ${hostStatePlayStates.length})`);
-          console.log(`[test] phase N ✓ state DIVERGED through the score (peak ${peakMax.toFixed(3)} ≈ half of 1.574) — stopping to capture the diverged state`);
+          // CC#21=64 → masterScale 64/127 ≈ 0.504. M1: the graph renders at
+          // UNITY — the legacy renderer's ×2.0 hosted-output gain is the named
+          // deferral (returns with the routing milestone) — so the 2-voice
+          // fixture level 0.787 scales to ≈0.397 (the legacy ×2 gain expected
+          // ≈0.793).
+          if (!(peakMax > 0.32 && peakMax < 0.47)) fail(`CC-diverged state did not apply in-render — peak must be ≈0.397 (unity graph render, ×2.0 gain deferred), got ${peakMax.toFixed(3)} (frames: ${hostStatePlayStates.length})`);
+          console.log(`[test] phase N ✓ state DIVERGED through the score (peak ${peakMax.toFixed(3)} ≈ 0.787×0.504, unity) — stopping to capture the diverged state`);
           hostPhase = 17;
           ws.send(JSON.stringify({ type: "transport", command: "stop" }));
         }
@@ -1246,10 +1185,12 @@ ws.addEventListener("message", (event) => {
         hostStatePlayStates2.push(msg.peak ?? 0);
         if (msg.tick >= 1700) {
           const peakMax = Math.max(...hostStatePlayStates2);
-          // The RESTORED state (masterScale ≈ 0.504 from the embed) must apply.
-          if (!(peakMax > 0.65 && peakMax < 0.90)) fail(`restored state did not APPLY — peak must be ≈0.79 (the embedded value), got ${peakMax.toFixed(3)} (frames: ${hostStatePlayStates2.length})`);
+          // The RESTORED state (masterScale ≈ 0.504 from the embed) must
+          // apply. Unity re-scope as phase N: 0.787×0.504 ≈ 0.397 (the ×2.0
+          // hosted-output gain is the named M1 deferral).
+          if (!(peakMax > 0.32 && peakMax < 0.47)) fail(`restored state did not APPLY — peak must be ≈0.397 (unity graph render, ×2.0 gain deferred; the embedded value), got ${peakMax.toFixed(3)} (frames: ${hostStatePlayStates2.length})`);
           hostStateRestoreOk = true;
-          console.log(`[test] phase P ✓ restored state APPLIED (peak ${peakMax.toFixed(3)} ≈ half of 1.574 — setStateInformation took effect) — stopping, round-trip capture`);
+          console.log(`[test] phase P ✓ restored state APPLIED (peak ${peakMax.toFixed(3)} ≈ 0.787×0.504, unity — setStateInformation took effect) — stopping, round-trip capture`);
           hostPhase = 21;
           ws.send(JSON.stringify({ type: "transport", command: "stop" }));
         }
@@ -1289,8 +1230,15 @@ ws.addEventListener("message", (event) => {
         moPeaksDefault.push(msg.peak ?? 0);
         if (msg.tick >= 2400) {
           const pk = Math.max(...moPeaksDefault);
-          if (!(pk > 1.05 && pk < 1.45)) fail(`multi-out DEFAULT routing: master peak ${pk.toFixed(3)} must be main+aux ≈1.287 (main-only cap ≈0.787) — aux bus not summed`);
-          console.log(`[test] phase MO-2 ✓ default routing: master peak ${pk.toFixed(3)} ≈ main (0.787) + aux (0.5) — stopping`);
+          // M1 deferrals in force: the ×2.0 hosted-output gain AND the aux-bus
+          // master fold are both deferred (aux buses stay UNCONNECTED — only
+          // the main stereo bus drives the master). The MO score normalizes
+          // masterScale to 1.0 (CC21=127), one sustained vel-100 voice →
+          // fixture level 0.394, main-only. The default-vs-muted distinction
+          // (MO-2 vs MO-5) collapses to the same main-only peak until the
+          // routing milestone restores the fold.
+          if (!(pk > 0.30 && pk < 0.50)) fail(`multi-out DEFAULT routing: master peak ${pk.toFixed(3)} must be main-only ≈0.394 (unity; aux fold + gain deferred) — main bus not rendered`);
+          console.log(`[test] phase MO-2 ✓ default routing (M1: main-only, aux fold deferred): master peak ${pk.toFixed(3)} ≈ main (0.394) — stopping`);
           hostPhase = 26;
           ws.send(JSON.stringify({ type: "transport", command: "stop" }));
         }
@@ -1313,8 +1261,11 @@ ws.addEventListener("message", (event) => {
         moPeaksMuted.push(msg.peak ?? 0);
         if (msg.tick >= 2400) {
           const pk = Math.max(...moPeaksMuted);
-          if (!(pk > 0.65 && pk < 0.95)) fail(`multi-out MUTED routing: master peak ${pk.toFixed(3)} must be main-only ≈0.787 — the muted aux bus still contributed`);
-          console.log(`[test] phase MO-5 ✓ aux muted via outputRouting: master peak ${pk.toFixed(3)} = main only — stopping, editor phases`);
+          // Unity main-only (see MO-2): the aux is unconnected in M1, so the
+          // muted-routing load renders identically — the assert still proves
+          // the routing-bearing reload renders the main bus cleanly.
+          if (!(pk > 0.30 && pk < 0.50)) fail(`multi-out MUTED routing: master peak ${pk.toFixed(3)} must be main-only ≈0.394 (unity; aux fold + gain deferred)`);
+          console.log(`[test] phase MO-5 ✓ aux muted via outputRouting (M1: main-only render): master peak ${pk.toFixed(3)} = main only — stopping, editor phases`);
           hostPhase = 29;
           ws.send(JSON.stringify({ type: "transport", command: "stop" }));
         }
@@ -1371,7 +1322,7 @@ ws.addEventListener("message", (event) => {
     if (msg.type === "hello" && !helloOk) {
       helloOk = true;
       if (msg.protocol !== 1) fail(`expected protocol 1, got ${msg.protocol}`);
-      if (msg.engineVersion !== "0.8.7") fail(`expected 0.8.7, got ${msg.engineVersion}`);
+      if (msg.engineVersion !== "0.9.0") fail(`expected 0.9.0, got ${msg.engineVersion}`);
       if (!fixtureDir) fail("scan mode requires a fixture dir argument");
       console.log("[test] hello OK — sending scan of fixture dir + nested dir (dedup proof):", fixtureDir);
       scanSent = true;
@@ -1531,11 +1482,11 @@ ws.addEventListener("message", (event) => {
     // ── Stage 3i: runtime latency tracking (detect, then mini-republish) ──
     if (msg.type === "hello" && latPhase === 0) {
       if (msg.protocol !== 1) fail(`expected protocol 1, got ${msg.protocol}`);
-      if (msg.engineVersion !== "0.8.7") fail(`expected 0.8.7, got ${msg.engineVersion}`);
+      if (msg.engineVersion !== "0.9.0") fail(`expected 0.9.0, got ${msg.engineVersion}`);
       if (!fixtureDir) fail("latency mode requires a fixture dir argument");
       helloOk = true;
       latPhase = 1;
-      console.log("[test] hello OK (0.8.7) — scanning for the stand-in host plugin...");
+      console.log("[test] hello OK (0.9.0) — scanning for the stand-in host plugin...");
       ws.send(JSON.stringify({ type: "dispatch_log", enable: true }));   // Phase 2: the pre-fire proof is ledger-based
       ws.send(JSON.stringify({ type: "scan", dirs: [fixtureDir] }));
     } else if (msg.type === "scan_result" && latPhase === 1) {
@@ -1591,7 +1542,7 @@ ws.addEventListener("message", (event) => {
     if (msg.type === "hello" && !helloOk) {
       helloOk = true;
       if (msg.protocol !== 1) fail(`expected protocol 1, got ${msg.protocol}`);
-      if (msg.engineVersion !== "0.8.7") fail(`expected 0.8.7, got ${msg.engineVersion}`);
+      if (msg.engineVersion !== "0.9.0") fail(`expected 0.9.0, got ${msg.engineVersion}`);
       // Stage 3c close-out: the dispatch ledger streams what the engine
       // ACTUALLY dispatched — the replay-burst and re-attack asserts read it.
       ws.send(JSON.stringify({ type: "dispatch_log", enable: true }));
@@ -1863,35 +1814,28 @@ ws.addEventListener("close", () => {
       process.exit(1);
     }
   } else if (mode === "multi") {
-    // Stage 3e-1: both instances must have received capabilities, exactly
-    // once per loaded receipt (initial load + mid-play reuse = 2 each).
-    const capsOk = ["inst-a", "inst-b"].every((iid) =>
-      (multiCapsCount[iid] ?? 0) > 0 && multiCapsCount[iid] === (multiLoadedCount[iid] ?? 0));
-    const editorOk = multiHeadlessSkip || (multiEdOpenB && multiEdFocusB && multiEdOpenA && multiEdCloseA && multiEdCloseB);
-    allOk = multiStateOk === 2 && multiReuseOk === 2 && multiRejectOk &&
-            multiWideA && multiWideB && multiPeak > 1.0 && multiCapIds.size === 2 && capsOk && editorOk &&
-            multi3hLoaded === 2;
+    // ── Milestone 1 close: the deferral contract ──
+    // (1) the multi-entry load was REFUSED with the named deferral error;
+    // (2) NO loaded receipt ever shipped for inst-a/inst-b;
+    // (3) the engine stayed fully functional: single legacy load → loaded →
+    //     play → dispatch ledger → clean stop.
+    const noLoaded = !("inst-a" in multiLoadedCount) && !("inst-b" in multiLoadedCount);
+    const notes = multiLedger.filter((e) => e.k === 1).length;
+    allOk = multiRejectOk && noLoaded && multiStateOk === 1 && multiReuseOk === 1 &&
+            notes > 0 && multiPeak > 0.05;
     if (allOk) {
       console.log("");
       console.log("========================================");
-      console.log("ALL MULTI-INSTANCE TESTS PASSED (3d-4):");
-      console.log("  TWO instances of ONE plugin: scan → plugins[]+routing → 2× plugin_state loaded (per-instance ids)");
-      console.log(`  summed output: peak ${multiPeak.toFixed(3)} > 1.0 (single-source cap ≈0.787 — BOTH instances audible in the mix)`);
-      console.log("  per-instance routing: dispatch ledger wide channels c=1 (inst-a) AND c=17 (inst-b)");
-      console.log("  mid-play SAME-set reload → both instances REUSED (no re-instantiate)");
-      console.log("  mid-play CHANGED-set load → load_rejected (rolling guard, set form)");
-      console.log(multiHeadlessSkip
-        ? "  editors: SKIPPED on this headless host (editor_unavailable tolerated; Windows CI proves the window path)"
-        : "  editors: inst-b opens → repeat raises (focused) → inst-a opens a SECOND SIMULTANEOUS window → per-id closes");
-      console.log("  captureState → one pluginSavedState PER INSTANCE (distinct instanceIds)");
-      console.log(`  3e-1 capability handshake: one plugin_capabilities per loaded receipt per instance (${JSON.stringify(multiCapsCount)})`);
-      console.log("  3h retire proof: TWO rapid swaps published WHILE the audio thread was frozen 2.5 s inside the callback;");
-      console.log("           both retired entries deferred (audio proof pending) and freed only after two post-un-stall buffers");
-      console.log("           (engine.log receipts asserted by desktop.yml: deferred >= 2, freed >= 5, seq >= swapSeq + 2 for every freed entry)");
+      console.log("DEFERRAL CONTRACT PASSED (milestone 1):");
+      console.log("  plugins[2] load → plugin_state error naming the deferral (protocol shape intact)");
+      console.log("  NO loaded receipt for any refused instance; loadAck still fired (score accepted)");
+      console.log("  engine functional after the refusal: pong → single load → plugin_state loaded → play");
+      console.log(`  fallback + reload audible: peak ${multiPeak.toFixed(3)}, ${notes} NOTE_ON ledger entries, clean stop`);
+      console.log("  multi-instance routing returns with the routing milestone (deferred, not silent)");
       console.log("========================================");
       process.exit(0);
     } else {
-      console.error(`FAILED: loaded=${[...multiLoaded].join(",")} reuse=${multiReuseOk} reject=${multiRejectOk} wideA=${multiWideA} wideB=${multiWideB} peak=${multiPeak.toFixed(3)} caps=${[...multiCapIds].join(",")} capsCount=${JSON.stringify(multiCapsCount)} editors=${multiEdOpenB}/${multiEdFocusB}/${multiEdOpenA}/${multiEdCloseA}/${multiEdCloseB} headlessSkip=${multiHeadlessSkip} stall3h=${multi3hLoaded}/2`);
+      console.error(`FAILED: reject=${multiRejectOk} noLoaded=${noLoaded} (got ${JSON.stringify(multiLoadedCount)}) single=${multiStateOk} pong=${multiReuseOk} notes=${notes} peak=${multiPeak.toFixed(3)}`);
       process.exit(1);
     }
   } else if (mode === "latency") {

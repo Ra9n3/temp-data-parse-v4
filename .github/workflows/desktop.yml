@@ -463,8 +463,8 @@ jobs:
             }
             $finalPair = Select-String -Path $engineLog -Pattern "\[latency\] republish instance=inst-lat old=\d+ new=1024 samples"
             if (-not $finalPair) { throw "3i final-state receipt missing: no republish landing inst-lat at 1024 after the flicker settle" }
-            $pubSummaries = (Select-String -Path $engineLog -Pattern "\[latency\] publish: swapped set corrected=").Count
-            if ($pubSummaries -lt 4) { throw "3i receipt missing: expected >= 4 '[latency] publish: swapped set' summaries, got $pubSummaries" }
+            $pubSummaries = (Select-String -Path $engineLog -Pattern "\[latency\] publish: node latency corrected=").Count
+            if ($pubSummaries -lt 4) { throw "3i receipt missing: expected >= 4 '[latency] publish: node latency corrected' summaries, got $pubSummaries" }
             # NO-RELOAD proof: exactly ONE load-path publish for inst-lat (the
             # initial load) — every correction rode the mini-republish, and the
             # five mid-play event swaps took the reuse fast path.
@@ -568,26 +568,33 @@ jobs:
           if ($initReceipts -lt 2) { throw "engine.log missing async plugin-init receipts (got $initReceipts, need 2)" }
           $loadedReceipts = (Select-String -Path $engineLog -Pattern "\[plugin\] loaded name=").Count
           if ($loadedReceipts -lt 2) { throw "engine.log missing plugin-loaded receipts (got $loadedReceipts, need 2)" }
-          # Stage 3f-6 publish-safe receipts: the publish section now SPEAKS.
-          # Multi mode publishes 3 sets during the probe (seq 4/5/6) and test D
-          # publishes its own loads — lower bound 3 covers the probe alone.
-          $publishReceipts = (Select-String -Path $engineLog -Pattern "\[plugin\] publish: swapping set").Count
-          if ($publishReceipts -lt 3) { throw "engine.log missing 3f-6 publish receipts (got $publishReceipts, need >= 3)" }
-          # Exactly the 3 retire captures under the armed marker: inst-a and
-          # inst-b (seq 4) check the marker while it is deterministically
-          # present (their jobs run within seconds; the test disarms it only
-          # after their deferred broadcasts). inst-slow's capture (seq 5) runs
-          # a hair before the disarm lands — its TIMEOUT is near-certain but
-          # racing (µs between its marker check and the test's unlink), so the
-          # honest hard bound is 2.
-          $retireTimeouts = (Select-String -Path $engineLog -Pattern "\[plugin\] retire capture TIMEOUT instance=").Count
-          if ($retireTimeouts -lt 2) { throw "engine.log missing 3f-6 retire-capture TIMEOUT receipts (got $retireTimeouts, need >= 2)" }
+          # Milestone 1: the publish section speaks through the VENDOR node
+          # lifecycle. The x10 unload/reload cycle (test D) + test D's own
+          # loads + the multi test's single load must each land a node live
+          # receipt; the cycle's 10 unloads + test D's replace must land node
+          # removed receipts. The old "publish: swapping set" / retire-budget
+          # receipts are gone with the InstanceSet machinery (the vendor's
+          # RenderSequenceExchange owns teardown now).
+          $publishReceipts = (Select-String -Path $engineLog -Pattern "\[plugin\] publish: done").Count
+          if ($publishReceipts -lt 3) { throw "engine.log missing milestone-1 publish receipts (got $publishReceipts, need >= 3)" }
+          $nodeLive = (Select-String -Path $engineLog -Pattern "\[plugin\] node live instance=").Count
+          if ($nodeLive -lt 11) { throw "engine.log missing vendor node-live receipts (got $nodeLive, need >= 11: test D loads + the x10 cycle reloads + the multi single load)" }
+          $nodeRemoved = (Select-String -Path $engineLog -Pattern "\[plugin\] node removed instance=").Count
+          if ($nodeRemoved -lt 10) { throw "engine.log missing vendor node-removed receipts (got $nodeRemoved, need >= 10: the x10 cycle unloads)" }
+          # The x10 cycle's retire path: editor close -> state capture ->
+          # removeNode, all inline on the message thread (the 3f-6 budget
+          # machinery is gone — no TIMEOUT receipts exist any more).
           $retireBegins = (Select-String -Path $engineLog -Pattern "\[plugin\] retire capture BEGIN instance=").Count
-          if ($retireBegins -lt 4) { throw "engine.log missing 3f-6 retire-capture BEGIN receipts (got $retireBegins, need >= 4)" }
-          # The post-disarm load (seq 6) retires inst-fast with NO marker —
-          # its capture completes within the budget (END receipt).
+          if ($retireBegins -lt 10) { throw "engine.log missing retire-capture BEGIN receipts (got $retireBegins, need >= 10: the cycle unloads must capture the outgoing state)" }
           $retireEnds = (Select-String -Path $engineLog -Pattern "\[plugin\] retire capture END instance=").Count
-          if ($retireEnds -lt 1) { throw "engine.log missing 3f-6 retire-capture END receipt (got $retireEnds, need >= 1 — the fast path must still complete)" }
+          if ($retireEnds -lt 10) { throw "engine.log missing retire-capture END receipts (got $retireEnds, need >= 10)" }
+          # Milestone 1: the multi test's refused multi-entry load must name
+          # the deferral in the log (the wire-side plugin_state error is
+          # asserted by the harness).
+          $refusal = (Select-String -Path $engineLog -Pattern "\[load\] plugin set REFUSED: multi-instance hosting is deferred").Count
+          if ($refusal -lt 1) { throw "engine.log missing the milestone-1 deferral refusal receipt" }
+          $unloadReceipts = (Select-String -Path $engineLog -Pattern "\[plugin\] unload requested").Count
+          if ($unloadReceipts -lt 10) { throw "engine.log missing the explicit-unload receipts (got $unloadReceipts, need >= 10: the x10 cycle)" }
           # Stage 3f-7 item 2 receipts: the probe pause gate. The scan test
           # rolls the transport mid-probeAll ("transport playing"), test D
           # probes during an open editor ("editor window open"), and D2's
@@ -604,12 +611,10 @@ jobs:
           # must produce a SUCCESSFUL probe receipt — outcome=ok in the log.
           $probeOk = (Select-String -Path $engineLog -Pattern "\[probe\] path=.*outcome=ok").Count
           if ($probeOk -lt 1) { throw "engine.log missing a successful probe receipt (got $probeOk, need >= 1 — the inf-tail fixture must probe outcome=ok)" }
-          # Stage 3f-7 item 4a: D2's 10 s slow-state capture blocks the
-          # message thread — the heartbeat must NAME it (diagnostic only).
-          $mmUnresponsive = (Select-String -Path $engineLog -Pattern "\[mm\] message thread unresponsive for ").Count
-          if ($mmUnresponsive -lt 1) { throw "engine.log missing the [mm] unresponsive receipt (got $mmUnresponsive, need >= 1 — D2's slow capture stalls the message thread 10 s)" }
-          $mmRecovered = (Select-String -Path $engineLog -Pattern "\[mm\] message thread recovered after ").Count
-          if ($mmRecovered -lt 1) { throw "engine.log missing the [mm] recovered receipt (got $mmRecovered, need >= 1)" }
+          # Stage 3f-7 item 4a: the [mm] heartbeat receipt — its CI proof rode
+          # D2's 10 s slow-capture budget machinery, which milestone 1 removed
+          # (captures run inline in the vendor retire job). The heartbeat stays
+          # in the engine; the CI proof returns with the capture rework.
           # Stage 3f-7 item 4b/4c: editor close + state capture BEGIN/END and
           # the closing-requested receipt (the closeEditor message path).
           $closingRequested = (Select-String -Path $engineLog -Pattern "\[editor\] closing requested instance=").Count
@@ -642,21 +647,20 @@ jobs:
           if ($releaseReceipts -lt 3) { throw "engine.log missing musical-release stop receipts (got $releaseReceipts, need 3)" }
           $reattackReceipts = (Select-String -Path $engineLog -Pattern "resume re-attacks: [1-9]").Count
           if ($reattackReceipts -lt 1) { throw "engine.log missing a resume re-attack receipt (straddle handling regressed)" }
-          # Stage 3d-1 + 3d-4: editor-window receipts — unavailable (negative),
-          # one REAL open per DISTINCT instance (the one-editor-per-INSTANCE
-          # invariant: a repeat request must RAISE, never re-open — duplicates
-          # of the same instance id are the regression signal), one focus echo
-          # per repeat, closes per id. The suite opens 3 editors across 3
-          # distinct instances: host-mode "hosted" + multi-mode inst-a/inst-b.
+          # Stage 3d-1 + milestone 1: editor-window receipts — unavailable
+          # (negative: host phase N + the cycle's 10 unload probes), REAL
+          # opens (host phase F + the cycle finale — the same instance id
+          # re-opens ACROSS reloads by design now; the one-editor-at-a-time
+          # invariant is enforced by createEditorIfNeeded + the close-before-
+          # retire order), one focus echo per repeat, closes per id.
           $editorNegReceipts = (Select-String -Path $engineLog -Pattern "\[editor\] open refused — no live instance").Count
-          if ($editorNegReceipts -lt 1) { throw "engine.log missing the editor_unavailable negative-path receipt" }
+          if ($editorNegReceipts -lt 10) { throw "engine.log missing the editor_unavailable receipts (got $editorNegReceipts, need >= 10: the cycle's unload probes)" }
           $editorOpenIds = (Select-String -Path $engineLog -Pattern "\[editor\] opened instance=([^\s]+)").Matches | ForEach-Object { $_.Groups[1].Value }
-          if ($editorOpenIds.Count -ne ($editorOpenIds | Sort-Object -Unique).Count) { throw "engine.log shows a DUPLICATE editor open for the same instance (one-editor-per-instance broken): $($editorOpenIds -join ',')" }
-          if ($editorOpenIds.Count -lt 3) { throw "engine.log missing editor-open receipts (got $($editorOpenIds.Count), need 3: 1 host + 2 multi instances)" }
+          if ($editorOpenIds.Count -lt 2) { throw "engine.log missing editor-open receipts (got $($editorOpenIds.Count), need >= 2: host phase F + the cycle finale)" }
           $editorFocusReceipts = (Select-String -Path $engineLog -Pattern "\[editor\] focus existing instance=").Count
           if ($editorFocusReceipts -lt 1) { throw "engine.log missing the repeat-open focus receipt" }
           $editorCloseReceipts = (Select-String -Path $engineLog -Pattern "\[editor\] closed instance=").Count
-          if ($editorCloseReceipts -lt 1) { throw "engine.log missing the editor close receipt" }
+          if ($editorCloseReceipts -lt 10) { throw "engine.log missing the editor close receipts (got $editorCloseReceipts, need >= 10: retire-closes per unload)" }
           # Stage 3d-3: state persistence receipts — capture triggers (replace
           # from the re-hosts + editor-close + explicit requests) and TWO
           # restores (default round-trip + the diverged embed). The blob size
@@ -675,27 +679,15 @@ jobs:
           $hostWindowSet = (Select-String -Path $engineLog -Pattern "\[editor\] host window set hwnd=0x").Count
           if ($hostWindowSet -lt 1) { throw "3f-3a receipt missing: no '[editor] host window set hwnd=0x' in engine.log" }
           $ownerApplied = (Select-String -Path $engineLog -Pattern "\[editor\] host-owner applied instance=\S+ hwnd=0x").Count
-          if ($ownerApplied -ne 1) { throw "3f-3a receipt wrong: host mode must apply the owner EXACTLY ONCE (one editor open; repeat raises), got $ownerApplied '[editor] host-owner applied' receipts" }
-          $ownerSkips = (Select-String -Path $engineLog -Pattern "\[editor\] host-owner skipped \(no host hwnd\)").Count
-          if ($ownerSkips -ne 2) { throw "3f-3a receipt missing: multi mode opens TWO editors (inst-a + inst-b) WITHOUT setHostWindow and must log '[editor] host-owner skipped (no host hwnd)' per open (got $ownerSkips, need 2)" }
-          # Stage 3h: proof-based reclamation. The D2 stall probe freezes the
-          # audio thread 2.5 s INSIDE the callback while TWO rapid swaps
-          # publish (seq 7 + 8); both retired entries must DEFER (audio proof
-          # pending — the counter is frozen) and free only after the un-stall.
-          # The deferred receipt proves the freeze actually held a free (the
-          # old 250 ms grace would have freed mid-stall); the freed lines'
-          # counter math — seq >= swapSeq + 2 for EVERY freed entry, plugins
-          # and scores — is the never-before-the-proof assertion (a retired
-          # object freed early would print a violating pair and throw here).
-          $audioDefers = (Select-String -Path $engineLog -Pattern "retire deferred .*audio proof pending instance=").Count
-          if ($audioDefers -lt 2) { throw "engine.log missing 3h audio-proof defer receipts (got $audioDefers, need >= 2: inst-final + inst-stall queued while the audio thread was frozen)" }
-          $pluginFrees = Select-String -Path $engineLog -Pattern "\[plugin\] retire freed instance=(\S+) swapSeq=(\d+) seq=(\d+)"
-          if ($pluginFrees.Count -lt 5) { throw "engine.log missing 3h plugin free receipts (got $($pluginFrees.Count), need >= 5: inst-a + inst-b + inst-slow + inst-fast + the stall swaps)" }
-          foreach ($m in $pluginFrees) {
-            $s = [uint64]$m.Matches[0].Groups[2].Value
-            $q = [uint64]$m.Matches[0].Groups[3].Value
-            if ($q -lt ($s + 2)) { throw "3h counter math violated: plugin $($m.Matches[0].Groups[1].Value) freed at seq $q < swapSeq $s + 2 — a retired plugin was freed before the audio proof passed (use-after-free window)" }
-          }
+          if ($ownerApplied -lt 2) { throw "3f-3a receipt wrong: host mode must apply the owner per SHOWED window (phase F + the cycle finale), got $ownerApplied '[editor] host-owner applied' receipts" }
+          # Stage 3h — re-scoped by milestone 1: the PLUGIN retire queue is
+          # gone (the vendor's RenderSequenceExchange frees a removed
+          # instance only after the audio thread swapped to the sequence
+          # that excludes it — the same never-before-the-proof guarantee,
+          # implemented and maintained by JUCE). The SCORE snapshot queue is
+          # engine-owned (the dispatch walk reads the raw arrays), so its
+          # audio-proof discipline remains CI-asserted: every freed score
+          # must show seq >= swapSeq + 2.
           $scoreFrees = Select-String -Path $engineLog -Pattern "\[audio\] score snapshot freed swapSeq=(\d+) seq=(\d+)"
           if ($scoreFrees.Count -lt 1) { throw "engine.log missing 3h score free receipts (got $($scoreFrees.Count), need >= 1 — retired score snapshots must free on the audio proof too)" }
           foreach ($m in $scoreFrees) {
@@ -703,7 +695,7 @@ jobs:
             $q = [uint64]$m.Matches[0].Groups[2].Value
             if ($q -lt ($s + 2)) { throw "3h counter math violated: score snapshot freed at seq $q < swapSeq $s + 2 — a retired score was freed before the audio proof passed" }
           }
-          Write-Host "3h proof-based reclamation: $audioDefers audio-proof deferral(s), $($pluginFrees.Count) plugin free(s) + $($scoreFrees.Count) score free(s), ALL with seq >= swapSeq + 2 (the 2.5 s freeze held both stall-swap frees until two post-un-stall buffers)"
+          Write-Host "3h proof-based reclamation (milestone 1 scope): $($scoreFrees.Count) score free(s) with seq >= swapSeq + 2 (plugin teardown is the vendor's RenderSequenceExchange now)"
           Write-Host "engine.log receipt assertions passed (scale load, play, load-fail, async init, reuse, rolling-transport reject, audio config, prepare config, session peak, musical release, resume re-attacks, editor unavailable/open=x1/focus/close, state captured/restored, 3f-3a host-window set + owner applied + missing-path skips, 3h retire deferrals + freed counter math all present)"
 
       - run: npm ci

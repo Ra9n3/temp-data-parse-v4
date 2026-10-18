@@ -2282,3 +2282,75 @@ docs/LATENCY_GATE.md (Stage 3k section) extends the convolver check with the
 downbeat: play a score whose first note is on the downbeat through a
 latency-loaded plugin and hear the attack on the grid (pre-fix it arrived
 one latency late).
+
+## Milestone 1 — the vendored AudioPluginHost core (host-core-v1, engine 0.9.0)
+
+**Ownership model.** A hosted plugin is a NODE in one process-lifetime `juce::AudioProcessorGraph`
+(`scorchhost::HostCore`, `engine/src/host/AudioHostCore.h` — the minimal port of JUCE 8.0.4's
+extras/AudioPluginHost core). The graph object is created on first commit, never destroyed
+(leak-at-exit policy — the audio callback may hold the raw pointer in its last buffer; the process
+exits via `std::_Exit` after the clean-exit receipts, the documented exit-time static-teardown
+deadlock class). All topology mutation (addNode/removeNode/addConnection) happens on the message
+thread; the vendor's `RenderSequenceExchange` hands the built render sequence to the audio thread
+(try-lock swap; the old sequence, holding the retired instances, is freed up to 500 ms later on the
+message thread — the audio thread never deletes and never blocks). The engine's own retire queue,
+grace timer, and audio-proof janitor (3h) are GONE — the vendor's exchange is that guarantee,
+maintained by JUCE. The graveyard (`g_hostGraveyard`) still retains the engine-side meta objects
+to process exit.
+
+**Licence.** The vendored core carries the SAME JUCE 8 dual licence (AGPLv3 / JUCE 8 commercial) as
+the framework the engine already FetchContent-builds — the AudioPluginHost sources live in the same
+repository under the same LICENSE.md. No new licence surface.
+
+**The MIDI input node (the silence root cause — document BEFORE re-vendoring).** JUCE 8.0.4's
+AudioProcessorGraph distributes the graph's INCOMING MidiBuffer to nodes ONLY through a `MidiInOp`,
+and the builder emits a `MidiInOp` ONLY for a `midiInputNode` IO processor; every other node gets
+whatever its MIDI CONNECTIONS feed, and a node with no MIDI connections gets a freshly CLEARED
+buffer (`RenderSequenceBuilder::findBufferForInputMidiChannel`). The stock AudioPluginHost exposes
+the IO processors as internal plugins the user wires in the UI; this headless port wires the
+equivalent programmatically: `ensureGraph` creates ONE midi-input IO node, and `addPluginNode`
+connects it to every plugin that `acceptsMidi()` (`{midiIn, midiChannelIndex} → {plugin,
+midiChannelIndex}`). Without that connection a hosted instrument receives NO notes at all while
+every graph-level observable (nodes, connections, latency, settings guard, exchange) reads healthy.
+**The graph-level playhead (the second half).** `AudioProcessorGraph` forwards `getPlayHead()` —
+the GRAPH's playhead — to every node at every block (`NodeOp::process` calls
+`processor.setPlayHead` per render), overwriting any per-instance hand-off. The engine therefore
+sets the playhead ON THE GRAPH at commit (`HostCore::setPlayhead`) and re-asserts it in
+`reconfigureForDevice`. A hosted plugin that probes the transport sees the engine's 3e-2 playhead
+(same one address for the process); without this the plugin sees NO transport at all.
+
+**The silence diagnosis record (2026-10-18), kept for the next re-vendor.** The migrated graph
+rendered silence with all three instrumented engine sites clean (midi hand-off negatives=0;
+post-reconfigure graphLat=128 = a plugin-containing sequence built+set; the live node wired to the
+output, prepared, not suspended). The ordered discriminators: (D1) a one-shot MM-forced
+`processBlock` into a 0.25-marked dummy — the marker WIPED + zero `[testvst]` stdout killed the
+double-precision-variant hypothesis (the only path that preserves the marker) and proved the guard
+failed for every caller; (D2) temporary branch receipts in the FETCHED JUCE sources — applied and
+reverted by `scripts/m1_d2_patch_juce.py` (idempotent; a re-fetch wipes the patch; NEVER shipped) —
+proved: exchange LIVE (`audioThreadState=LIVE` from the first block), settings guard PASSING (zero
+guard-clear receipts), variant HIT (zero variant-miss receipts), builder ops emitted for every
+node, `perform` running 3 ops per buffer, `NodeOp::process` executing for the plugin, and the
+host-side VST3 chain reaching `pluginInstance->processBlock` (`isActive=1`, bypass 0, precision
+single). Conclusion: the fixture RAN the whole time and logged nothing — no MIDI arrived (root
+cause a) and the playhead was null (root cause b), so the fixture's only log paths (score events,
+playhead) never fired. The hand-off's "the fixture's processBlock NEVER ran" verdict was an
+observability illusion: `[testvst]` lines prove "ran AND (event arrived OR playhead present OR
+first block)", not "ran". Lesson recorded: a logging-absence proof needs the logger's gating
+conditions, not just the logger.
+
+**Deferrals in force (the milestone contract — unchanged by the silence fix).** No multi-instance
+hosting (one plugin node at a time; multi-entry loads refused with a named receipt), no per-bus
+output routing (the load's `outputRouting` is accepted and inert; aux buses stay UNCONNECTED —
+only the main stereo bus drives the master; the aux master fold returns with the routing
+milestone), no output gain/safety stage (the legacy renderer's ×2.0 `g_hostedOutputGain` default is
+GONE; `--plugin-gain` is accepted and receipt-logged as inert; the graph renders at UNITY — the
+harness's host-mode peak assertions were re-scoped accordingly: phase A ≈0.787, phase N/P ≈0.397,
+MO ≈0.394 where the legacy gain doubled them), and no new pre-roll work (the 3k pre-roll lives in
+the dispatch layer, byte-untouched). `{"plugins": []}` is the explicit unload.
+
+**What is NOT proven by CI (the by-ear residue).** The ×10 manual gate: load → play → unload →
+reload → replay, ten cycles, on real Windows with a REAL library (Falcon/BBCSO class) through a
+real device — the vendor model's promise (no use-after-free under stall, no leak per cycle, the
+editor path on a real windowed plugin) is CI-proven mechanically against the fixture, but the
+milestone completes on the user's manual gate, not on this commit. Latency-gate by-ear items
+(convolver, downbeat) are unchanged and still parked in docs/LATENCY_GATE.md.
