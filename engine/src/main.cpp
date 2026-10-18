@@ -106,6 +106,45 @@
 //         it and the plugin runs on its default state.
 //   {"type":"captureState"} — client asks the engine to capture the live
 //         instance's state NOW (frontend sends on app close; best-effort).
+//
+// 0.9.2 protocol additions (additive) — editor reopen + init-queue terminal
+// receipts (field log 0.9.1, gate run 1):
+//   load: OPTIONAL "openEditor":true — the editor intent rides the load.
+//         Reuse path: the editor opens for the already-live instance EVEN
+//         when the load answers "plugin set reused" (the field gap: no path
+//         opened the editor of an already-live instance). Async path: the
+//         editor opens at publish, after the loaded receipts. Receipts are
+//         the standard editor family ([editor] open requested / opened /
+//         closed instance=, plus the >10s pending watchdog).
+//   TERMINAL RECEIPT INVARIANT (engine.log): every queued init (per seq)
+//         ends with EXACTLY ONE of
+//             "[plugin] loaded ..."                      (success, per entry)
+//             "[plugin] init failed: seq= reason="       (failure or watchdog-declared jam)
+//             "[plugin] init superseded: seq= by="       (replaced / coalesced)
+//         — no silent drops, ever, including at shutdown ("reason=engine-
+//         shutdown") and for a request overwritten while still queued.
+//   INIT HEARTBEAT (engine.log): every stage of a running init emits
+//         "[plugin] init stage=<instantiate|state-restore|prepare|commit|
+//         publish|state-capture> instance= seq="; a request pending or
+//         queued >10s warns every 10 s ("init pending >10s" / "init queued
+//         >10s"); a request still without its terminal receipt after
+//         SCORCH_INIT_TERMINAL_TIMEOUT_MS (default 120000 ms) is DECLARED
+//         failed by the watchdog ("reason=terminal-timeout" for the stuck
+//         worker's request, "reason=queued-behind-jammed-init" for the ones
+//         queued behind it) with a wire plugin_state error twin. The
+//         declaration is log-only — the wedged thread is never touched.
+//   COALESCING: a load whose plugin set (instanceId+uid+path per entry)
+//         matches a queued/in-flight init FOLDS into it ("init superseded:
+//         seq=NEW by=INFLIGHT (coalesced ...)") instead of answering
+//         "reused" while an older init is still outstanding; the in-flight
+//         init's per-instance receipts serve both requests.
+//   LAZY-DEVICE RACE: the init worker never waits for the audio device —
+//         each init logs which pre-prepare path it took ("init device=ready
+//         rate=... " or "init device=not-started ... NOMINAL 44100/512
+//         fallback"), and a device that starts between the pre-prepare and
+//         the commit triggers the worker-side "re-prepared (worker,
+//         device-ready race)" so the graph's message-thread prepare stays a
+//         cheap same-settings re-prepare.
 //   server -> client: {"type":"pluginSavedState","uid","path","name",
 //         "size":N,"data":base64[,"state":"too_large"]} — a captured state
 //         blob for the project JSON. Triggers: editor close (user edits
@@ -398,7 +437,15 @@ void install() {
 
 namespace {
 
-constexpr const char* kEngineVersion = "0.9.1";
+// 0.9.2 — editor reopen + init-queue terminal receipts (field log 0.9.1, gate
+// run 1): every queued init ends with exactly one terminal receipt (loaded /
+// init failed: seq= reason= / init superseded: seq= by=); the init worker
+// speaks stage receipts + >10s pending warnings; openEditor works on any live
+// instance including after "plugin set reused" (and a load may carry
+// "openEditor":true); the lazy-device window is receipted (nominal fallback +
+// device-ready race re-prepare); matching requests coalesce into an in-flight
+// init instead of answering "reused" while it is still outstanding.
+constexpr const char* kEngineVersion = "0.9.2";
 constexpr int kProtocolVersion = 1;
 constexpr int kDefaultPort = 9377;
 constexpr int kMaxVoices = 64;
@@ -1502,6 +1549,115 @@ void captureAndBroadcastState(juce::AudioPluginInstance* inst, const HostedPlugi
 // (killing a thread holding JUCE/plugin locks would wedge the process worse
 // than the hang). One WATCHDOG line per phase occurrence (the `named` flag
 // resets at every transition); the mutex is held microseconds at transitions
+// ─── 0.9.2 — TERMINAL RECEIPT INVARIANT (field log 0.9.1, gate run 1) ───
+// The field evidence: seq 2 and seq 8 logged "plugin init queued" and then
+// NOTHING — no loaded, no failed, no superseded — while the engine stayed
+// alive (transport + musical-release receipts continued). A jammed worker
+// (or a request queued behind one) had NO path to a terminal receipt: the
+// worker IS the jam, and every receipt it would send lives after the jam.
+// The invariant this registry enforces:
+//   every queued init (per seq) ends with EXACTLY ONE terminal receipt:
+//     "[plugin] loaded ..." (per entry, at publish)
+//     "[plugin] init failed: seq= reason="
+//     "[plugin] init superseded: seq= by="
+//   — no silent drops, ever. The watchdog thread declares the terminal on
+//   behalf of a wedged worker (log-only declarations — killing a thread
+//   that holds plugin/JUCE locks wedges the process harder than the hang);
+//   the worker, when it eventually unblocks, discovers the declaration and
+//   DISCARDS its result instead of double-emitting.
+struct InitReceiptRecord {
+    long long seq = 0;
+    bool unload = false;              // unload requests keep their own terminal ("unload complete")
+    std::string fingerprint;          // "iid|uid|path" per entry, ';' joined (the coalescing key)
+    std::chrono::steady_clock::time_point queuedAt{};
+    bool inFlight = false;            // popped by the init worker
+    bool terminal = false;            // exactly-one terminal receipt has been emitted
+    std::string terminalKind;         // "loaded" | "failed" | "superseded"
+    std::string phase;                // last known stage (the warnings name it)
+    std::string instanceId;           // the phase's instance (or "-")
+    std::string firstIid;             // the request's first entry id (the wire twin's address)
+    std::chrono::steady_clock::time_point lastWarnAt{};   // 10 s warning cadence
+};
+std::mutex g_initReceiptMutex;
+std::vector<InitReceiptRecord> g_initReceipts;   // small (a handful of live requests)
+
+// The terminal-declaration bound. A REAL heavyweight load legitimately runs
+// for tens of seconds (Falcon field load: 2.1 s; the 12 s slowload CI floor;
+// huge orchestral libraries longer) — the default stays far above any real
+// load. CI sets it small (12 s) against the 20 s jam fixture. Log-only: the
+// declaration never touches the wedged thread.
+static long long initTerminalTimeoutMs() {
+    static const long long v = [] {
+        long long x = 120000;
+        if (const char* e = std::getenv("SCORCH_INIT_TERMINAL_TIMEOUT_MS")) {
+            const long long p = std::atoll(e);
+            if (p >= 1000) x = p;
+        }
+        return x;
+    }();
+    return v;
+}
+
+// Mark terminal. Returns false when the record was ALREADY terminal — the
+// exactly-one enforcement point (the caller must not emit a second receipt).
+static bool initRegistryMarkTerminal(long long seq, const char* kind) {
+    std::lock_guard<std::mutex> lk(g_initReceiptMutex);
+    for (auto& r : g_initReceipts) {
+        if (r.seq != seq) continue;
+        if (r.terminal) return false;
+        r.terminal = true;
+        r.terminalKind = kind;
+        return true;
+    }
+    return false;   // unknown seq — the caller's receipt is still allowed (defensive)
+}
+static bool initRegistryIsTerminal(long long seq) {
+    std::lock_guard<std::mutex> lk(g_initReceiptMutex);
+    for (const auto& r : g_initReceipts) if (r.seq == seq) return r.terminal;
+    return false;
+}
+static void initRegistrySetPhase(long long seq, const char* phase, const std::string& iid) {
+    std::lock_guard<std::mutex> lk(g_initReceiptMutex);
+    for (auto& r : g_initReceipts) {
+        if (r.seq != seq || r.terminal) continue;
+        r.phase = phase;
+        r.instanceId = iid;
+    }
+}
+// The coalescing lookup (#5): a NON-terminal record (queued or in-flight)
+// with the same fingerprint. Returns its seq, or 0.
+static long long initRegistryFindMatching(const std::string& fingerprint, long long excludeSeq) {
+    std::lock_guard<std::mutex> lk(g_initReceiptMutex);
+    for (auto it = g_initReceipts.rbegin(); it != g_initReceipts.rend(); ++it) {
+        if (it->terminal || it->unload || it->seq == excludeSeq) continue;
+        if (it->fingerprint == fingerprint && !it->fingerprint.empty()) return it->seq;
+    }
+    return 0;
+}
+static void initRegistryEnqueue(long long seq, bool unload, const std::string& fingerprint,
+                                const std::string& firstIid = "") {
+    std::lock_guard<std::mutex> lk(g_initReceiptMutex);
+    InitReceiptRecord r;
+    r.seq = seq;
+    r.unload = unload;
+    r.fingerprint = fingerprint;
+    r.firstIid = firstIid;   // the wire twin of a watchdog declaration addresses THIS
+    r.queuedAt = std::chrono::steady_clock::now();
+    g_initReceipts.push_back(std::move(r));
+    // Forensic bound: terminal records stay for the log's benefit only —
+    // keep the last 32 so a long session cannot grow the vector unbounded.
+    if (g_initReceipts.size() > 64) {
+        std::vector<InitReceiptRecord> kept;
+        for (const auto& rec : g_initReceipts) if (!rec.terminal) kept.push_back(rec);
+        if (kept.size() > 48) kept.erase(kept.begin(), kept.end() - 48);
+        size_t terminalKept = 0;
+        for (auto it = g_initReceipts.rbegin(); it != g_initReceipts.rend() && terminalKept < 32; ++it) {
+            if (it->terminal) { kept.push_back(*it); ++terminalKept; }
+        }
+        g_initReceipts.swap(kept);
+    }
+}
+
 // and by the reader once per second — a worker hung INSIDE plugin code never
 // holds it, so the record stays readable exactly when it matters.
 struct InitPhaseRecord {
@@ -1513,15 +1669,24 @@ struct InitPhaseRecord {
     bool named = false;
 };
 InitPhaseRecord g_initPhase;
+// 0.9.2: the guard now ALSO (a) emits the stage receipt ("init stage=<phase>")
+// — the heartbeat contract: while an init runs, engine.log shows WHICH stage
+// it is in, within seconds, and (b) writes the phase into the request's
+// registry record so the >10s pending warnings name the stuck stage.
 class InitPhaseGuard {
 public:
-    InitPhaseGuard(const char* phase, const std::string& iid) {
+    InitPhaseGuard(const char* phase, const std::string& iid, long long seq = -1) {
         std::lock_guard<std::mutex> lk(g_initPhase.mtx);
         g_initPhase.phase = phase;
         g_initPhase.instanceId = iid;
         g_initPhase.startedAt = std::chrono::steady_clock::now();
         g_initPhase.active = true;
         g_initPhase.named = false;
+        if (seq >= 0) {
+            initRegistrySetPhase(seq, phase, iid);
+            engineLog(std::string("[plugin] init stage=") + phase + " instance=" + iid +
+                      " seq " + std::to_string(seq));
+        }
     }
     ~InitPhaseGuard() {
         std::lock_guard<std::mutex> lk(g_initPhase.mtx);
@@ -1560,12 +1725,37 @@ struct PluginInitRequest {
     std::vector<PluginInitEntry> entries;
     long long seq = 0;
     bool unload = false;
+    // 0.9.2: the load-carried editor intent ("openEditor":true) — honored at
+    // publish (after the loaded receipts) on the async path; the reuse path
+    // honors its own copy on the WS thread.
+    bool openEditor = false;
 };
 std::mutex g_pluginInitMutex;
 std::condition_variable g_pluginInitCv;
 PluginInitRequest g_pluginInitRequest;   // guarded by g_pluginInitMutex
 bool g_pluginInitPending = false;        // guarded by g_pluginInitMutex
 uint64_t g_pluginInitGen = 0;            // guarded; bumped per queued request
+// 0.9.2: the seq of the NEWEST queued request (guarded by g_pluginInitMutex).
+// The superseded receipts' "by=" must name the request that took our place —
+// the generation counter alone cannot answer "which seq superseded me".
+long long g_pluginInitNewestSeq = 0;     // guarded by g_pluginInitMutex
+
+// 0.9.2: the coalescing fingerprint for a parsed request (entries already
+// resolved: instanceId + uid + path). Empty for unload requests. Two requests
+// with the same fingerprint describe the SAME plugin set — the newer one
+// folds into the older's init instead of queueing a duplicate heavyweight
+// instantiate (or answering "reused" while the older init is still out).
+static std::string initFingerprintOf(const std::vector<PluginInitEntry>& entries) {
+    std::string fp;
+    for (const auto& e : entries) {
+        juce::DynamicObject* po = e.pluginVar.getDynamicObject();
+        const std::string uid = po ? po->getProperty("uid").toString().toStdString() : "";
+        const std::string path = po ? po->getProperty("path").toString().toStdString() : "";
+        if (!fp.empty()) fp += ";";
+        fp += e.instanceId + "|" + uid + "|" + path;
+    }
+    return fp;
+}
 // Real device config, captured in audioDeviceAboutToStart. A hot-swapped
 // instance is prepared with THESE numbers before it becomes visible to the
 // audio callback (create-time prepare uses nominal 44100/512 — preparing a
@@ -3797,8 +3987,36 @@ void handle_load(const juce::var& json, ix::WebSocket& ws, size_t byteSize) {
     // request (retire-while-playing is the empty-score class). A load whose
     // set EXACTLY matches (the live-edit reload) stays allowed and takes the
     // routing-only fast path below. Non-plugin loads stay allowed.
+    // ─── 0.9.2 — COALESCING (#5), checked BEFORE the guard ───
+    // A request whose set matches a queued/in-flight init FOLDS into that
+    // init's result instead of answering "reused" while an older init is
+    // still outstanding (the field bug: later same-set reloads masked the
+    // jammed seq-2 init via the reuse path — the reuse answer described the
+    // OLD live instance while the in-flight init was about to replace it).
+    // The fingerprint (iid|uid|path per entry) makes "same set" exact; a
+    // folded request emits its terminal receipt immediately ("init
+    // superseded: seq=NEW by=INFLIGHT") and is served by the in-flight
+    // init's per-instance receipts (same instanceIds → same wire keys).
     bool midPlayReuse = false;
-    if (pluginRequested && !channelsBad && g_engine.playing.load()) {
+    bool pluginCoalesced = false;
+    long long coalesceInto = 0;
+    const std::string reqFingerprint = [&]() {
+        std::string fp;
+        if (!pluginRequested || channelsBad) return fp;
+        for (const auto& r : reqInstances) {
+            juce::DynamicObject* po = r.pluginVar.getDynamicObject();
+            const std::string uid = po ? po->getProperty("uid").toString().toStdString() : "";
+            const std::string path = po ? po->getProperty("path").toString().toStdString() : "";
+            if (!fp.empty()) fp += ";";
+            fp += r.instanceId + "|" + uid + "|" + path;
+        }
+        return fp;
+    }();
+    if (pluginRequested && !channelsBad) {
+        coalesceInto = initRegistryFindMatching(reqFingerprint, seq);
+        if (coalesceInto > 0) pluginCoalesced = true;
+    }
+    if (pluginRequested && !channelsBad && !pluginCoalesced && g_engine.playing.load()) {
         // Milestone 1: one live plugin — the exact-match check compares the
         // request against it directly.
         HostedPlugin* live = g_hostMeta.load(std::memory_order_acquire);
@@ -3960,7 +4178,33 @@ void handle_load(const juce::var& json, ix::WebSocket& ws, size_t byteSize) {
             chansJsonPerInst[iid] = cj;
         }
 
-        if (midPlayReuse) {
+        // 0.9.2: the load may carry its editor intent ("openEditor":true) —
+        // the REOPEN DECOUPLED FROM LOAD contract. Honored on the reuse path
+        // (the reload that answers "reused" still reopens the editor — the
+        // exact field gap: "no path opens the editor of an already-live
+        // instance") and on the async path (at publish, after the loaded
+        // receipts). A folded request skips it: the in-flight init owns the
+        // editor intent for the set.
+        const bool loadWantsEditor = [&]() {
+            juce::DynamicObject* lobj = json.getDynamicObject();
+            if (lobj == nullptr) return false;
+            const auto& ev = lobj->getProperty("openEditor");
+            return ev.isBool() ? static_cast<bool>(ev) : ev.toString().equalsIgnoreCase("true");
+        }();
+
+        if (pluginCoalesced) {
+            // ── 0.9.2 coalescing fold: the in-flight init's receipts serve
+            // this request. No queueing, no reuse answer, no wire state here
+            // (the in-flight init's per-instance plugin_state receipts carry
+            // the SAME instanceIds and land on every client). The terminal
+            // receipt below is this seq's exactly-one.
+            engineLog("[plugin] init superseded: seq=" + std::to_string(seq) + " by=" +
+                      std::to_string(coalesceInto) +
+                      " (coalesced — the request's set matches the in-flight init; its terminal receipts serve this request)");
+            initRegistryMarkTerminal(seq, "superseded");
+            std::cout << "[engine] plugin request coalesced into in-flight seq "
+                      << coalesceInto << " (seq " << seq << ")" << std::endl;
+        } else if (midPlayReuse) {
             // ── Fast path: the SAME plugin on a rolling transport. The node
             // stays untouched (no re-instantiate, no remove/add, no release)
             // — only events + routing swapped above. This is the mid-play
@@ -3983,6 +4227,27 @@ void handle_load(const juce::var& json, ix::WebSocket& ws, size_t byteSize) {
                               std::to_string(seq) + " instance=" + r.instanceId +
                               " latencySamples=" + std::to_string(static_cast<int>(h->latencySamples)) +
                               " channels=[" + chansJsonPerInst[r.instanceId] + "]");
+                    // 0.9.2: the load-carried editor intent — REOPEN on an
+                    // already-live instance. The same flow as handle_open_editor
+                    // (pending record for the >10s watchdog, MM job re-resolves
+                    // the instance at run time); a repeat request RAISES.
+                    if (loadWantsEditor && !r.instanceId.empty()) {
+                        const std::string iid = r.instanceId;
+                        {
+                            std::lock_guard<std::mutex> pl(g_pendingEditorMutex);
+                            g_pendingEditorOpen = PendingEditorOpen{ iid, std::chrono::steady_clock::now(), {} };
+                            g_pendingEditorActive = true;
+                            g_pendingEditorNamed = false;
+                        }
+                        juce::MessageManager::callAsync([iid] {
+                            HostedPlugin* hh = g_hostMeta.load(std::memory_order_acquire);
+                            if (hh != nullptr && !iid.empty() && iid != "hosted" && iid != hh->instanceId)
+                                hh = nullptr;
+                            openEditorWindow(iid, hh);
+                        });
+                        engineLog("[editor] open requested instance=" + iid +
+                                  " (load-carried openEditor — reuse path, editor reopen decoupled from load)");
+                    }
                 }
                 std::cout << "[engine] plugin set reused (mid-play, seq " << seq
                           << ", " << reqInstances.size() << " instance(s))" << std::endl;
@@ -4006,12 +4271,30 @@ void handle_load(const juce::var& json, ix::WebSocket& ws, size_t byteSize) {
                 entries.push_back(std::move(e));
             }
             const size_t n = entries.size();
+            long long supersededPendingSeq = 0;
             {
                 std::lock_guard<std::mutex> lock(g_pluginInitMutex);
-                g_pluginInitRequest = PluginInitRequest{std::move(entries), seq, false};
+                if (g_pluginInitPending) {
+                    // 0.9.2: the request still sitting in the queue slot is
+                    // overwritten BEFORE the worker ever saw it — without a
+                    // receipt this was a SILENT DROP (queued → vanished; the
+                    // exact "no terminal receipt" class). Its terminal:
+                    // superseded by the request that replaces it.
+                    supersededPendingSeq = g_pluginInitRequest.seq;
+                }
+                g_pluginInitRequest = PluginInitRequest{std::move(entries), seq, false, loadWantsEditor};
                 g_pluginInitPending = true;
                 ++g_pluginInitGen;
+                g_pluginInitNewestSeq = seq;
             }
+            if (supersededPendingSeq > 0) {
+                engineLog("[plugin] init superseded: seq=" + std::to_string(supersededPendingSeq) +
+                          " by=" + std::to_string(seq) +
+                          " (overwritten while still queued — never started)");
+                initRegistryMarkTerminal(supersededPendingSeq, "superseded");
+            }
+            initRegistryEnqueue(seq, false, reqFingerprint,
+                                reqInstances.empty() ? std::string() : reqInstances.front().instanceId);
             // Stage 3f-7: the probe thread pauses for the WHOLE load — from
             // queue time (this line, before the worker can even see it) to
             // the init worker's iteration end.
@@ -4027,12 +4310,24 @@ void handle_load(const juce::var& json, ix::WebSocket& ws, size_t byteSize) {
         // entry request: the worker retires the live instance through the
         // vendor path (editor close → state capture → removeNode) with all
         // its receipts.
+        long long supersededPendingSeq = 0;
         {
             std::lock_guard<std::mutex> lock(g_pluginInitMutex);
-            g_pluginInitRequest = PluginInitRequest{{}, seq, true};
+            if (g_pluginInitPending) {
+                supersededPendingSeq = g_pluginInitRequest.seq;   // 0.9.2: no silent drops
+            }
+            g_pluginInitRequest = PluginInitRequest{{}, seq, true, false};
             g_pluginInitPending = true;
             ++g_pluginInitGen;
+            g_pluginInitNewestSeq = seq;
         }
+        if (supersededPendingSeq > 0) {
+            engineLog("[plugin] init superseded: seq=" + std::to_string(supersededPendingSeq) +
+                      " by=" + std::to_string(seq) +
+                      " (overwritten while still queued — never started)");
+            initRegistryMarkTerminal(supersededPendingSeq, "superseded");
+        }
+        initRegistryEnqueue(seq, true, "");
         g_pluginLoadActive.store(true, std::memory_order_release);
         g_pluginInitCv.notify_one();
         engineLog("[plugin] unload requested (explicit empty plugins[] array) | seq " + std::to_string(seq) +
@@ -4973,6 +5268,47 @@ int main(int argc, char** argv) {
                 g_pluginInitPending = false;
                 seenGen = g_pluginInitGen;
             }
+            // 0.9.2: a request the watchdog already declared terminal (the
+            // worker was jammed on an OLDER request while this one sat queued)
+            // is DISCARDED, never executed — a second "loaded" after the
+            // declared "failed" would break the exactly-one invariant.
+            if (initRegistryIsTerminal(req.seq)) {
+                engineLog("[plugin] init skipped — seq " + std::to_string(req.seq) +
+                          " was already declared terminal while the worker was stuck (no second terminal receipt; reload to retry)");
+                {
+                    std::lock_guard<std::mutex> lock(g_pluginInitMutex);
+                    g_pluginLoadActive.store(g_pluginInitPending, std::memory_order_release);
+                }
+                continue;
+            }
+            {
+                std::lock_guard<std::mutex> lk(g_initReceiptMutex);
+                for (auto& r : g_initReceipts) {
+                    if (r.seq == req.seq && !r.terminal) { r.inFlight = true; r.phase = "dequeue"; r.instanceId = "-"; }
+                }
+            }
+            // ── 0.9.2 LAZY-DEVICE RACE (#4): the audit receipt ──
+            // seq 2 of the field log was queued BEFORE the audio device
+            // existed ("lazy init on first transport play" precedes the
+            // device-ready line). The worker NEVER waits for the device —
+            // there is no blocking await to jam on — and this receipt names
+            // the path it took, per request, so the log answers "did the
+            // prepare use real or nominal settings?" without guesswork:
+            // device=ready → real captured settings; device=not-started →
+            // NOMINAL 44100/512 fallback and audioDeviceAboutToStart
+            // re-prepares on device-ready. Both paths complete; neither
+            // blocks indefinitely.
+            if (g_deviceStarted.load(std::memory_order_acquire)) {
+                engineLog("[plugin] init device=ready rate=" +
+                          std::to_string(static_cast<int>(g_engine.sampleRate.load())) +
+                          " buffer=" + std::to_string(g_deviceBufferSize.load()) +
+                          " seq " + std::to_string(req.seq) +
+                          " — pre-prepare at real device settings");
+            } else {
+                engineLog("[plugin] init device=not-started seq " + std::to_string(req.seq) +
+                          " — pre-prepare at NOMINAL 44100/512 (fallback path — never waits for the device);"
+                          " AboutToStart re-prepares on device-ready");
+            }
             // ── Milestone 1: EXPLICIT UNLOAD ({"plugins": []}) ──
             // The live instance retires through the vendor path: editor close
             // → removeNode, one message-thread job. No plugin_state follows
@@ -4990,8 +5326,14 @@ int main(int argc, char** argv) {
                     if (oldMeta != nullptr) {
                         juce::AudioPluginInstance* oldInst =
                             oldMeta->rawInstance.load(std::memory_order_acquire);
-                        if (oldInst != nullptr)
+                        if (oldInst != nullptr) {
+                            // 0.9.2: the capture is a NAMED phase now — a hung
+                            // getStateInformation here was invisible to the
+                            // watchdog (no phase record) and the request had
+                            // no path to a terminal receipt.
+                            InitPhaseGuard pg("state-capture", oldMeta->instanceId, req.seq);
                             captureAndBroadcastState(oldInst, *oldMeta, "unload (worker)");
+                        }
                     }
                 }
                 auto doneU = std::make_shared<std::atomic<bool>>(false);
@@ -5008,8 +5350,20 @@ int main(int argc, char** argv) {
                 }
                 const long long uMs = std::chrono::duration_cast<std::chrono::milliseconds>(
                     std::chrono::steady_clock::now() - tu0).count();
-                engineLog("[plugin] unload complete | seq " + std::to_string(req.seq) +
-                          " elapsed=" + std::to_string(uMs) + "ms");
+                if (doneU->load(std::memory_order_acquire)) {
+                    // The unload's terminal receipt (its "exactly one"): the
+                    // existing completion line, registry-marked.
+                    if (initRegistryMarkTerminal(req.seq, "loaded"))
+                        engineLog("[plugin] unload complete | seq " + std::to_string(req.seq) +
+                                  " elapsed=" + std::to_string(uMs) + "ms");
+                } else if (!g_should_exit.load()) {
+                    // 0.9.2: the retire job never ran — the old code logged
+                    // "unload complete" regardless (a dishonest receipt).
+                    if (initRegistryMarkTerminal(req.seq, "failed"))
+                        engineLog("[plugin] init failed: seq=" + std::to_string(req.seq) +
+                                  " reason=unload-retire-timeout (the message-thread retire job did not run within 10000 ms)" +
+                                  " — unload NOT confirmed after " + std::to_string(uMs) + "ms");
+                }
                 {
                     std::lock_guard<std::mutex> lock(g_pluginInitMutex);
                     g_pluginLoadActive.store(g_pluginInitPending, std::memory_order_release);
@@ -5041,16 +5395,18 @@ int main(int argc, char** argv) {
             };
             std::vector<EntryOutcome> outcomes(req.entries.size());
             bool superseded = false;
+            bool abandoned = false;   // 0.9.2: the watchdog declared this seq terminal while we were jammed
             for (size_t i = 0; i < req.entries.size(); ++i) {
                 const PluginInitEntry& e = req.entries[i];
                 const auto te0 = std::chrono::steady_clock::now();
                 std::unique_ptr<HostedPlugin> h;
                 // Stage 3f-6: phase watchdog record — a plugin hanging inside
                 // createPluginInstance is named after 60 s by the watchdog
-                // thread (log only).
+                // thread (log only). 0.9.2: the guard also emits the stage
+                // receipt and feeds the >10s pending warnings.
                 std::string hostErr;
                 {
-                    InitPhaseGuard pg("instantiate", e.instanceId);
+                    InitPhaseGuard pg("instantiate", e.instanceId, req.seq);
                     hostErr = loadHostedPlugin(e.pluginVar, e.instanceId, h, e.routing);
                 }
                 outcomes[i].initMs = std::chrono::duration_cast<std::chrono::milliseconds>(
@@ -5059,7 +5415,11 @@ int main(int argc, char** argv) {
                     std::lock_guard<std::mutex> lock(g_pluginInitMutex);
                     superseded = seenGen != g_pluginInitGen;
                 }
-                if (g_should_exit.load() || superseded) break;
+                // 0.9.2: the watchdog may have declared THIS request terminal
+                // while the create was jammed (terminal-timeout) — the worker
+                // discards its result instead of double-emitting.
+                abandoned = initRegistryIsTerminal(req.seq);
+                if (g_should_exit.load() || superseded || abandoned) break;
                 if (!hostErr.empty()) {
                     outcomes[i].err = hostErr;
                     engineLog("[plugin] FAILED after " + std::to_string(outcomes[i].initMs) + "ms: " + hostErr +
@@ -5093,7 +5453,7 @@ int main(int argc, char** argv) {
                     const size_t restoredBytes = mos.getDataSize();
                     if (decoded && restoredBytes > 0 && restoredBytes <= kMaxPluginStateBytes * 2) {
                         try {
-                            InitPhaseGuard pg("state-restore", e.instanceId);   // 3f-6 watchdog phase
+                            InitPhaseGuard pg("state-restore", e.instanceId, req.seq);   // 3f-6 watchdog phase
                             h->instance->setStateInformation(mos.getData(), static_cast<int>(restoredBytes));
                             engineLog("[plugin] state restored " + std::to_string(restoredBytes) +
                                       " bytes (project embed) instance=" + e.instanceId);
@@ -5129,15 +5489,17 @@ int main(int argc, char** argv) {
                 // settings: the cheap re-prepare, not the cold one.
                 // Order preserved (documented 3d-3): instantiate → state →
                 // prepare → commit.
+                double prepRateOfEntry = g_deviceStarted.load(std::memory_order_acquire)
+                                             ? g_engine.sampleRate.load()
+                                             : g_host.sampleRate();
+                int prepBufOfEntry = g_deviceStarted.load(std::memory_order_acquire)
+                                         ? g_deviceBufferSize.load()
+                                         : g_host.blockSize();
                 {
-                    const double prepRate = g_deviceStarted.load(std::memory_order_acquire)
-                                                ? g_engine.sampleRate.load()
-                                                : g_host.sampleRate();
-                    const int prepBuf = g_deviceStarted.load(std::memory_order_acquire)
-                                            ? g_deviceBufferSize.load()
-                                            : g_host.blockSize();
+                    const double prepRate = prepRateOfEntry;
+                    const int prepBuf = prepBufOfEntry;
                     if (h != nullptr && h->instance) {
-                        InitPhaseGuard pg("prepare", e.instanceId);   // 3f-6 watchdog phase
+                        InitPhaseGuard pg("prepare", e.instanceId, req.seq);   // 3f-6 watchdog phase
                         // Stage 3e-2: playhead re-asserted before the prepare
                         // (plugins cache the pointer; re-assert is cheap and
                         // proof against wrapper resets).
@@ -5177,8 +5539,46 @@ int main(int argc, char** argv) {
                     if (oldMeta != nullptr) {
                         juce::AudioPluginInstance* oldInst =
                             oldMeta->rawInstance.load(std::memory_order_acquire);
-                        if (oldInst != nullptr)
+                        if (oldInst != nullptr) {
+                            // 0.9.2: NAMED phase — a hung getStateInformation in
+                            // the replace capture was invisible to the watchdog
+                            // (no phase record between "prepare" and "commit").
+                            InitPhaseGuard pg("state-capture", oldMeta->instanceId, req.seq);
                             captureAndBroadcastState(oldInst, *oldMeta, "replace (worker)");
+                        }
+                    }
+                }
+                // ── 0.9.2 LAZY-DEVICE RACE (#4): the device-ready re-check ──
+                // The pre-prepare above picked its settings from
+                // g_deviceStarted; the device can START between that read and
+                // this commit (first transport play during a load — the exact
+                // lazy-init window). At the old settings the graph's
+                // message-thread prepare would be a COLD one (settings differ
+                // → the wrapper's early-out misses) — the M1 regression (b)
+                // reopened by a race, seconds-class ON THE MM. Re-preparing
+                // HERE on the worker at the now-real settings keeps the MM
+                // call a cheap same-settings re-prepare. Bounded, receipted,
+                // never blocks.
+                if (h != nullptr && h->instance &&
+                    g_deviceStarted.load(std::memory_order_acquire)) {
+                    const double nowRate = g_engine.sampleRate.load();
+                    const int nowBuf = g_deviceBufferSize.load();
+                    if (std::abs(nowRate - prepRateOfEntry) > 0.5 || nowBuf != prepBufOfEntry) {
+                        InitPhaseGuard pg("prepare", e.instanceId, req.seq);
+                        h->instance->setPlayHead(&g_audioCallback.playHead);
+                        h->instance->setPlayConfigDetails(0, 2, nowRate, nowBuf);
+                        for (int b = 0; b < h->instance->getBusCount(false); ++b)
+                            if (auto* bus = h->instance->getBus(false, b)) bus->enable(true);
+                        h->instance->prepareToPlay(nowRate, nowBuf);
+                        const int reLat = static_cast<int>(h->instance->getLatencySamples());
+                        h->latencySamples = static_cast<double>(reLat);
+                        engineLog("[plugin] re-prepared (worker, device-ready race) rate=" +
+                                  std::to_string(static_cast<int>(nowRate)) +
+                                  " buffer=" + std::to_string(nowBuf) +
+                                  " latencySamples=" + std::to_string(reLat) +
+                                  " instance=" + e.instanceId +
+                                  " — the pre-prepare ran at nominal but the device started before the commit"
+                                  " (the graph's message-thread prepare stays a same-settings re-prepare)");
                     }
                 }
                 // ── Milestone 1 COMMIT: the vendor's node lifecycle ──
@@ -5204,7 +5604,7 @@ int main(int argc, char** argv) {
                               " sum at gain 1 with the main bus driving the master");
                 }
                 {
-                    InitPhaseGuard pg("commit", e.instanceId);   // 3f-6 watchdog phase
+                    InitPhaseGuard pg("commit", e.instanceId, req.seq);   // 3f-6 watchdog phase
                     // (a) retire-first: ONE MM job (editor close → removeNode).
                     //     FIFO puts it before the commit job. The state capture
                     //     already ran on the worker (M1-hotfix) — the MM job
@@ -5334,23 +5734,61 @@ int main(int argc, char** argv) {
                 }
             }
             if (g_should_exit.load()) continue;   // unique_ptrs free the set
-            if (superseded) {
-                // A newer load queued behind this instantiate — discard the
-                // whole iteration; the loop picks up the newest request next
-                // pass. Anything this iteration already COMMITTED (a commit
-                // landed before the supersede was observed) is retired now —
-                // the same FIFO retire job an unload takes.
+            if (superseded || abandoned) {
+                // A newer load queued behind this instantiate (superseded) or
+                // the watchdog declared this seq terminal while a phase was
+                // jammed (abandoned) — discard the whole iteration; the loop
+                // picks up the newest request next pass. Anything this
+                // iteration already COMMITTED (a commit landed before the
+                // supersede was observed) is retired now — the same FIFO
+                // retire job an unload takes.
                 long long totalMs = std::chrono::duration_cast<std::chrono::milliseconds>(
                     std::chrono::steady_clock::now() - t0).count();
                 bool committedSomething = false;
                 for (const auto& o : outcomes) if (o.succeeded) committedSomething = true;
-                if (committedSomething) {
-                    engineLog("[plugin] init superseded after " + std::to_string(totalMs) +
-                              "ms — retiring the already-committed node | seq " + std::to_string(req.seq));
-                    juce::MessageManager::callAsync([] { retireLiveNodeOnMessageThread(); });
+                // 0.9.2: ABANDONED takes precedence over SUPERSEDED — the
+                // dominant fact is the watchdog's terminal declaration (a
+                // queued-behind request ALSO bumped the generation, so both
+                // flags can be true; the declaration is what the log promised).
+                if (abandoned) {
+                    // The terminal receipt already went out from the watchdog
+                    // (exactly-one). The worker's result is garbage — name the
+                    // discard, retire anything committed.
+                    engineLog("[plugin] init abandoned — the watchdog already declared seq " +
+                              std::to_string(req.seq) + " terminal (worker result discarded after " +
+                              std::to_string(totalMs) + "ms)" +
+                              (committedSomething ? " — retiring the already-committed node" : " — nothing committed"));
+                    if (committedSomething)
+                        juce::MessageManager::callAsync([] { retireLiveNodeOnMessageThread(); });
+                    continue;
+                }
+                // Superseded: the terminal receipt in the NEW grammar, with
+                // the by= naming the request that took this one's place. If
+                // the registry says the seq is ALREADY terminal (the watchdog
+                // raced the supersede), provenance only — never a second
+                // terminal receipt.
+                if (initRegistryMarkTerminal(req.seq, "superseded")) {
+                    long long bySeq = 0;
+                    {
+                        std::lock_guard<std::mutex> lock(g_pluginInitMutex);
+                        bySeq = g_pluginInitNewestSeq;
+                    }
+                    if (committedSomething) {
+                        engineLog("[plugin] init superseded: seq=" + std::to_string(req.seq) +
+                                  " by=" + std::to_string(bySeq) +
+                                  " after " + std::to_string(totalMs) +
+                                  "ms — retiring the already-committed node");
+                        juce::MessageManager::callAsync([] { retireLiveNodeOnMessageThread(); });
+                    } else {
+                        engineLog("[plugin] init superseded: seq=" + std::to_string(req.seq) +
+                                  " by=" + std::to_string(bySeq) +
+                                  " after " + std::to_string(totalMs) +
+                                  "ms — nothing committed, set discarded");
+                    }
                 } else {
-                    engineLog("[plugin] init superseded after " + std::to_string(totalMs) +
-                              "ms — nothing committed, set discarded | seq " + std::to_string(req.seq));
+                    engineLog("[plugin] init discarded — seq " + std::to_string(req.seq) +
+                              " was already declared terminal while this iteration ran (watchdog raced the supersede)"
+                              " — the worker's result is dropped, no second terminal receipt");
                 }
                 continue;
             }
@@ -5362,16 +5800,24 @@ int main(int argc, char** argv) {
             // keeps its previous instance live (no commit ran for it): the
             // plugin_state error already went out from the entry loop, and
             // the retained instance keeps serving under its own receipts.
-            InitPhaseGuard publishGuard("publish", "-");   // 3f-6 watchdog phase
+            InitPhaseGuard publishGuard("publish", "-", req.seq);   // 3f-6 watchdog phase
             const auto tPub = std::chrono::steady_clock::now();
             const auto pubMs = [&tPub]() {
                 return std::chrono::duration_cast<std::chrono::milliseconds>(
                     std::chrono::steady_clock::now() - tPub).count();
             };
+            bool anyCommitted = false;
+            std::string firstFailure;
+            HostedPlugin* firstCommitted = nullptr;
             for (size_t i = 0; i < req.entries.size(); ++i) {
                 const PluginInitEntry& e = req.entries[i];
                 HostedPlugin* h = outcomes[i].committed;
-                if (h == nullptr) continue;   // failed entry — already spoke
+                if (h == nullptr) {   // failed entry — already spoke
+                    if (firstFailure.empty() && !outcomes[i].err.empty()) firstFailure = outcomes[i].err;
+                    continue;
+                }
+                if (firstCommitted == nullptr) firstCommitted = h;
+                anyCommitted = true;
                 engineLog("[plugin] loaded name=" + h->name + " vendor=" + h->vendor +
                           " instance=" + h->instanceId + " slot=" + std::to_string(h->slot) +
                           " | seq " + std::to_string(req.seq) +
@@ -5406,6 +5852,39 @@ int main(int argc, char** argv) {
             engineLog("[plugin] publish: done | seq " + std::to_string(req.seq) +
                       " retired=" + std::to_string(g_host.live() ? 0 : 1) +
                       " elapsed=" + std::to_string(pubMs()) + "ms");
+            // 0.9.2 — the request's EXACTLY-ONE terminal receipt: the per-entry
+            // "loaded" lines above ARE the loaded terminal (registry-marked);
+            // a set with NOTHING committed gets the failed grammar instead —
+            // before this stage a single-entry request whose instantiate
+            // failed had per-entry receipts but the seq itself had no terminal.
+            if (anyCommitted) {
+                initRegistryMarkTerminal(req.seq, "loaded");
+                // 0.9.2: the load-carried editor intent on the async path —
+                // the editor opens when the instance is LIVE (publish), the
+                // reopen decoupled from the load's own completion timing.
+                if (req.openEditor && firstCommitted != nullptr) {
+                    const std::string iid = firstCommitted->instanceId;
+                    {
+                        std::lock_guard<std::mutex> pl(g_pendingEditorMutex);
+                        g_pendingEditorOpen = PendingEditorOpen{ iid, std::chrono::steady_clock::now(), {} };
+                        g_pendingEditorActive = true;
+                        g_pendingEditorNamed = false;
+                    }
+                    juce::MessageManager::callAsync([iid] {
+                        HostedPlugin* hh = g_hostMeta.load(std::memory_order_acquire);
+                        if (hh != nullptr && !iid.empty() && iid != "hosted" && iid != hh->instanceId)
+                            hh = nullptr;
+                        openEditorWindow(iid, hh);
+                    });
+                    engineLog("[editor] open requested instance=" + iid +
+                              " (load-carried openEditor — async path, editor opens at publish)");
+                }
+            } else if (initRegistryMarkTerminal(req.seq, "failed")) {
+                engineLog("[plugin] init failed: seq=" + std::to_string(req.seq) +
+                          " reason=" + (firstFailure.empty() ? "no instance committed (unknown failure)"
+                                                             : firstFailure) +
+                          " — every entry of the set spoke its own plugin_state error; the set has no terminal instance");
+            }
             // Stage 3f-7: the load iteration is over — clear the probe pause
             // unless ANOTHER request is already queued behind it.
             {
@@ -5424,7 +5903,22 @@ int main(int argc, char** argv) {
     // holds plugin/JUCE locks wedges the process harder than the hang). The
     // receipt turns the user's symptom ("loaded never appears, later loads
     // log init started and nothing more") into a located phase + instance.
-    std::thread plugin_init_watchdog([]() {
+    // ─── 0.9.2 — the registry sweep (items #1 + #2) ───
+    // The 3f-6 record names the PHASE; only the request REGISTRY can name the
+    // REQUEST. Every second, for every non-terminal record:
+    //   age > 10 s  → the heartbeat warning ("init pending >10s" while the
+    //                 worker runs it, "init queued >10s" while it sits behind
+    //                 a busy worker), repeated every 10 s — a stuck worker is
+    //                 visible in engine.log within seconds, the same pattern
+    //                 as the editor's >10s pending watchdog.
+    //   age > SCORCH_INIT_TERMINAL_TIMEOUT_MS (default 120000; CI 12000) →
+    //                 the TERMINAL DECLARATION on the wedged request's behalf:
+    //                 "init failed: seq= reason=terminal-timeout ..." for the
+    //                 in-flight one, "... reason=queued-behind-jammed-init"
+    //                 for the queued ones. Exactly-one is enforced by
+    //                 initRegistryMarkTerminal; the worker discovers the
+    //                 declaration and discards its result when it unblocks.
+    std::thread plugin_init_watchdog([&server]() {
         while (!g_should_exit.load()) {
             std::this_thread::sleep_for(std::chrono::milliseconds(1000));
             if (g_should_exit.load()) break;
@@ -5439,14 +5933,100 @@ int main(int argc, char** argv) {
                 active = g_initPhase.active;
                 named = g_initPhase.named;
             }
-            if (!active || named || phase.empty()) continue;
-            const long long ms = std::chrono::duration_cast<std::chrono::milliseconds>(
-                std::chrono::steady_clock::now() - startedAt).count();
-            if (ms < 60000) continue;
-            engineLog("[plugin] init WATCHDOG phase=" + phase + " instance=" + iid + " " +
-                      std::to_string(ms) + " ms");
-            std::lock_guard<std::mutex> lk(g_initPhase.mtx);
-            g_initPhase.named = true;   // one WATCHDOG line per phase occurrence
+            if (active && !named && !phase.empty()) {
+                const long long ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                    std::chrono::steady_clock::now() - startedAt).count();
+                if (ms >= 60000) {
+                    engineLog("[plugin] init WATCHDOG phase=" + phase + " instance=" + iid + " " +
+                              std::to_string(ms) + " ms");
+                    std::lock_guard<std::mutex> lk(g_initPhase.mtx);
+                    g_initPhase.named = true;   // one WATCHDOG line per phase occurrence
+                }
+            }
+            // ── 0.9.2 registry sweep ──
+            const long long terminalMs = initTerminalTimeoutMs();
+            struct Declaration { long long seq; std::string line; bool wireError; std::string iid; std::string detail; };
+            std::vector<Declaration> declarations;
+            {
+                std::lock_guard<std::mutex> lk(g_initReceiptMutex);
+                const auto now = std::chrono::steady_clock::now();
+                for (auto& r : g_initReceipts) {
+                    if (r.terminal) continue;
+                    const long long age = std::chrono::duration_cast<std::chrono::milliseconds>(
+                        now - r.queuedAt).count();
+                    if (age >= terminalMs) {
+                        // The terminal declaration on the wedged request's
+                        // behalf (emitted outside the mutex).
+                        if (r.inFlight) {
+                            declarations.push_back({r.seq,
+                                "[plugin] init failed: seq=" + std::to_string(r.seq) +
+                                " reason=terminal-timeout (worker stuck in phase=" +
+                                (r.phase.empty() ? "unknown" : r.phase) + " instance=" +
+                                (r.instanceId.empty() ? "-" : r.instanceId) +
+                                " for " + std::to_string(age / 1000) +
+                                "s; no terminal receipt is possible from a wedged worker) — declared by the watchdog;"
+                                " the worker's eventual result will be discarded",
+                                true, !r.firstIid.empty() ? r.firstIid : r.instanceId,
+                                "init declared failed after " + std::to_string(age / 1000) +
+                                "s (terminal-timeout — worker stuck in phase " +
+                                (r.phase.empty() ? "unknown" : r.phase) + ")"});
+                        } else {
+                            declarations.push_back({r.seq,
+                                "[plugin] init failed: seq=" + std::to_string(r.seq) +
+                                " reason=queued-behind-jammed-init (the worker has not reached this request for " +
+                                std::to_string(age / 1000) +
+                                "s; an older init is stuck) — declared by the watchdog; reload to retry",
+                                true, !r.firstIid.empty() ? r.firstIid : r.instanceId,
+                                "init declared failed after " + std::to_string(age / 1000) +
+                                "s (queued-behind-jammed-init — the worker never reached this request)"});
+                        }
+                        r.terminal = true;
+                        r.terminalKind = "failed";
+                        continue;
+                    }
+                    if (age >= 10000) {
+                        const long long sinceWarn = r.lastWarnAt.time_since_epoch().count() == 0
+                            ? 1000000
+                            : std::chrono::duration_cast<std::chrono::milliseconds>(
+                                  now - r.lastWarnAt).count();
+                        if (sinceWarn >= 10000) {
+                            r.lastWarnAt = now;
+                            const long long secs = age / 1000;
+                            if (r.inFlight) {
+                                declarations.push_back({r.seq,
+                                    "[plugin] init pending >10s seq " + std::to_string(r.seq) +
+                                    " phase=" + (r.phase.empty() ? "unknown" : r.phase) +
+                                    " instance=" + (r.instanceId.empty() ? "-" : r.instanceId) +
+                                    " (" + std::to_string(secs) +
+                                    "s) — the init is still running (terminal declaration at " +
+                                    std::to_string(terminalMs / 1000) + "s)",
+                                    false, "", ""});
+                            } else {
+                                declarations.push_back({r.seq,
+                                    "[plugin] init queued >10s seq " + std::to_string(r.seq) +
+                                    " (" + std::to_string(secs) +
+                                    "s) — the worker has not reached this request yet (terminal declaration at " +
+                                    std::to_string(terminalMs / 1000) + "s)",
+                                    false, "", ""});
+                            }
+                        }
+                    }
+                }
+            }
+            for (const auto& d : declarations) {
+                engineLog(d.line);
+                // The wire-side twin of the failed declaration: the frontend's
+                // hosting pill must stop spinning when a jammed init is
+                // declared failed — the per-entry error path does this for
+                // ordinary failures; the watchdog covers the jammed ones.
+                if (d.wireError && !d.iid.empty() && d.iid != "-") {
+                    const std::string ps = std::string("{\"type\":\"plugin_state\",\"state\":\"error\",\"instanceId\":\"") +
+                        escape_json(d.iid) + "\",\"detail\":\"" +
+                        escape_json(d.detail) + "\"}";
+                    for (auto& client : server.getClients())
+                        if (client) client->send(ps);
+                }
+            }
         }
     });
 
@@ -5655,6 +6235,24 @@ int main(int argc, char** argv) {
     server.stop();
     state_thread.join();
     plugin_init_thread.join();
+    // 0.9.2 — the terminal receipt invariant holds at shutdown too: any
+    // request still queued or in-flight (the worker exited mid-init) gets its
+    // named failed receipt — never a silent drop, even on the way out.
+    {
+        std::vector<long long> abandonedSeqs;
+        {
+            std::lock_guard<std::mutex> lk(g_initReceiptMutex);
+            for (auto& r : g_initReceipts) {
+                if (r.terminal) continue;
+                r.terminal = true;
+                r.terminalKind = "failed";
+                abandonedSeqs.push_back(r.seq);
+            }
+        }
+        for (const long long s : abandonedSeqs)
+            engineLog("[plugin] init failed: seq=" + std::to_string(s) +
+                      " reason=engine-shutdown (the init was still queued or running at exit)");
+    }
     // Stage 3f-6: the watchdog sleeps in 1 s slices and re-checks
     // g_should_exit — join is bounded.
     plugin_init_watchdog.join();

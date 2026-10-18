@@ -580,12 +580,13 @@ jobs:
               if (Test-Path engine-d4-stderr.txt) { Get-Content engine-d4-stderr.txt }
               throw "Engine D4 slowload test failed"
             }
-            # Fixture-side proof: both sleeps were taken by the synth.
-            $fxCreate = Get-Content "engine-d4-stdout.txt" | Select-String -Pattern "\[testvst\] slow-create sleeping 6 s"
-            if (-not $fxCreate) { throw "M1-hotfix fixture-side proof missing: no '[testvst] slow-create sleeping 6 s' in the D4 stdout" }
+            # Fixture-side proof: both sleeps were taken by the synth. 0.9.2:
+            # the slow-create receipt gained the call index ("call=N sleeping").
+            $fxCreate = Get-Content "engine-d4-stdout.txt" | Select-String -Pattern "\[testvst\] slow-create call=\d+ sleeping 6 s"
+            if (-not $fxCreate) { throw "M1-hotfix fixture-side proof missing: no '[testvst] slow-create call=N sleeping 6 s' in the D4 stdout" }
             $fxPrepare = Get-Content "engine-d4-stdout.txt" | Select-String -Pattern "\[testvst\] slow-prepare call=1 sleeping 6 s"
             if (-not $fxPrepare) { throw "M1-hotfix fixture-side proof missing: no '[testvst] slow-prepare call=1 sleeping 6 s' — the worker-side create-time prepare did not run (call 1 is the worker's own prepare, BEFORE the commit job; the wrapper early-outs identical-settings re-prepares, so the fixture sees exactly ONE prepare per load)" }
-            Write-Host "M1-hotfix fixture-side proof: slow-create 6s + slow-prepare call=2 6s both taken"
+            Write-Host "M1-hotfix fixture-side proof: slow-create [$($fxCreate.Matches[0].Value)] 6s + slow-prepare call=1 6s both taken"
             # Engine.log receipts, isolated to the D4 session. The JUCE 8.0.4
             # fact measured while building this test: the VST3 wrapper
             # serializes a plugin's cold constructor AND its first
@@ -641,6 +642,110 @@ jobs:
             Remove-Item Env:\SCORCH_TESTVST_SLOW_CREATE_S -ErrorAction SilentlyContinue
             Remove-Item Env:\SCORCH_TESTVST_SLOW_PREPARE_N -ErrorAction SilentlyContinue
             Remove-Item Env:\SCORCH_TESTVST_SLOW_PREPARE_S -ErrorAction SilentlyContinue
+          }
+
+          # Test D5 — 0.9.2 TERMINAL RECEIPT INVARIANT (field log 0.9.1, gate
+          # run 1). The field evidence: seq 2 and seq 8 logged "plugin init
+          # queued" and then NOTHING (a jammed init worker has no path to a
+          # terminal receipt; later same-set reloads masked the jam by
+          # answering "plugin set reused"). The harness mode "terminal" drives
+          # all four CI scenarios in ONE session: the artificially jammed
+          # plugin (seq 10 — the fixture's FIRST create sleeps 20 s;
+          # SLOW_CREATE_N=1 leaves every later create instant), the
+          # queued-behind declaration (seq 11, bogus path), the clean reload
+          # (seq 12), the editor reopen after "plugin set reused" (openEditor
+          # after a mid-play same-set reload + the load-carried
+          # "openEditor":true intent), the coalescing fold (seq 21 folds into
+          # seq 20's in-flight init), and the classic superseded-by-newer
+          # pair (seq 40 superseded by seq 41, which then fails on the bogus
+          # path). SCORCH_INIT_TERMINAL_TIMEOUT_MS=12000 makes the watchdog
+          # declare the jam at 12 s (real loads stay far under the 120 s
+          # default). The wire outcomes are asserted by the harness; the
+          # engine.log side below counts the EXACTLY-ONE terminal receipt per
+          # seq plus the stage receipts and the >10s warnings.
+          Write-Host "=== Test D5: terminal receipts (jammed init + queued-behind + coalescing fold + supersede + editor reopen) ==="
+          $env:SCORCH_TESTVST_LOG = "1"
+          $env:SCORCH_TESTVST_SLOW_CREATE_S = "20"
+          $env:SCORCH_TESTVST_SLOW_CREATE_N = "1"
+          $env:SCORCH_INIT_TERMINAL_TIMEOUT_MS = "12000"
+          $env:SCORCH_INIT_JAM_S = "20"
+          $env:SCORCH_INIT_TIMEOUT_S = "12"
+          $engineLogD5 = Join-Path $env:APPDATA "scorch\engine.log"
+          $logLinesBeforeD5 = (Get-Content $engineLogD5).Count
+          $procD5 = Start-Process -FilePath "engine/build/scorch-engine.exe" -ArgumentList "--port","9386","--null-audio" -PassThru -NoNewWindow -RedirectStandardOutput "engine-d5-stdout.txt" -RedirectStandardError "engine-d5-stderr.txt"
+          Start-Sleep -Seconds 3
+          try {
+            if ($procD5.HasExited) {
+              Write-Host "Engine D5 exited early (code=$($procD5.ExitCode)). stdout:"
+              if (Test-Path engine-d5-stdout.txt) { Get-Content engine-d5-stdout.txt }
+              throw "Engine D5 process exited before test could connect"
+            }
+            node .github/scripts/test-engine-protocol.mjs 9386 terminal "$env:SCAN_FIXTURES"
+            if ($LASTEXITCODE -ne 0) {
+              Write-Host "Engine D5 stdout:"
+              if (Test-Path engine-d5-stdout.txt) { Get-Content engine-d5-stdout.txt }
+              Write-Host "Engine D5 stderr:"
+              if (Test-Path engine-d5-stderr.txt) { Get-Content engine-d5-stderr.txt }
+              throw "Engine D5 terminal-receipt test failed"
+            }
+            # Fixture-side proof: the jam actually ran (create call=1 slept
+            # 20 s; no other create slept — SLOW_CREATE_N=1).
+            $fxJam = Get-Content "engine-d5-stdout.txt" | Select-String -Pattern "\[testvst\] slow-create call=1 sleeping 20 s"
+            if (-not $fxJam) { throw "D5 fixture-side proof missing: no '[testvst] slow-create call=1 sleeping 20 s' — the jam did not run" }
+            $fxAllCreates = @(Get-Content "engine-d5-stdout.txt" | Select-String -Pattern "\[testvst\] slow-create call=\d+ sleeping")
+            $fxOthers = @($fxAllCreates | Where-Object { $_.Line -notmatch "call=1 sleeping" })
+            if (($fxOthers | Measure-Object).Count -ne 0) { throw "D5: a NON-first create slept (SLOW_CREATE_N=1 violated): $($fxOthers | ForEach-Object { $_.Line })" }
+            Write-Host "D5 fixture-side proof: create call=1 jammed 20 s, later creates instant"
+            Start-Sleep -Seconds 2   # the shutdown sweep's engine-shutdown receipts land before the log read
+            $d5Lines = Get-Content $engineLogD5 | Select-Object -Skip $logLinesBeforeD5
+            # The four scenario receipts (the harness proved the wire side).
+            $termTimeout = @($d5Lines | Select-String -Pattern "\[plugin\] init failed: seq=10 reason=terminal-timeout")
+            if (($termTimeout | Measure-Object).Count -ne 1) { throw "D5: exactly one 'init failed: seq=10 reason=terminal-timeout' expected, got $(($termTimeout | Measure-Object).Count)" }
+            $queuedBehind = @($d5Lines | Select-String -Pattern "\[plugin\] init failed: seq=11 reason=queued-behind-jammed-init")
+            if (($queuedBehind | Measure-Object).Count -ne 1) { throw "D5: exactly one 'init failed: seq=11 reason=queued-behind-jammed-init' expected, got $(($queuedBehind | Measure-Object).Count)" }
+            $fold = @($d5Lines | Select-String -Pattern "\[plugin\] init superseded: seq=21 by=20 \(coalesced")
+            if (($fold | Measure-Object).Count -ne 1) { throw "D5: exactly one 'init superseded: seq=21 by=20 (coalesced' expected, got $(($fold | Measure-Object).Count)" }
+            $classic = @($d5Lines | Select-String -Pattern "\[plugin\] init superseded: seq=40 by=41\D")
+            if (($classic | Measure-Object).Count -ne 1) { throw "D5: exactly one 'init superseded: seq=40 by=41' expected, got $(($classic | Measure-Object).Count)" }
+            $fail41 = @($d5Lines | Select-String -Pattern "\[plugin\] init failed: seq=41\D")
+            if (($fail41 | Measure-Object).Count -ne 1) { throw "D5: exactly one 'init failed: seq=41' expected, got $(($fail41 | Measure-Object).Count)" }
+            # Heartbeat: the pending and queued >10s warnings fired during the jam.
+            $pendWarn = @($d5Lines | Select-String -Pattern "\[plugin\] init pending >10s seq 10")
+            if (($pendWarn | Measure-Object).Count -lt 1) { throw "D5: no 'init pending >10s seq 10' warning — the heartbeat did not fire during the jam" }
+            $queuedWarn = @($d5Lines | Select-String -Pattern "\[plugin\] init queued >10s seq 11")
+            if (($queuedWarn | Measure-Object).Count -lt 1) { throw "D5: no 'init queued >10s seq 11' warning — the queued heartbeat did not fire" }
+            # Stage receipts: the worker named its stages (instantiate/prepare/commit/publish at minimum).
+            $stageCount = (@($d5Lines | Select-String -Pattern "\[plugin\] init stage=") | Measure-Object).Count
+            if ($stageCount -lt 8) { throw "D5: only $stageCount 'init stage=' receipts — the stage heartbeat did not fire per phase" }
+            # Lazy-device audit receipts: the pre-prepare path named per request.
+            $devNotStarted = (@($d5Lines | Select-String -Pattern "\[plugin\] init device=not-started") | Measure-Object).Count
+            if ($devNotStarted -lt 1) { throw "D5: no 'init device=not-started' receipt — the lazy-device audit did not log the fallback path" }
+            # EXACTLY-ONE terminal receipt per queued-init seq of this session.
+            # A terminal for seq N is a line matching one of: "plugin loaded ..."
+            # carrying "| seq N " (the per-entry loaded receipt), or "init
+            # failed: seq=N<non-digit>", or "init superseded: seq=N<non-digit>".
+            foreach ($n in 10,11,12,20,21,40,41) {
+              $loaded = @($d5Lines | Select-String -Pattern "\[plugin\] loaded .* \| seq $n( |\$)")
+              $failed = @($d5Lines | Select-String -Pattern "\[plugin\] init failed: seq=$n( |\$)")
+              $supers = @($d5Lines | Select-String -Pattern "\[plugin\] init superseded: seq=$n( |\$)")
+              $count = (($loaded | Measure-Object).Count) + (($failed | Measure-Object).Count) + (($supers | Measure-Object).Count)
+              if ($count -ne 1) {
+                Write-Host "seq $n -> loaded=$(($loaded | Measure-Object).Count) failed=$(($failed | Measure-Object).Count) superseded=$(($supers | Measure-Object).Count)"
+                throw "D5 TERMINAL INVARIANT VIOLATION: seq $n has $count terminal receipt(s), exactly 1 required"
+              }
+            }
+            Write-Host "D5 engine.log receipts: terminal-timeout + queued-behind declared, coalesced fold (21 by 20), classic supersede (40 by 41), seq 41 failed; pending/queued >10s warnings fired; $stageCount stage receipts; device=not-started audit present; EXACTLY-ONE terminal receipt per seq for 10,11,12,20,21,40,41"
+            $procD5.WaitForExit(20000) | Out-Null
+            if (-not $procD5.HasExited -or $procD5.ExitCode -ne 0) { throw "Engine D5 did not exit cleanly (code=$($procD5.ExitCode))" }
+            Write-Host "Engine D5 clean exit 0 (terminal-receipt invariant verified: no silent drops, ever)"
+          } finally {
+            Stop-Process -Id $procD5.Id -Force -ErrorAction SilentlyContinue
+            Remove-Item Env:\SCORCH_TESTVST_LOG -ErrorAction SilentlyContinue
+            Remove-Item Env:\SCORCH_TESTVST_SLOW_CREATE_S -ErrorAction SilentlyContinue
+            Remove-Item Env:\SCORCH_TESTVST_SLOW_CREATE_N -ErrorAction SilentlyContinue
+            Remove-Item Env:\SCORCH_INIT_TERMINAL_TIMEOUT_MS -ErrorAction SilentlyContinue
+            Remove-Item Env:\SCORCH_INIT_JAM_S -ErrorAction SilentlyContinue
+            Remove-Item Env:\SCORCH_INIT_TIMEOUT_S -ErrorAction SilentlyContinue
           }
 
           # Test E — Stage 3c-hotfix: REAL-PROJECT-SIZED load. The CI gap was

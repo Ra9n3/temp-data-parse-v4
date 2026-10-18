@@ -72,6 +72,13 @@
 //       inside createPluginInstance). The loadAck contract proof: the
 //       engine's loadAck must arrive WHILE the constructor is still
 //       sleeping (async ack — the WS thread never waits behind plugin init).
+//   SCORCH_TESTVST_SLOW_CREATE_N=<call#> — 0.9.2: when set to N >= 1, only
+//       the Nth create PROCESS-WIDE sleeps (a static counter — each
+//       instance's constructor is one create call); absent or 0 = every
+//       create sleeps (the original behavior). The terminal-receipt test
+//       jams the FIRST create for 20 s (the watchdog declares the jammed
+//       init failed and the queued-behind ones) while every later create is
+//       instant — a jam-once-then-recover session.
 //   SCORCH_TESTVST_SLOW_PREPARE_N=<call#> + SCORCH_TESTVST_SLOW_PREPARE_S=<seconds>
 //       — the Nth prepareToPlay call (1-based; 0 = disabled) sleeps that
 //       long. EMPIRICAL (measured 2026-10-18): JUCE 8.0.4's VST3 wrapper
@@ -112,14 +119,30 @@ public:
         // inside the fixture's mute-window margins).
         setLatencySamples(128);
         // M1-hotfix: the cold-instantiate shape (see the header table above).
-        if (const char* sc = std::getenv("SCORCH_TESTVST_SLOW_CREATE_S")) {
-            const int secs = std::atoi(sc);
-            if (secs > 0) {
-                std::fprintf(stdout, "[testvst] slow-create sleeping %d s (SCORCH_TESTVST_SLOW_CREATE_S)\n", secs);
-                std::fflush(stdout);
-                std::this_thread::sleep_for(std::chrono::seconds(secs));
-                std::fprintf(stdout, "[testvst] slow-create done after %d s\n", secs);
-                std::fflush(stdout);
+        // 0.9.2: SCORCH_TESTVST_SLOW_CREATE_N gates the sleep to the Nth
+        // create process-wide (static counter) — the terminal-receipt test
+        // jams create #1 for 20 s and leaves every later create instant.
+        {
+            static std::atomic<int> createCallCount{0};
+            const int createIdx = createCallCount.fetch_add(1) + 1;
+            bool createSleeps = false;
+            if (const char* sc = std::getenv("SCORCH_TESTVST_SLOW_CREATE_S")) {
+                const int secs = std::atoi(sc);
+                if (secs > 0) {
+                    createSleeps = true;
+                    if (const char* sn = std::getenv("SCORCH_TESTVST_SLOW_CREATE_N")) {
+                        const int n = std::atoi(sn);
+                        if (n > 0 && createIdx != n) createSleeps = false;
+                    }
+                    if (createSleeps) {
+                        std::fprintf(stdout, "[testvst] slow-create call=%d sleeping %d s (SCORCH_TESTVST_SLOW_CREATE_S)\n",
+                                     createIdx, secs);
+                        std::fflush(stdout);
+                        std::this_thread::sleep_for(std::chrono::seconds(secs));
+                        std::fprintf(stdout, "[testvst] slow-create call=%d done after %d s\n", createIdx, secs);
+                        std::fflush(stdout);
+                    }
+                }
             }
         }
     }

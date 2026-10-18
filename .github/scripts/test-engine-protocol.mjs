@@ -139,6 +139,20 @@
 //     saw / debounce-confirmed lines + the final reuse latencySamples) are asserted by
 //     desktop.yml after the session.
 
+//   terminal (argv[4] = fixture dir) — 0.9.2: the INIT-QUEUE TERMINAL RECEIPT
+//     INVARIANT + editor reopen + coalescing (field log 0.9.1, gate run 1).
+//     One session drives all four CI scenarios (see the state block for the
+//     full matrix): success (seq 12 loaded + play), failing plugin (seq 41
+//     bogus path), superseded-by-newer-request (seq 40), artificially jammed
+//     plugin (seq 10 — the fixture's first create sleeps JAM s; the engine's
+//     watchdog declares it failed at TIMEOUT s with a wire plugin_state
+//     error), plus the queued-behind declaration (seq 11), the coalescing
+//     fold (seq 21 folds into seq 20), the editor reopen after "plugin set
+//     reused" (openEditor after a mid-play reuse), and the load-carried
+//     "openEditor":true intent (reuse + async). The per-seq exactly-one
+//     terminal receipt counting, the stage receipts, and the >10s pending /
+//     queued warnings are asserted on the engine.log side by desktop.yml.
+
 // Stage 3f-3a runner-only imports: the Windows host-hwnd holder spawns a
 // PowerShell WinForms form and reads its HWND from a file (everything else
 // in this runner is dependency-free).
@@ -397,6 +411,8 @@ const timeout = setTimeout(() => {
     console.error(`TIMEOUT at step ${step} phase=${multiPhase} (scan=${multiScanPlugin ? "ok" : "none"} loaded=${[...multiLoaded].join(",")} reuse=${multiReuseOk} reject=${multiRejectOk} peak=${multiPeak.toFixed(3)} wideA=${multiWideA} wideB=${multiWideB} editors=${multiEdOpenB}/${multiEdFocusB}/${multiEdOpenA}/${multiEdCloseA}/${multiEdCloseB} headlessSkip=${multiHeadlessSkip} captures=${[...multiCapIds].join(",")} entries=${multiLedger.length} stall3h=${multi3hLoaded}/2)`);
   } else if (mode === "slowload") {
     console.error(`TIMEOUT at step ${step} phase=${slPhase} (scan=${slScanPlugin ? "ok" : "none"} ack=${slAckOk} ackMs=${slAckMs} loaded=${slLoadedOk} loadedMs=${slLoadedMs} play=${slPlayOk} ticks=${slTicksOk} peak=${slPeak.toFixed(3)} stop=${slStopOk})`);
+  } else if (mode === "terminal") {
+    console.error(`TIMEOUT at step ${step} phase=${trPhase} (scan=${trScanPlugin ? "ok" : "none"} jamAck=${trJamAckFast}@${trJamAckMs}ms jamErr=${trJamErr} queuedErr=${trQueuedErr} clean=${trCleanLoaded} ticks=${trPlayTicks} stop=${trStopped} reuse=${trReuseCount} edOpen=${trEditorOpenOk} edClose=${trEditorCloseOk} carried=${trEditorCarriedOk} headless=${trHeadlessSkip} supp=${trSuppLoaded} bogus2=${trBogus2Err})`);
   } else {
     console.error(`TIMEOUT at step ${step} (hello=${helloOk} pong=${pongOk} load=${loadOk} noDeviceErr=${noDeviceErrOk} pongAfterErr=${pongAfterErrOk} stillFunctional=${stillFunctionalOk})`);
   }
@@ -408,7 +424,7 @@ const timeout = setTimeout(() => {
 // loaded-receipt bound is asserted EXPLICITLY per phase below — but the
 // wall-clock budget still covers them, plus the Stage 3h stall probe (a 2.5 s
 // audio freeze + its tail): 120 s.
-}, mode === "scan" ? 180000 : mode === "host" ? 150000 : mode === "multi" ? 120000 : mode === "latency" ? 90000 : mode === "slowload" ? 90000 : 30000);
+}, mode === "scan" ? 180000 : mode === "host" ? 150000 : mode === "multi" ? 120000 : mode === "latency" ? 90000 : mode === "slowload" ? 90000 : mode === "terminal" ? 150000 : 30000);
 
 // scan-mode flags
 let scanSent = false, scanResultOk = false, aliveAfterCrashOk = false, defaultScanOk = false;
@@ -465,6 +481,71 @@ let slPhase = 0;        // 0 hello, 1 scan, 2 loading, 3 playing, 4 stopping
 let slScanPlugin = null;
 let slAckOk = false, slLoadedOk = false, slPlayOk = false, slTicksOk = false, slStopOk = false;
 let slAckMs = -1, slLoadedMs = -1, slSendMs = 0, slPeak = 0;
+
+// ── 0.9.2: terminal mode (the init-queue terminal-receipt invariant) ──
+// The field evidence (gate run 1, engine 0.9.1): seq 2 and seq 8 logged
+// "plugin init queued" and then NOTHING — a jammed init worker had no path
+// to a terminal receipt, and later same-set reloads masked the jam by
+// answering "plugin set reused". This mode drives all four CI scenarios in
+// ONE session (engine env: SCORCH_TESTVST_SLOW_CREATE_N=1 jams ONLY the
+// first create for SCORCH_TESTVST_SLOW_CREATE_S=JAM seconds;
+// SCORCH_INIT_TERMINAL_TIMEOUT_MS=TIMEOUT*1000 declares stuck requests
+// failed; every later create is instant):
+//   seq 10  jammed init   → wire plugin_state error (terminal-timeout) at
+//                           ~TIMEOUT s; log "init failed: seq=10 reason=
+//                           terminal-timeout" + "init pending >10s" warnings;
+//   seq 11  bogus path    → queues behind the jam (different set → no fold)
+//                           → wire error (queued-behind-jammed-init); log
+//                           "init queued >10s";
+//   seq 12  clean reload  → loaded + play (the worker recovered after the
+//                           jam; the abandoned result was discarded);
+//   seq 13  mid-play same-set reload → REUSE, then openEditor(instanceId) —
+//                           the editor-reopen-decoupled-from-load proof
+//                           (Windows CI opens the real window; headless
+//                           tolerates editor_unavailable "no display");
+//   seq 14  mid-play reload with "openEditor":true → reuse + the editor
+//                           opens from the LOAD-carried intent;
+//   seq 20+21 same set back-to-back → 21 FOLDS into 20's in-flight init
+//                           (log "init superseded: seq=21 by=20 (coalesced")
+//                           — 20 loads, 21 never double-instantiates;
+//   seq 40+41 different sets back-to-back → 40 superseded by 41 (the
+//                           classic superseded-by-newer-request), 41 fails
+//                           (bogus path → "init failed: seq=41").
+// The exactly-one terminal receipt per seq is asserted on the engine.log
+// side by desktop.yml (per-seq counting over the D5 slice); the wire side
+// here proves the request-level outcomes and the editor reopen path.
+const TR_JAM_S = parseInt(process.env.SCORCH_INIT_JAM_S ?? "20", 10) || 20;
+const TR_TIMEOUT_S = parseInt(process.env.SCORCH_INIT_TIMEOUT_S ?? "12", 10) || 12;
+const TR_META = { bpm: 120, ppqn: 960, timeSignature: { numerator: 4, denominator: 4 }, endTick: 8448 };
+const trEvents = [
+  { eventType: "CONTROL_CHANGE", channel: 1, data1: 7, data2: 127, timestampTicks: 0, trackId: "t1" },
+  { eventType: "CONTROL_CHANGE", channel: 1, data1: 11, data2: 127, timestampTicks: 0, trackId: "t1" },
+  { eventType: "NOTE_ON", channel: 1, data1: 60, data2: 100, timestampTicks: 480, trackId: "t1" },
+  { eventType: "NOTE_OFF", channel: 1, data1: 60, data2: 0, timestampTicks: 8448, trackId: "t1" },
+];
+let trPhase = 0;   // 0 hello, 1 scanning, 2 jam loading, 3 awaiting declared
+                   // errors, 4 post-jam settle, 5 clean load, 6 playing,
+                   // 7-9 editor reopen, 10 stop, 11 fold pair, 12 classic
+                   // supersede pair, 13 done
+let trScanPlugin = null;
+let trJamAckFast = false, trJamErr = false, trQueuedErr = false;
+let trCleanLoaded = false, trPlayPeak = 0, trPlayTicks = false, trStopped = false;
+let trReuseCount = 0;             // reuse-path loaded receipts for inst-ok (13, 14)
+let trEditorOpenOk = false, trEditorCloseOk = false;
+let trEditorCarriedOk = false;    // the load-carried openEditor intent
+let trHeadlessSkip = false;
+let trSuppLoaded = false;         // seq 20 loaded (21 folded into it)
+let trBogus2Err = false;          // seq 41 failed (40 superseded by it)
+let trJamSendMs = 0, trJamAckMs = -1;
+const trPluginBody = () => ({ uid: trScanPlugin.uid, path: trScanPlugin.path, name: trScanPlugin.name });
+const trLoad = (seq, extra = {}) => ({
+  type: "load", seq, events: trEvents, meta: TR_META, channels: { t1: 1 },
+  plugin: trPluginBody(), ...extra,
+});
+const trBogusBody = () => ({ uid: "", path: "/nonexistent/bogus.vst3", name: "Bogus" });
+// Milestone 1 resolves every instance to the reserved id "hosted" — the wire
+// assertions below key on the RECEIPT DETAIL and the phase machine, never on
+// the (client-invented) instance ids of the field log.
 
 // The fixture's plugin_state latencyMs = (h->latencySamples + 512) / 44100 * 1000
 // (the engine's standing receipts formula) — this helper is the EXPECTED value
@@ -859,9 +940,9 @@ ws.addEventListener("message", (event) => {
     }
     if (msg.type === "hello" && multiPhase === 0) {
       if (msg.protocol !== 1) fail(`expected protocol 1, got ${msg.protocol}`);
-      if (msg.engineVersion !== "0.9.1") fail(`expected 0.9.1, got ${msg.engineVersion}`);
+      if (msg.engineVersion !== "0.9.2") fail(`expected 0.9.2, got ${msg.engineVersion}`);
       if (!fixtureDir) fail("multi mode requires a fixture dir argument");
-      console.log("[test] hello OK (0.9.1) — deferral contract: scanning for the stand-in host plugin...");
+      console.log("[test] hello OK (0.9.2) — deferral contract: scanning for the stand-in host plugin...");
       multiPhase = 1;
       ws.send(JSON.stringify({ type: "scan", dirs: [fixtureDir] }));
     } else if (msg.type === "scan_result" && multiPhase === 1) {
@@ -933,10 +1014,10 @@ ws.addEventListener("message", (event) => {
     // ── M1-hotfix: the heavy-load death class (see the state block above) ──
     if (msg.type === "hello" && slPhase === 0) {
       if (msg.protocol !== 1) fail(`expected protocol 1, got ${msg.protocol}`);
-      if (msg.engineVersion !== "0.9.1") fail(`expected 0.9.1, got ${msg.engineVersion}`);
+      if (msg.engineVersion !== "0.9.2") fail(`expected 0.9.2, got ${msg.engineVersion}`);
       if (!fixtureDir) fail("slowload mode requires a fixture dir argument");
       helloOk = true;
-      console.log(`[test] hello OK (0.9.1) — slow-load knobs: create=${SLOW_CREATE_S}s prepareN=${process.env.SCORCH_TESTVST_SLOW_PREPARE_N ?? 0}(x${SLOW_PREPARE_S}s) — scanning...`);
+      console.log(`[test] hello OK (0.9.2) — slow-load knobs: create=${SLOW_CREATE_S}s prepareN=${process.env.SCORCH_TESTVST_SLOW_PREPARE_N ?? 0}(x${SLOW_PREPARE_S}s) — scanning...`);
       slPhase = 1;
       ws.send(JSON.stringify({ type: "scan", dirs: [fixtureDir] }));
     } else if (msg.type === "scan_result" && slPhase === 1) {
@@ -983,6 +1064,165 @@ ws.addEventListener("message", (event) => {
       slStopOk = true;
       console.log("[test] stop ✓ clean — slowload contract complete (engine.log [mm]-receipt absence asserted by desktop.yml)");
       finishAndShutdown();
+    }
+  } else if (mode === "terminal") {
+    // ── 0.9.2: the init-queue terminal-receipt invariant (see the state block) ──
+    if (msg.type === "hello" && trPhase === 0) {
+      if (msg.protocol !== 1) fail(`expected protocol 1, got ${msg.protocol}`);
+      if (msg.engineVersion !== "0.9.2") fail(`expected 0.9.2, got ${msg.engineVersion}`);
+      if (!fixtureDir) fail("terminal mode requires a fixture dir argument");
+      helloOk = true;
+      console.log(`[test] hello OK (0.9.2) — terminal-receipt knobs: jam=${TR_JAM_S}s timeout=${TR_TIMEOUT_S}s — scanning...`);
+      trPhase = 1;
+      ws.send(JSON.stringify({ type: "scan", dirs: [fixtureDir] }));
+    } else if (msg.type === "scan_result" && trPhase === 1) {
+      const valid = (msg.plugins ?? []).find((p) => p.name === "Scorch Test Synth");
+      if (!valid) fail(`terminal: stand-in plugin not found in scan (${JSON.stringify(msg.plugins)})`);
+      trScanPlugin = valid;
+      console.log(`[test] stand-in found: "${valid.name}" — sending the JAMMED load (seq 10, create sleeps ${TR_JAM_S}s)`);
+      trPhase = 2;
+      trJamSendMs = Date.now();
+      ws.send(JSON.stringify(trLoad(10)));
+    } else if (msg.type === "loadAck" && trPhase === 2 && msg.seq === 10) {
+      trJamAckMs = Date.now() - trJamSendMs;
+      trJamAckFast = trJamAckMs < 3000;
+      if (!trJamAckFast) fail(`terminal: the jammed load's loadAck arrived after ${trJamAckMs} ms — the async ack contract is broken (the fixture constructor is sleeping ${TR_JAM_S}s; loadAck is the ENQUEUE receipt)`);
+      console.log(`[test] jammed load's loadAck OK after ${trJamAckMs} ms (< 3000; the worker is jammed inside createPluginInstance) — queueing the bogus-path load behind it (seq 11)`);
+      trPhase = 3;
+      ws.send(JSON.stringify({
+        type: "load", seq: 11, events: trEvents, meta: TR_META, channels: { t1: 1 },
+        plugin: trBogusBody(),
+      }));
+      // The watchdog's declarations arrive at ~TIMEOUT s (both in one sweep).
+      setTimeout(() => {
+        if (trPhase === 3 && (!trJamErr || !trQueuedErr))
+          fail(`terminal: the watchdog's terminal declarations never arrived (jamErr=${trJamErr} queuedErr=${trQueuedErr} after ${TR_TIMEOUT_S + 8}s)`);
+      }, (TR_TIMEOUT_S + 8) * 1000);
+    } else if (msg.type === "plugin_state" && msg.state === "error" && trPhase === 3) {
+      if (/terminal-timeout/.test(msg.detail ?? "")) {
+        trJamErr = true;
+        console.log(`[test] seq 10 declared failed by the watchdog ✓ (wire error: "${msg.detail}")`);
+      } else if (/queued-behind/.test(msg.detail ?? "")) {
+        trQueuedErr = true;
+        console.log(`[test] seq 11 (queued behind the jam) declared failed ✓ (wire error: "${msg.detail}")`);
+        // The jam ends at ~TR_JAM_S + start; the errors arrive at ~TR_TIMEOUT_S
+        // + start. Settle past the jam end (+ the worker's abandon/skip pass),
+        // then run the clean reload.
+        const settleMs = Math.max(1000, (TR_JAM_S - TR_TIMEOUT_S) * 1000 + 2500);
+        console.log(`[test] settling ${Math.round(settleMs / 1000)}s past the jam end before the clean reload...`);
+        setTimeout(() => {
+          if (trPhase === 3 && trJamErr && trQueuedErr) {
+            trPhase = 4;
+            console.log("[test] sending the CLEAN reload (seq 12) — the worker recovered from the jam");
+            ws.send(JSON.stringify(trLoad(12)));
+          }
+        }, settleMs);
+      }
+    } else if (msg.type === "plugin_state" && msg.state === "loaded" && msg.instanceId === "hosted" && trPhase <= 9) {
+      if (trPhase === 4) {
+        trCleanLoaded = true;
+        console.log("[test] clean reload LOADED ✓ — the jammed worker recovered and the abandoned result was discarded — playing");
+        trPhase = 6;
+        ws.send(JSON.stringify({ type: "transport", command: "play", tick: 0 }));
+      } else if (trPhase === 6 || trPhase === 7 || trPhase === 8 || trPhase === 8.5) {
+        // The mid-play reuse receipts (seq 13, then seq 14). Each one is
+        // followed by editor work; the LAST one must not re-trigger.
+        trReuseCount += 1;
+        if (trReuseCount === 1) {
+          trPhase = 7;
+          console.log("[test] mid-play reload answered REUSED ✓ — sending openEditor: the editor reopen decoupled from load");
+          ws.send(JSON.stringify({ type: "openEditor" }));
+        } else if (trReuseCount === 2) {
+          trPhase = 9;
+          console.log("[test] load-carried openEditor (seq 14) reuse receipt ✓ — the editor was requested by the LOAD itself");
+          // The editorOpened for the carried intent arrives next (phase 9).
+        }
+      } else {
+        fail(`terminal: unexpected early-phase loaded receipt in phase ${trPhase}`);
+      }
+    } else if (msg.type === "state" && msg.playing === true && trPhase === 6) {
+      trPlayPeak = Math.max(trPlayPeak, msg.peak ?? 0);
+      // The score's note-on sits at tick 480 — read the peak at 1200 (the
+      // slowload floor) so the note is actually sounding when we assert.
+      if (msg.tick >= 1200 && !trPlayTicks) {
+        if (trPlayPeak <= 0.05) fail(`terminal: peak ${trPlayPeak.toFixed(3)} after the clean reload — nothing audible (the plugin did not survive the jam window)`);
+        trPlayTicks = true;
+        console.log(`[test] play ✓ tick ${msg.tick} advanced, peak ${trPlayPeak.toFixed(3)} — sending the mid-play SAME-set reload (seq 13, expect REUSED)`);
+        ws.send(JSON.stringify(trLoad(13)));
+      }
+    } else if (msg.type === "editorOpened" && trPhase === 7) {
+      if (msg.focused === true) fail(`terminal: the first openEditor must OPEN, not focus: ${JSON.stringify(msg)}`);
+      trEditorOpenOk = true;
+      console.log(`[test] editor OPENED after "reused" ✓ (${msg.width}x${msg.height}) — the reopen is decoupled from load — closing`);
+      trPhase = 8;
+      ws.send(JSON.stringify({ type: "closeEditor" }));
+    } else if (msg.type === "editorClosed" && trPhase === 8) {
+      trEditorCloseOk = true;
+      console.log("[test] editor CLOSED ✓ — sending the load-carried openEditor reload (seq 14, openEditor:true, mid-play reuse)");
+      trPhase = 8;
+      ws.send(JSON.stringify(trLoad(14, { openEditor: true })));
+      // The seq-14 reuse receipt (phase 9 branch) then editorOpened (below).
+      trPhase = 8.5;
+    } else if (msg.type === "editorOpened" && trPhase === 9) {
+      trEditorCarriedOk = true;
+      console.log("[test] editor OPENED from the load-carried intent ✓ (reuse path honored openEditor:true) — closing");
+      ws.send(JSON.stringify({ type: "closeEditor" }));
+      setTimeout(() => {
+        if (!trStopped) {
+          console.log("[test] stopping the transport for the supersede pairs");
+          ws.send(JSON.stringify({ type: "transport", command: "stop" }));
+        }
+      }, 300);
+    } else if (msg.type === "error" && msg.code === "editor_unavailable" && (trPhase === 7 || trPhase === 9) && !trEditorOpenOk) {
+      // Headless tolerance — SAME contract as host/multi: a display-less host
+      // cannot create a window; the display guard answers editor_unavailable
+      // ("no display …"). Windows CI has a real display and proves the open
+      // path — this branch never fires there.
+      if (!/no display/i.test(msg.detail ?? "")) fail(`terminal: unexpected editor_unavailable detail: ${msg.detail}`);
+      trHeadlessSkip = true;
+      console.log(`[test] editor_unavailable tolerated ("${msg.detail}") — headless; Windows CI proves the window path`);
+      if (trPhase === 7) {
+        trPhase = 8.5;
+        ws.send(JSON.stringify(trLoad(14, { openEditor: true })));
+      } else {
+        ws.send(JSON.stringify({ type: "transport", command: "stop" }));
+      }
+    } else if (msg.type === "state" && msg.playing === false && (trPhase === 9 || trPhase === 8.5) && !trStopped) {
+      trStopped = true;
+      console.log("[test] transport stopped ✓ — sending the COALESCING pair (seq 20 then 21, SAME set back-to-back)");
+      trPhase = 11;
+      ws.send(JSON.stringify(trLoad(20)));
+      ws.send(JSON.stringify(trLoad(21)));   // must FOLD into 20's init
+    } else if (msg.type === "plugin_state" && msg.state === "loaded" && msg.instanceId === "hosted" && trPhase === 11) {
+      trSuppLoaded = true;
+      console.log("[test] seq 20 LOADED ✓ (seq 21 folded into its init — one instantiate for both) — sending the classic supersede pair (seq 40 fixture, seq 41 bogus)");
+      trPhase = 12;
+      ws.send(JSON.stringify(trLoad(40)));
+      ws.send(JSON.stringify({
+        type: "load", seq: 41, events: trEvents, meta: TR_META, channels: { t1: 1 },
+        plugin: trBogusBody(),
+      }));
+    } else if (msg.type === "plugin_state" && msg.state === "error" && trPhase === 12) {
+      if (/no plugin types found/.test(msg.detail ?? "")) {
+        trBogus2Err = true;
+        console.log("[test] seq 41 failed fast (bogus path) ✓ — seq 40 was superseded by it (exactly-one terminal each, engine.log side) — shutting down");
+        console.log("[test] terminal-receipt contract complete (wire side; the per-seq exactly-one counting + stage/pending receipts are asserted by desktop.yml)");
+        finishAndShutdown();
+      } else {
+        fail(`terminal: unexpected error receipt in phase 12: ${JSON.stringify(msg)}`);
+      }
+    } else if (msg.type === "error" && trPhase >= 2 && trPhase <= 12) {
+      const d = msg.detail ?? "";
+      if (msg.code === "editor_unavailable") {
+        // handled by the dedicated branch above; reaching here means the
+        // phase didn't match — tolerate during the carried-intent window.
+        if (trPhase === 8.5) return;   // the carried editor's unavailable (headless) — tolerated
+        fail(`terminal: unexpected error: ${msg.code} ${d}`);
+      } else if (msg.code === "load_rejected") {
+        fail(`terminal: a load was REJECTED mid-sequence (${d})`);
+      } else {
+        fail(`terminal: unexpected error: ${msg.code} ${d}`);
+      }
     }
   } else if (mode === "host") {
     // ── Stage 3c-2: hosting proof against the free test VST3 ──
@@ -1443,7 +1683,7 @@ ws.addEventListener("message", (event) => {
     if (msg.type === "hello" && !helloOk) {
       helloOk = true;
       if (msg.protocol !== 1) fail(`expected protocol 1, got ${msg.protocol}`);
-      if (msg.engineVersion !== "0.9.1") fail(`expected 0.9.1, got ${msg.engineVersion}`);
+      if (msg.engineVersion !== "0.9.2") fail(`expected 0.9.2, got ${msg.engineVersion}`);
       if (!fixtureDir) fail("scan mode requires a fixture dir argument");
       console.log("[test] hello OK — sending scan of fixture dir + nested dir (dedup proof):", fixtureDir);
       scanSent = true;
@@ -1603,11 +1843,11 @@ ws.addEventListener("message", (event) => {
     // ── Stage 3i: runtime latency tracking (detect, then mini-republish) ──
     if (msg.type === "hello" && latPhase === 0) {
       if (msg.protocol !== 1) fail(`expected protocol 1, got ${msg.protocol}`);
-      if (msg.engineVersion !== "0.9.1") fail(`expected 0.9.1, got ${msg.engineVersion}`);
+      if (msg.engineVersion !== "0.9.2") fail(`expected 0.9.2, got ${msg.engineVersion}`);
       if (!fixtureDir) fail("latency mode requires a fixture dir argument");
       helloOk = true;
       latPhase = 1;
-      console.log("[test] hello OK (0.9.1) — scanning for the stand-in host plugin...");
+      console.log("[test] hello OK (0.9.2) — scanning for the stand-in host plugin...");
       ws.send(JSON.stringify({ type: "dispatch_log", enable: true }));   // Phase 2: the pre-fire proof is ledger-based
       ws.send(JSON.stringify({ type: "scan", dirs: [fixtureDir] }));
     } else if (msg.type === "scan_result" && latPhase === 1) {
@@ -1663,7 +1903,7 @@ ws.addEventListener("message", (event) => {
     if (msg.type === "hello" && !helloOk) {
       helloOk = true;
       if (msg.protocol !== 1) fail(`expected protocol 1, got ${msg.protocol}`);
-      if (msg.engineVersion !== "0.9.1") fail(`expected 0.9.1, got ${msg.engineVersion}`);
+      if (msg.engineVersion !== "0.9.2") fail(`expected 0.9.2, got ${msg.engineVersion}`);
       // Stage 3c close-out: the dispatch ledger streams what the engine
       // ACTUALLY dispatched — the replay-burst and re-attack asserts read it.
       ws.send(JSON.stringify({ type: "dispatch_log", enable: true }));
@@ -2106,6 +2346,27 @@ ws.addEventListener("close", () => {
       process.exit(0);
     } else {
       console.error(`FAILED: hello=${helloOk} scan=${slScanPlugin ? "ok" : "none"} ack=${slAckOk}(${slAckMs}ms) loaded=${slLoadedOk}(${slLoadedMs}ms) play=${slPlayOk} ticks=${slTicksOk} stop=${slStopOk} phase=${slPhase}`);
+      process.exit(1);
+    }
+  } else if (mode === "terminal") {
+    allOk = helloOk && trScanPlugin != null && trJamAckFast && trJamErr && trQueuedErr &&
+        trCleanLoaded && trPlayTicks && trReuseCount === 2 && trSuppLoaded && trBogus2Err &&
+        (trEditorOpenOk || trHeadlessSkip);
+    if (allOk) {
+      console.log("");
+      console.log("========================================");
+      console.log("ALL TERMINAL-RECEIPT TESTS PASSED (0.9.2 invariant):");
+      console.log(`  jammed init (seq 10, create ${TR_JAM_S}s): loadAck ${trJamAckMs} ms (< 3000) — the async ack contract holds behind the jam`);
+      console.log("  watchdog declarations on the wire: seq 10 terminal-timeout + seq 11 queued-behind-jammed-init");
+      console.log("  clean reload (seq 12) loaded + playable after the jam; the abandoned result was discarded");
+      console.log(`  editor reopen decoupled from load: ${trHeadlessSkip ? "headless (editor_unavailable tolerated; Windows CI proves the window)" : "editor opened + closed after a mid-play reuse + the load-carried openEditor intent"}`);
+      console.log("  coalescing: seq 21 folded into seq 20's in-flight init (one instantiate for both)");
+      console.log("  classic supersede: seq 40 superseded by seq 41; seq 41 failed on the bogus path");
+      console.log("  engine.log side: desktop.yml counts EXACTLY ONE terminal receipt per seq (10,11,12,20,21,40,41) + the stage/pending receipts");
+      console.log("========================================");
+      process.exit(0);
+    } else {
+      console.error(`FAILED: hello=${helloOk} scan=${trScanPlugin ? "ok" : "none"} jamAck=${trJamAckFast}@${trJamAckMs}ms jamErr=${trJamErr} queuedErr=${trQueuedErr} clean=${trCleanLoaded} ticks=${trPlayTicks} reuse=${trReuseCount}/2 supp=${trSuppLoaded} bogus2=${trBogus2Err} edOpen=${trEditorOpenOk} headless=${trHeadlessSkip} phase=${trPhase}`);
       process.exit(1);
     }
   } else {
