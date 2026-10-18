@@ -388,12 +388,16 @@ jobs:
               if (Test-Path engine-d2-stderr.txt) { Get-Content engine-d2-stderr.txt }
               throw "Engine D2 multi-instance test failed"
             }
-            # Plugin-side proof: BOTH instances received notes on channel 1
-            # (two separate processes-in-process instances of the same binary).
+            # Plugin-side proof (M1 deferral contract): multi-instance loads
+            # are REFUSED (the named receipt is asserted in the summary block
+            # below), and the ONE hosted instance still renders real notes
+            # through the graph — >=1 ch=1 NOTE_ON proves the plugin path.
+            # The two-instance note proof returns with the multi-instance
+            # milestone.
             $instNotes = Select-String -Path "engine-d2-stdout.txt" -Pattern "\[testvst\].*ch=1 k=NOTE_ON"
             $instCount = ($instNotes | Measure-Object).Count
-            if ($instCount -lt 2) { throw "multi-instance plugin-side proof missing: expected notes from BOTH instances on ch=1, got $instCount" }
-            Write-Host "Multi-instance plugin-side proof: $instCount ch=1 NOTE_ONs across TWO instances"
+            if ($instCount -lt 1) { throw "plugin-side proof missing: the single hosted instance received no ch=1 NOTE_ON (multi-instance hosting is deferred — one instance must still render), got $instCount" }
+            Write-Host "Plugin-side proof (M1 deferral): $instCount ch=1 NOTE_ON(s) through the single hosted instance"
             # Stage 3f-6: plugin-side proof that the slow-capture path was
             # ACTUALLY taken — inst-a's capture job runs while the marker is
             # armed and STALLS inside getStateInformation. (The LATER capture
