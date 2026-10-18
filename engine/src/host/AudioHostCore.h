@@ -247,7 +247,10 @@ public:
 
         for (auto* n : graphOwned->getNodes())
         {
-            if (n == outputNode || n == midiInputNode || n->getProcessor() == nullptr)
+            // .get(): a raw Node* vs a Node::Ptr == is ambiguous on MSVC
+            // (C2666 — JUCE's templated operator== vs the built-in pointer
+            // ==); the explicit raw-pointer comparison compiles everywhere.
+            if (n == outputNode.get() || n == midiInputNode.get() || n->getProcessor() == nullptr)
                 continue;
 
             auto* p = n->getProcessor();
