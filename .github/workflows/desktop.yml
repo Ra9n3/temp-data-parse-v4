@@ -747,22 +747,32 @@ jobs:
             if (($fold | Measure-Object).Count -ne 1) { throw "D5: exactly one 'init superseded: seq=21 by=20 (coalesced' expected, got $(($fold | Measure-Object).Count)" }
             # The classic pair (40 fixture, 41 bogus) is sent back-to-back by
             # the harness: WHICH way the ~2 ms race resolves is TIMING, not
-            # contract — the contract is the terminal invariant below. M2's
-            # faster worker can complete seq 40 before seq 41 is parsed, in
-            # which case NO supersede receipt exists and seq 40's single
-            # terminal is the loaded receipt (41 then fails fast on the bogus
-            # path — exactly-one terminal each, still no silent drops). Both
-            # shapes are accepted XOR; anything else throws.
+            # contract — the contract is the terminal invariant below. Two
+            # M2-era shapes are possible when 41 loses the race, and ONE when
+            # it wins:
+            #   - "init superseded: seq=40 by=41" — 41 parsed while 40's init
+            #     was in-flight (the supersede path);
+            #   - "loaded ... | seq 40" — 40 committed a NEW instance before
+            #     41 arrived;
+            #   - "kept ... | seq 40" — M2's DIFF machinery: 40's set is
+            #     IDENTICAL to seq 20's commit, so the worker classifies the
+            #     instance KEPT (zero re-instantiate — the whole M2 point),
+            #     and the per-entry KEPT line is the loaded-class terminal
+            #     (anyCommitted → registry-marked loaded; the engine is
+            #     correct, the 0.9.2-era pattern list just predated the kept
+            #     grammar). All three are exactly-one-terminal outcomes; XOR
+            #     is asserted, anything else throws.
             $classicSup = @($d5Lines | Select-String -Pattern "\[plugin\] init superseded: seq=40 by=41\D")
             $classicLoaded = @($d5Lines | Select-String -Pattern "\[plugin\] loaded .* \| seq 40( |\$)")
+            $classicKept = @($d5Lines | Select-String -Pattern "\[plugin\] kept .* \| seq 40( |\$)")
             $supN = ($classicSup | Measure-Object).Count
             $loadN = ($classicLoaded | Measure-Object).Count
-            if ($supN -eq 1 -and $loadN -eq 0) {
-              Write-Host "D5 classic pair: supersede won the race (init superseded: seq=40 by=41) — 41 arrived while 40's init was in-flight"
-            } elseif ($loadN -eq 1 -and $supN -eq 0) {
-              Write-Host "D5 classic pair: seq 40 completed before 41 arrived (loaded; 41 failed fast on the bogus path) — the M2 worker shifted the race, the invariant held"
+            $keptN = ($classicKept | Measure-Object).Count
+            $termTotal = $supN + $loadN + $keptN
+            if ($termTotal -eq 1) {
+              Write-Host "D5 classic pair: seq 40 resolved to EXACTLY ONE terminal (superseded=$supN loaded=$loadN kept=$keptN) — 41 failed fast on the bogus path; the invariant held"
             } else {
-              throw "D5: classic pair 40/41 must give seq 40 EXACTLY ONE terminal (superseded XOR loaded), got superseded=$supN loaded=$loadN"
+              throw "D5: classic pair 40/41 must give seq 40 EXACTLY ONE terminal (superseded XOR loaded XOR kept), got superseded=$supN loaded=$loadN kept=$keptN"
             }
             $fail41 = @($d5Lines | Select-String -Pattern "\[plugin\] init failed: seq=41\D")
             if (($fail41 | Measure-Object).Count -ne 1) { throw "D5: exactly one 'init failed: seq=41' expected, got $(($fail41 | Measure-Object).Count)" }
@@ -778,11 +788,13 @@ jobs:
             $devNotStarted = (@($d5Lines | Select-String -Pattern "\[plugin\] init device=not-started") | Measure-Object).Count
             if ($devNotStarted -lt 1) { throw "D5: no 'init device=not-started' receipt — the lazy-device audit did not log the fallback path" }
             # EXACTLY-ONE terminal receipt per queued-init seq of this session.
-            # A terminal for seq N is a line matching one of: "plugin loaded ..."
-            # carrying "| seq N " (the per-entry loaded receipt), or "init
+            # A terminal for seq N is a line matching one of: "plugin loaded
+            # ..." or "plugin kept ..." (M2 diff: an identical-set reload's
+            # per-entry KEPT line is the loaded-class terminal — anyCommitted
+            # → registry-marked loaded) carrying "| seq N ", or "init
             # failed: seq=N<non-digit>", or "init superseded: seq=N<non-digit>".
             foreach ($n in 10,11,12,20,21,40,41) {
-              $loaded = @($d5Lines | Select-String -Pattern "\[plugin\] loaded .* \| seq $n( |\$)")
+              $loaded = @($d5Lines | Select-String -Pattern "\[plugin\] (loaded|kept) .* \| seq $n( |\$)")
               $failed = @($d5Lines | Select-String -Pattern "\[plugin\] init failed: seq=$n( |\$)")
               $supers = @($d5Lines | Select-String -Pattern "\[plugin\] init superseded: seq=$n( |\$)")
               $count = (($loaded | Measure-Object).Count) + (($failed | Measure-Object).Count) + (($supers | Measure-Object).Count)
@@ -791,7 +803,7 @@ jobs:
                 throw "D5 TERMINAL INVARIANT VIOLATION: seq $n has $count terminal receipt(s), exactly 1 required"
               }
             }
-            Write-Host "D5 engine.log receipts: terminal-timeout + queued-behind declared, coalesced fold (21 by 20), classic pair resolved to exactly-one seq-40 terminal (superseded XOR loaded; race timing is not contract), seq 41 failed; pending/queued >10s warnings fired; $stageCount stage receipts; device=not-started audit present; EXACTLY-ONE terminal receipt per seq for 10,11,12,20,21,40,41"
+            Write-Host "D5 engine.log receipts: terminal-timeout + queued-behind declared, coalesced fold (21 by 20), classic pair resolved to exactly-one seq-40 terminal (superseded XOR loaded XOR kept; race timing is not contract), seq 41 failed; pending/queued >10s warnings fired; $stageCount stage receipts; device=not-started audit present; EXACTLY-ONE terminal receipt per seq for 10,11,12,20,21,40,41"
             $procD5.WaitForExit(20000) | Out-Null
             if (-not $procD5.HasExited -or $procD5.ExitCode -ne 0) { throw "Engine D5 did not exit cleanly (code=$($procD5.ExitCode))" }
             Write-Host "Engine D5 clean exit 0 (terminal-receipt invariant verified: no silent drops, ever)"
