@@ -2615,6 +2615,23 @@ immediate (1/s rate-limited) `[audio] clip counter +` receipt, and the [stop]
 receipt carries the cumulative `clipsTotal`. Per-bus gains + a soft limiter are
 the named NEXT milestone.
 
+### Kept entries apply the project's embedded state (M2 CI-closure revision)
+
+The diff contract says kept entries are "untouched" — but a load entry that
+explicitly carries a project state embed (`plugin.state` / `plugins[].state`)
+is a state DIRECTIVE, not an untouched instance: the PROJECT's state wins on
+every reload (deterministic project reloads — reopening the same project must
+not silently keep whatever the live instance happens to hold). The shared
+`applyEmbeddedState` helper serves both the instantiate path (added/changed,
+pre-commit `instance` unique_ptr) and the kept path (committed meta: the
+pointer duality — the live processor is `rawInstance`, the unique_ptr is null
+after commit; worker-thread reads are the documented discipline, the pointee
+is immortal-by-policy while the node is live). Documented order unchanged:
+instantiate → state → prepare; a restore failure never kills hosting. The
+WS-thread REUSE fast path (a PLAYING same-set reload) still does not apply
+embedded states — pre-existing behavior, unchanged; a state-carrying reload
+while rolling is the frontend's to defer.
+
 ### The CI fixture gained a second identity
 
 `scorch-test-synth-b` (same source, different PRODUCT_NAME/uid via compile

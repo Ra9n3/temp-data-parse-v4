@@ -5926,14 +5926,67 @@ int main(int argc, char** argv) {
             std::vector<EntryOutcome> outcomes(req.entries.size());
             bool superseded = false;
             bool abandoned = false;   // 0.9.2: the watchdog declared this seq terminal while we were jammed
+            // Stage 3d-3 (M2 kept-path revision): apply the project's
+            // embedded state to an instance — shared by the instantiate path
+            // (added/changed) and the KEPT path (an identical-identity entry
+            // that still carries a state embed: the PROJECT's state wins over
+            // whatever the live instance happens to hold — deterministic
+            // project reloads; without this the diff silently ignored the
+            // embed and the 3d-3 restore receipt vanished from the host
+            // phase-O round-trip). Same documented order: instantiate → state
+            // → prepare. A restore failure NEVER kills hosting.
+            auto applyEmbeddedState = [](HostedPlugin* h, const PluginInitEntry& e, long long seq) {
+                // The pointer duality (M1 InstanceSet): a PRE-COMMIT meta owns
+                // the plugin in `instance` (unique_ptr); a COMMITTED meta —
+                // which is what every KEPT entry resolves to — has instance==
+                // null and the live processor in `rawInstance` (worker reads
+                // are the documented discipline; the pointee is immortal-
+                // by-policy while the node is live).
+                juce::AudioPluginInstance* proc = nullptr;
+                if (h) proc = h->instance ? h->instance.get() : h->rawInstance.load(std::memory_order_acquire);
+                if (!h || !proc || e.stateB64.empty()) return;
+                // Decode via MemoryOutputStream backed by mb — and read the
+                // TRUE decoded size from the STREAM (mos.getDataSize()), not
+                // mb.getSize(): the stream commits its final size on flush,
+                // and reading the block early yields the PREALLOCATED
+                // capacity (empirically 224 vs the real 197 — the container
+                // format happened to be self-delimiting, but passing a
+                // capacity-garbage size to a plugin is a bug, not a
+                // contract).
+                juce::MemoryBlock mb;
+                juce::MemoryOutputStream mos(mb, false);
+                const bool decoded = juce::Base64::convertFromBase64(mos, juce::String(e.stateB64));
+                mos.flush();
+                const size_t restoredBytes = mos.getDataSize();
+                if (decoded && restoredBytes > 0 && restoredBytes <= kMaxPluginStateBytes * 2) {
+                    try {
+                        InitPhaseGuard pg("state-restore", e.instanceId, seq);   // 3f-6 watchdog phase
+                        proc->setStateInformation(mos.getData(), static_cast<int>(restoredBytes));
+                        engineLog("[plugin] state restored " + std::to_string(restoredBytes) +
+                                  " bytes (project embed) instance=" + e.instanceId);
+                    } catch (const std::exception& ex) {
+                        engineLog(std::string("[plugin] state restore FAILED: ") +
+                                  (ex.what() ? ex.what() : "unknown") + " — running on default state");
+                    } catch (...) {
+                        engineLog("[plugin] state restore FAILED: SEH/unknown — running on default state");
+                    }
+                } else {
+                    engineLog("[plugin] state restore SKIPPED — empty/oversized blob (" +
+                              std::to_string(e.stateB64.size()) + " b64 chars, decoded " +
+                              std::to_string(decoded ? restoredBytes : 0) + " bytes)");
+                }
+            };
             for (size_t i = 0; i < req.entries.size(); ++i) {
                 const PluginInitEntry& e = req.entries[i];
                 // KEPT entries skip the heavyweight path entirely — that is
                 // the diff contract (zero re-inits of untouched instances).
+                // An embedded state is NOT "untouched" though: apply it to the
+                // live instance (project's state wins).
                 if (std::find(keptIds.begin(), keptIds.end(), e.instanceId) != keptIds.end()) {
                     outcomes[i].diffClass = "kept";
                     outcomes[i].succeeded = true;
                     outcomes[i].committed = findLiveInstance(e.instanceId);
+                    applyEmbeddedState(outcomes[i].committed, e, req.seq);
                     continue;
                 }
                 outcomes[i].diffClass = std::find(changedIds.begin(), changedIds.end(), e.instanceId) != changedIds.end()
@@ -5980,38 +6033,10 @@ int main(int argc, char** argv) {
                 // real-device prepare (documented order: instantiate → state →
                 // prepare). A restore failure NEVER kills hosting: the receipt
                 // names it and the plugin runs on its default state.
-                if (!e.stateB64.empty() && h->instance) {
-                    // Decode via MemoryOutputStream backed by mb — and read the
-                    // TRUE decoded size from the STREAM (mos.getDataSize()), not
-                    // mb.getSize(): the stream commits its final size on flush,
-                    // and reading the block early yields the PREALLOCATED
-                    // capacity (empirically 224 vs the real 197 — the container
-                    // format happened to be self-delimiting, but passing a
-                    // capacity-garbage size to a plugin is a bug, not a
-                    // contract).
-                    juce::MemoryBlock mb;
-                    juce::MemoryOutputStream mos(mb, false);
-                    const bool decoded = juce::Base64::convertFromBase64(mos, juce::String(e.stateB64));
-                    mos.flush();
-                    const size_t restoredBytes = mos.getDataSize();
-                    if (decoded && restoredBytes > 0 && restoredBytes <= kMaxPluginStateBytes * 2) {
-                        try {
-                            InitPhaseGuard pg("state-restore", e.instanceId, req.seq);   // 3f-6 watchdog phase
-                            h->instance->setStateInformation(mos.getData(), static_cast<int>(restoredBytes));
-                            engineLog("[plugin] state restored " + std::to_string(restoredBytes) +
-                                      " bytes (project embed) instance=" + e.instanceId);
-                        } catch (const std::exception& ex) {
-                            engineLog(std::string("[plugin] state restore FAILED: ") +
-                                      (ex.what() ? ex.what() : "unknown") + " — running on default state");
-                        } catch (...) {
-                            engineLog("[plugin] state restore FAILED: SEH/unknown — running on default state");
-                        }
-                    } else {
-                        engineLog("[plugin] state restore SKIPPED — empty/oversized blob (" +
-                                  std::to_string(e.stateB64.size()) + " b64 chars, decoded " +
-                                  std::to_string(decoded ? restoredBytes : 0) + " bytes)");
-                    }
-                }
+                // (M2 kept-path revision: the block moved into the shared
+                // applyEmbeddedState helper — identical behavior here, plus
+                // kept entries with an embed now get the same treatment.)
+                applyEmbeddedState(h.get(), e, req.seq);
                 // ── M1-hotfix (heavy-load death): the legacy init-thread
                 // prepare, restored ──
                 // The migration dropped the worker-side real-device prepare and
