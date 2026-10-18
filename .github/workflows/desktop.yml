@@ -642,8 +642,12 @@ jobs:
           # in the engine; the CI proof returns with the capture rework.
           # Stage 3f-7 item 4b/4c: editor close + state capture BEGIN/END and
           # the closing-requested receipt (the closeEditor message path).
+          # M1 deferral contract: Test D contributes exactly TWO editor
+          # closes (phase F + the cycle finale); the pre-migration third+
+          # closes came from D2's two multi-instance editor windows, which
+          # return with the multi-instance milestone.
           $closingRequested = (Select-String -Path $engineLog -Pattern "\[editor\] closing requested instance=").Count
-          if ($closingRequested -lt 3) { throw "engine.log missing closing-requested receipts (got $closingRequested, need >= 3: test D closes + D2 retires close editors)" }
+          if ($closingRequested -lt 2) { throw "engine.log missing closing-requested receipts (got $closingRequested, need >= 2: test D's phase F close + the cycle finale close)" }
           $closeBegin = (Select-String -Path $engineLog -Pattern "\[editor\] close BEGIN instance=").Count
           if ($closeBegin -lt 1) { throw "engine.log missing editor close BEGIN receipts (got $closeBegin, need >= 1)" }
           $captureBegin = (Select-String -Path $engineLog -Pattern "\[plugin\] capture BEGIN instance=").Count
@@ -685,7 +689,13 @@ jobs:
           $editorFocusReceipts = (Select-String -Path $engineLog -Pattern "\[editor\] focus existing instance=").Count
           if ($editorFocusReceipts -lt 1) { throw "engine.log missing the repeat-open focus receipt" }
           $editorCloseReceipts = (Select-String -Path $engineLog -Pattern "\[editor\] closed instance=").Count
-          if ($editorCloseReceipts -lt 10) { throw "engine.log missing the editor close receipts (got $editorCloseReceipts, need >= 10: retire-closes per unload)" }
+          # M1 deferral contract: the cycle unloads close NO editors (the
+          # unload probes answer editor_unavailable — nothing was open), so
+          # the closed receipts are the real closes only (phase F + the
+          # cycle finale; the per-unload editor-close receipts of the old
+          # set-retire machinery are gone, and the >=10 bound returns with
+          # multi-instance).
+          if ($editorCloseReceipts -lt 2) { throw "engine.log missing the editor close receipts (got $editorCloseReceipts, need >= 2: test D's real closes)" }
           # Stage 3d-3: state persistence receipts — capture triggers (replace
           # from the re-hosts + editor-close + explicit requests) and TWO
           # restores (default round-trip + the diverged embed). The blob size
