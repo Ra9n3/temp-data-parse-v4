@@ -537,6 +537,112 @@ jobs:
             Remove-Item Env:\SCORCH_TESTVST_LOG -ErrorAction SilentlyContinue
           }
 
+          # Test D4 — M1-hotfix (heavy-load death): the 2026-10-18 class with a
+          # stand-in fixture. The engine runs with SCORCH_TESTVST_SLOW_CREATE_S=6
+          # (the fixture CONSTRUCTOR sleeps 6 s — the cold-instantiate shape) and
+          # SCORCH_TESTVST_SLOW_PREPARE_N=1 / _S=6 (the FIRST prepareToPlay call
+          # sleeps 6 s — with the hotfix that call is the worker's create-time
+          # prepare (the wrapper early-outs identical-settings re-prepares, so
+          # the fixture sees exactly one prepare per load); a regression that
+          # moves the first prepare ONTO the message thread makes the MM stall
+          # 6 s AFTER the prepared-(worker) receipt and the [mm] assertion
+          # below FAILS). The harness
+          # asserts over the wire: loadAck < 3 s (the async ack contract — the
+          # old fixed 4000 ms loadAck timer expired during the real Falcon
+          # death/restart window and the user read "reload failed"), plugin_state
+          # loaded >= 11 s (the sleeps really ran on the worker), play/ticks/
+          # peak/stop prove the engine fully alive behind a 12 s load.
+          Write-Host "=== Test D4: slow load (6s create + 6s worker prepare) — async ack contract + no MM wedge ==="
+          $env:SCORCH_TESTVST_LOG = "1"
+          $env:SCORCH_TESTVST_SLOW_CREATE_S = "6"
+          $env:SCORCH_TESTVST_SLOW_PREPARE_N = "1"
+          $env:SCORCH_TESTVST_SLOW_PREPARE_S = "6"
+          # Line offset into engine.log where D4 begins (the log is shared by
+          # every test in this step; the [mm] assertion must be isolated to
+          # THIS engine's session).
+          $engineLogD4 = Join-Path $env:APPDATA "scorch\engine.log"
+          $logLinesBeforeD4 = (Get-Content $engineLogD4).Count
+          $procD4 = Start-Process -FilePath "engine/build/scorch-engine.exe" -ArgumentList "--port","9385","--null-audio" -PassThru -NoNewWindow -RedirectStandardOutput "engine-d4-stdout.txt" -RedirectStandardError "engine-d4-stderr.txt"
+          Start-Sleep -Seconds 3
+          try {
+            if ($procD4.HasExited) {
+              Write-Host "Engine D4 exited early (code=$($procD4.ExitCode)). stdout:"
+              if (Test-Path engine-d4-stdout.txt) { Get-Content engine-d4-stdout.txt }
+              Write-Host "Engine D4 stderr:"
+              if (Test-Path engine-d4-stderr.txt) { Get-Content engine-d4-stderr.txt }
+              throw "Engine D4 process exited before test could connect"
+            }
+            node .github/scripts/test-engine-protocol.mjs 9385 slowload "$env:SCAN_FIXTURES"
+            if ($LASTEXITCODE -ne 0) {
+              Write-Host "Engine D4 stdout:"
+              if (Test-Path engine-d4-stdout.txt) { Get-Content engine-d4-stdout.txt }
+              Write-Host "Engine D4 stderr:"
+              if (Test-Path engine-d4-stderr.txt) { Get-Content engine-d4-stderr.txt }
+              throw "Engine D4 slowload test failed"
+            }
+            # Fixture-side proof: both sleeps were taken by the synth.
+            $fxCreate = Get-Content "engine-d4-stdout.txt" | Select-String -Pattern "\[testvst\] slow-create sleeping 6 s"
+            if (-not $fxCreate) { throw "M1-hotfix fixture-side proof missing: no '[testvst] slow-create sleeping 6 s' in the D4 stdout" }
+            $fxPrepare = Get-Content "engine-d4-stdout.txt" | Select-String -Pattern "\[testvst\] slow-prepare call=1 sleeping 6 s"
+            if (-not $fxPrepare) { throw "M1-hotfix fixture-side proof missing: no '[testvst] slow-prepare call=1 sleeping 6 s' — the worker-side create-time prepare did not run (call 1 is the worker's own prepare, BEFORE the commit job; the wrapper early-outs identical-settings re-prepares, so the fixture sees exactly ONE prepare per load)" }
+            Write-Host "M1-hotfix fixture-side proof: slow-create 6s + slow-prepare call=2 6s both taken"
+            # Engine.log receipts, isolated to the D4 session. The JUCE 8.0.4
+            # fact measured while building this test: the VST3 wrapper
+            # serializes a plugin's cold constructor AND its first
+            # prepareToPlay against the message thread (MessageManagerLock
+            # inside the wrapper — the plugin's work freezes the MM no matter
+            # which thread calls it). Those windows are STRUCTURAL (the stock
+            # AudioPluginHost has them too; the legacy 3c-era engine measured
+            # the same 5.7 s BBCSO freeze). The hotfix contract is therefore:
+            # (a) every window RECOVERS (the real Falcon loads DIED instead),
+            # (b) the window count is bounded (<= 2: create + worker prepare),
+            # (c) the GLUE-OWNED phases add no window: zero unresponsive
+            #     receipts after "[plugin] prepared (worker)" (the commit's
+            #     re-prepare early-outs at identical settings, the retire
+            #     capture is worker-side, publish is receipt-only).
+            $d4Lines = Get-Content $engineLogD4 | Select-Object -Skip $logLinesBeforeD4
+            $mmUnresp = @($d4Lines | Select-String -Pattern "\[mm\] message thread unresponsive")
+            $mmRecov  = @($d4Lines | Select-String -Pattern "\[mm\] message thread recovered")
+            if (($mmUnresp | Measure-Object).Count -gt 2) {
+              Write-Host $mmUnresp
+              throw "M1-hotfix: $(($mmUnresp | Measure-Object).Count) '[mm] unresponsive' windows exceed the structural bound of 2 (create + worker prepare) — an extra heavy phase ran on the message thread"
+            }
+            # At least one window must provably RECOVER (the real Falcon shape:
+            # wedge then DEATH — no recovery, no clean exit). A second window
+            # may legitimately lack its recovered line when the session ends
+            # within the heartbeat's 1 s cadence (shutdown race — observed
+            # locally); the clean-exit-0 proof below covers that case.
+            if (($mmRecov | Measure-Object).Count -lt 1) {
+              throw "M1-hotfix: no '[mm] recovered' receipt — a message-thread stall never recovered (the real Falcon shape: wedge then death)"
+            }
+            # (b) The worker-side prepare receipt (the legacy init-thread pattern
+            #     restored) — the load path must show it BEFORE the commit.
+            $preparedWorker = @($d4Lines | Select-String -Pattern "\[plugin\] prepared \(worker\)")
+            if (($preparedWorker | Measure-Object).Count -lt 1) { throw "M1-hotfix receipt missing: no '[plugin] prepared (worker)' in the D4 session — the legacy init-thread prepare did not run" }
+            # (c) Zero NEW unresponsive windows after the worker prepare: the
+            #     commit re-prepare early-outs, the retire capture is
+            #     worker-side, publish is receipt-only.
+            $pwLine = $preparedWorker[-1].LineNumber
+            $mmAfter = @($d4Lines | Select-String -Pattern "\[mm\] message thread unresponsive" | Where-Object { $_.LineNumber -gt $pwLine })
+            if (($mmAfter | Measure-Object).Count -ne 0) {
+              Write-Host $mmAfter
+              throw "M1-hotfix: a NEW '[mm] unresponsive' window opened AFTER the worker-side prepare — a glue-owned phase (commit/retire/publish) blocked the message thread"
+            }
+            # (d) The MM-commit guard stays silent (no commit FAILED receipt).
+            $commitFail = @($d4Lines | Select-String -Pattern "\[plugin\] commit FAILED")
+            if (($commitFail | Measure-Object).Count -ne 0) { throw "M1-hotfix: '[plugin] commit FAILED' receipt in the D4 session" }
+            Write-Host "M1-hotfix engine.log receipts: $(($mmUnresp | Measure-Object).Count) structural [mm] window(s), all recovered; 0 new windows after the worker prepare; 0 commit FAILED"
+            $procD4.WaitForExit(20000) | Out-Null
+            if (-not $procD4.HasExited -or $procD4.ExitCode -ne 0) { throw "Engine D4 did not exit cleanly (code=$($procD4.ExitCode))" }
+            Write-Host "Engine D4 clean exit 0 (heavy-load class verified: async ack, no MM wedge, engine alive)"
+          } finally {
+            Stop-Process -Id $procD4.Id -Force -ErrorAction SilentlyContinue
+            Remove-Item Env:\SCORCH_TESTVST_LOG -ErrorAction SilentlyContinue
+            Remove-Item Env:\SCORCH_TESTVST_SLOW_CREATE_S -ErrorAction SilentlyContinue
+            Remove-Item Env:\SCORCH_TESTVST_SLOW_PREPARE_N -ErrorAction SilentlyContinue
+            Remove-Item Env:\SCORCH_TESTVST_SLOW_PREPARE_S -ErrorAction SilentlyContinue
+          }
+
           # Test E — Stage 3c-hotfix: REAL-PROJECT-SIZED load. The CI gap was
           # scale; this closes it: a deterministic 13,824-event (~1.1 MB)
           # fixture is sent as ONE load message and the loadAck receipt must

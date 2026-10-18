@@ -192,7 +192,11 @@
 // ARRAY, not an absent field — unloads the live plugin (state captured
 // first). An ABSENT plugins field remains a score-only load that leaves the
 // plugin resident (the source-switch protection).
-// Engine version 0.8.7 → 0.9.0; protocol stays 1.
+// Engine version 0.9.0 → 0.9.1; protocol stays 1. 0.9.1 = the heavy-load
+// hotfix (worker-side prepare/capture, guarded MM commit, crash forensics).
+// NOTE for ghost-chasers: the host-core-v1 TAG already said 0.9.0 — a binary
+// reporting 0.8.7 is a STALE ARTIFACT (built at downbeat-preroll-v1), not a
+// host-core build.
 
 // MSVC needs _USE_MATH_DEFINES before <cmath> for M_PI.
 // NOMINMAX prevents windows.h (pulled in by JUCE/IXWebSocket) from defining
@@ -237,9 +241,164 @@
 #include <ixwebsocket/IXWebSocket.h>
 #include <ixwebsocket/IXWebSocketServer.h>
 
+// ─── M1-hotfix (heavy-load death): CRASH FORENSICS ───────────────────────
+// The 2026-10-18 defect: first heavy load (Falcon) → [mm] unresponsive 5–7 s
+// → process death → the shell respawned within its 2 s poll. Death mode was
+// UNNAVIGABLE: the shell spawns with stderr → null and no dump is captured
+// anywhere, and the engine's watchdogs are log-only by design (forensics,
+// not an executioner) — nothing in the engine, shell or frontend kills a
+// live process, so the death is a CRASH; but WHICH crash (an escaping
+// exception in the commit job, an AV inside plugin cold-init, an allocation
+// failure) was unknowable post-mortem. This block makes the next occurrence
+// NAME ITSELF:
+//   "[crash] kind=... code=... addr=... thread=... dump=<path>"
+// appended DIRECTLY to engine-crash.log BESIDE engine.log (%APPDATA%/scorch/
+// — the same directory the receipts live in; raw stdio append, NOT
+// engineLog(): the crashing thread may already hold the log mutex), plus a
+// minidump in %APPDATA%/scorch/crashes/ via MiniDumpWriteDump (dbghelp
+// loaded dynamically — no new link surface). Windows-only glue; other
+// platforms keep default termination. An atomic guard keeps
+// abort→SIGABRT→terminate cascades from logging twice. NO handler returns
+// into normal execution: after the receipt, default termination proceeds.
+#ifdef _WIN32
+#include <csignal>
+#include <shlobj.h>
+#include <dbghelp.h>
+#pragma comment(lib, "shell32.lib")
+
+namespace scorchcrash {
+std::atomic<bool> g_crashHandled{false};
+
+// <APPDATA>/scorch — the engine.log directory (JUCE userApplicationDataDirectory
+// on Windows is %APPDATA%, Roaming). Falls back to a CWD-relative name when
+// the shell-folder call fails (a crash handler must never give up entirely).
+bool crashLogDir(char* out, size_t outLen) {
+    char base[MAX_PATH];
+    if (FAILED(SHGetFolderPathA(nullptr, CSIDL_APPDATA, nullptr, 0, base)))
+        return false;
+    const int n = std::snprintf(out, outLen, "%s\\scorch", base);
+    return n > 0 && static_cast<size_t>(n) < outLen;
+}
+
+// Raw append — plain stdio so the handler never depends on JUCE, the log
+// mutex, or an allocation that could itself be the crash site.
+void rawReceipt(const char* kind, unsigned long code, const void* addr,
+                const char* dumpPath) {
+    char dir[MAX_PATH];
+    char path[MAX_PATH];
+    if (!crashLogDir(dir, sizeof(dir)))
+        std::snprintf(path, sizeof(path), "engine-crash.log");
+    else
+        std::snprintf(path, sizeof(path), "%s\\engine-crash.log", dir);
+    FILE* f = nullptr;
+    if (fopen_s(&f, path, "a") != 0 || f == nullptr) return;
+    const std::time_t tt = std::time(nullptr);
+    std::tm tm{};
+    localtime_s(&tm, &tt);
+    std::fprintf(f, "[%04d-%02d-%02d %02d:%02d:%02d] [crash] kind=%s code=0x%08lx addr=%p thread=%lu dump=%s\n",
+                 tm.tm_year + 1900, tm.tm_mon + 1, tm.tm_mday,
+                 tm.tm_hour, tm.tm_min, tm.tm_sec,
+                 kind, code, addr,
+                 static_cast<unsigned long>(GetCurrentThreadId()),
+                 dumpPath != nullptr ? dumpPath : "none");
+    std::fclose(f);
+}
+
+// Best-effort minidump in <APPDATA>/scorch/crashes/.
+void writeDump(EXCEPTION_POINTERS* ep, char* outPath, size_t outLen) {
+    outPath[0] = '\0';
+    char dir[MAX_PATH];
+    if (!crashLogDir(dir, sizeof(dir))) return;
+    char crashDir[MAX_PATH];
+    std::snprintf(crashDir, sizeof(crashDir), "%s\\crashes", dir);
+    CreateDirectoryA(crashDir, nullptr);   // exists-ok
+    const std::time_t tt = std::time(nullptr);
+    std::tm tm{};
+    localtime_s(&tm, &tt);
+    std::snprintf(outPath, outLen, "%s\\scorch-engine-%04d%02d%02d-%02d%02d%02d.dmp",
+                  crashDir, tm.tm_year + 1900, tm.tm_mon + 1, tm.tm_mday,
+                  tm.tm_hour, tm.tm_min, tm.tm_sec);
+    HMODULE dh = LoadLibraryA("dbghelp.dll");
+    if (dh == nullptr) { outPath[0] = '\0'; return; }
+    using MiniDumpWriteDumpFn = BOOL(WINAPI*)(HANDLE, DWORD, HANDLE,
+                                              MINIDUMP_TYPE, PMINIDUMP_EXCEPTION_INFORMATION,
+                                              PMINIDUMP_USER_STREAM_INFORMATION,
+                                              PMINIDUMP_CALLBACK_INFORMATION);
+    auto writeDumpFn = reinterpret_cast<MiniDumpWriteDumpFn>(
+        reinterpret_cast<void*>(GetProcAddress(dh, "MiniDumpWriteDump")));
+    if (writeDumpFn == nullptr) { outPath[0] = '\0'; return; }
+    HANDLE file = CreateFileA(outPath, GENERIC_WRITE, 0, nullptr,
+                              CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (file == INVALID_HANDLE_VALUE) { outPath[0] = '\0'; return; }
+    MINIDUMP_EXCEPTION_INFORMATION mei{};
+    mei.ThreadId = GetCurrentThreadId();
+    mei.ExceptionPointers = ep;
+    mei.ClientPointers = FALSE;
+    writeDumpFn(GetCurrentProcess(), GetCurrentProcessId(), file,
+                MiniDumpNormal, ep != nullptr ? &mei : nullptr, nullptr, nullptr);
+    CloseHandle(file);
+}
+
+LONG WINAPI sehFilter(EXCEPTION_POINTERS* ep) {
+    if (g_crashHandled.exchange(true) == false && ep != nullptr && ep->ExceptionRecord != nullptr) {
+        char dump[MAX_PATH];
+        writeDump(ep, dump, sizeof(dump));
+        rawReceipt("seh", ep->ExceptionRecord->ExceptionCode,
+                   ep->ExceptionRecord->ExceptionAddress, dump);
+    }
+    return EXCEPTION_EXECUTE_HANDLER;   // default unwinding proceeds — we never continue
+}
+
+void signalReceipt(int sig) {
+    if (g_crashHandled.exchange(true) == false) {
+        char dump[MAX_PATH];
+        writeDump(nullptr, dump, sizeof(dump));
+        rawReceipt("signal", static_cast<unsigned long>(sig), nullptr, dump);
+    }
+    // Restore default and re-raise so the process still terminates the
+    // normal way with the normal exit code.
+    std::signal(sig, SIG_DFL);
+    std::raise(sig);
+}
+
+[[noreturn]] void terminateReceipt() {
+    if (g_crashHandled.exchange(true) == false) {
+        char dump[MAX_PATH];
+        writeDump(nullptr, dump, sizeof(dump));
+        rawReceipt("terminate", 0, nullptr, dump);
+    }
+    std::abort();
+}
+
+void invalidParameterHandler(const wchar_t*, const wchar_t*, const wchar_t*,
+                             unsigned int, uintptr_t) {
+    if (g_crashHandled.exchange(true) == false)
+        rawReceipt("invalid-parameter", 0, nullptr, nullptr);
+    // CRT invalid-parameter errors normally fast-fail — let them.
+}
+
+void purecallReceipt() {
+    if (g_crashHandled.exchange(true) == false)
+        rawReceipt("purecall", 0, nullptr, nullptr);
+    std::abort();
+}
+
+void install() {
+    SetUnhandledExceptionFilter(sehFilter);
+    std::signal(SIGABRT, signalReceipt);
+    std::signal(SIGSEGV, signalReceipt);
+    std::signal(SIGFPE, signalReceipt);
+    std::signal(SIGILL, signalReceipt);
+    std::set_terminate(terminateReceipt);
+    _set_invalid_parameter_handler(invalidParameterHandler);
+    _set_purecall_handler(purecallReceipt);
+}
+} // namespace scorchcrash
+#endif // _WIN32
+
 namespace {
 
-constexpr const char* kEngineVersion = "0.9.0";
+constexpr const char* kEngineVersion = "0.9.1";
 constexpr int kProtocolVersion = 1;
 constexpr int kDefaultPort = 9377;
 constexpr int kMaxVoices = 64;
@@ -1413,6 +1572,13 @@ uint64_t g_pluginInitGen = 0;            // guarded; bumped per queued request
 // swapped-in instance only at the next device start was the mis-prepared
 // half of the empty-score regression).
 std::atomic<int> g_deviceBufferSize{512};
+// M1-hotfix (heavy-load death): true once audioDeviceAboutToStart ran for a
+// real or null device. g_engine.sampleRate cannot serve this role — it
+// initializes to 44100.0 (a legal device rate), so "device not started yet"
+// is not derivable from the rate alone. The init worker's worker-side
+// real-device prepare (the legacy init-thread pattern) reads this to pick
+// device settings vs the graph's current (nominal) settings.
+std::atomic<bool> g_deviceStarted{false};
 
 // Dispatch ledger: what the callback ACTUALLY dispatched (post-gating), for
 // CI assertions (pre-trigger arithmetic, routing, gating). Single producer
@@ -1964,6 +2130,7 @@ public:
         if (device == nullptr) return;
         g_engine.sampleRate.store(device->getCurrentSampleRate());
         g_deviceBufferSize.store(static_cast<int>(device->getCurrentBufferSizeSamples()));
+        g_deviceStarted.store(true, std::memory_order_release);   // M1-hotfix: worker-side prepare reads this
         // Milestone 1: the graph re-prepares on the MESSAGE THREAD (the
         // vendor's discipline — the Nodes table and the rebuild are
         // message-thread objects; the old device-thread per-instance loop is
@@ -4340,13 +4507,19 @@ void handle_capture_state() {
 
 // Milestone 1 — the vendor retire job. Runs ON the message thread (the
 // graph's Nodes table is message-thread property): close the instance's
-// editor (receipted, synchronous — we ARE the message thread), capture the
-// outgoing state (receipted + broadcast — the user's patches survive the
-// reload), then the vendor's removeNode. FIFO callAsync ordering guarantees
-// a retire enqueued before a commit lands before it — the load flow relies
-// on this for replace semantics. The meta pointer is exchanged to nullptr
-// FIRST: the dispatch layer stops feeding the plugin from the next buffer.
-void retireLiveNodeOnMessageThread() {
+// editor (receipted, synchronous — we ARE the message thread), optionally
+// capture the outgoing state, then the vendor's removeNode. FIFO callAsync
+// ordering guarantees a retire enqueued before a commit lands before it —
+// the load flow relies on this for replace semantics. The meta pointer is
+// exchanged to nullptr FIRST: the dispatch layer stops feeding the plugin
+// from the next buffer.
+// M1-hotfix (heavy-load death): captureState defaults TRUE (unload and the
+// superseded-commit path capture here) but the REPLACE path passes false —
+// its capture moved to the init worker (trigger "replace (worker)") because
+// a heavyweight library's getStateInformation is seconds-class and must
+// never run inside a message-thread job. Editor close stays here: window
+// teardown is message-thread property and is not seconds-class.
+void retireLiveNodeOnMessageThread(bool captureState = true) {
     HostedPlugin* old = g_hostMeta.exchange(nullptr, std::memory_order_acq_rel);
     if (old == nullptr) {
         engineLog("[plugin] retire SKIPPED — no live instance at message-thread run");
@@ -4354,8 +4527,11 @@ void retireLiveNodeOnMessageThread() {
     }
     destroyEditorWindow(old->instanceId, false);   // the editor must not outlive the node
     juce::AudioPluginInstance* inst = old->rawInstance.load(std::memory_order_acquire);
-    if (inst != nullptr)
+    if (captureState && inst != nullptr)
         captureAndBroadcastState(inst, *old, "replace");
+    else if (!captureState)
+        engineLog("[plugin] retire capture SKIPPED — already captured on the init worker instance=" +
+                  old->instanceId);
     const auto t0 = std::chrono::steady_clock::now();
     auto node = g_host.removeLiveNode();
     old->rawInstance.store(nullptr, std::memory_order_release);
@@ -4394,6 +4570,14 @@ int main(int argc, char** argv) {
             return runProbeWorker(argv[i + 1], argv[i + 2]);
         }
     }
+
+#ifdef _WIN32
+    // M1-hotfix: crash forensics FIRST — before any thread, any JUCE, any
+    // socket. The next heavy-load death names itself ([crash] receipt +
+    // minidump) instead of leaving a [mm] wedge and a respawn as the only
+    // evidence.
+    scorchcrash::install();
+#endif
 
     int port = kDefaultPort;
     for (int i = 1; i < argc; ++i) {
@@ -4791,15 +4975,28 @@ int main(int argc, char** argv) {
             }
             // ── Milestone 1: EXPLICIT UNLOAD ({"plugins": []}) ──
             // The live instance retires through the vendor path: editor close
-            // → state capture → removeNode, one message-thread job. No
-            // plugin_state follows (matching the old vanished-group behavior
-            // — the frontend knows the group it removed).
+            // → removeNode, one message-thread job. No plugin_state follows
+            // (matching the old vanished-group behavior — the frontend knows
+            // the group it removed). M1-hotfix: the state capture runs HERE on
+            // the worker (trigger "unload (worker)") — a heavyweight
+            // library's getStateInformation must never sit inside a
+            // message-thread job (the same seconds-class MM exposure the
+            // replace path had).
             if (req.unload) {
                 engineLog("[plugin] unload running | seq " + std::to_string(req.seq) +
-                          " — retiring the live instance (editor close → state capture → vendor removeNode)");
+                          " — retiring the live instance (worker capture → editor close → vendor removeNode)");
+                if (g_host.live()) {
+                    HostedPlugin* oldMeta = g_hostMeta.load(std::memory_order_acquire);
+                    if (oldMeta != nullptr) {
+                        juce::AudioPluginInstance* oldInst =
+                            oldMeta->rawInstance.load(std::memory_order_acquire);
+                        if (oldInst != nullptr)
+                            captureAndBroadcastState(oldInst, *oldMeta, "unload (worker)");
+                    }
+                }
                 auto doneU = std::make_shared<std::atomic<bool>>(false);
                 juce::MessageManager::callAsync([doneU] {
-                    retireLiveNodeOnMessageThread();
+                    retireLiveNodeOnMessageThread(false);
                     doneU->store(true, std::memory_order_release);
                 });
                 const auto tu0 = std::chrono::steady_clock::now();
@@ -4912,13 +5109,87 @@ int main(int argc, char** argv) {
                                   std::to_string(decoded ? restoredBytes : 0) + " bytes)");
                     }
                 }
+                // ── M1-hotfix (heavy-load death): the legacy init-thread
+                // prepare, restored ──
+                // The migration dropped the worker-side real-device prepare and
+                // let the graph's inline rebuild call plugin prepareToPlay ON
+                // THE MESSAGE THREAD (the vendor's NodeStates::applySettings
+                // prepares every unprepared node on the main thread — its
+                // documented invariant). For a heavyweight library that put a
+                // multi-second plugin call inside a message-thread job: the
+                // [mm] heartbeat named 5–7 s unresponsive during the user's
+                // Falcon loads, and the commit lambda (then unguarded) died
+                // with the process. The legacy pattern (Stage 3c-regression →
+                // 3e-3, the old code's comments document exactly why): the
+                // WORKER prepares the instance for the real device BEFORE the
+                // instance becomes visible to the audio callback. The vendor's
+                // per-node prepare on the MM still runs (its invariant, not
+                // ours to remove — no vendored-core modifications) — but it
+                // now lands on an instance already prepared at IDENTICAL
+                // settings: the cheap re-prepare, not the cold one.
+                // Order preserved (documented 3d-3): instantiate → state →
+                // prepare → commit.
+                {
+                    const double prepRate = g_deviceStarted.load(std::memory_order_acquire)
+                                                ? g_engine.sampleRate.load()
+                                                : g_host.sampleRate();
+                    const int prepBuf = g_deviceStarted.load(std::memory_order_acquire)
+                                            ? g_deviceBufferSize.load()
+                                            : g_host.blockSize();
+                    if (h != nullptr && h->instance) {
+                        InitPhaseGuard pg("prepare", e.instanceId);   // 3f-6 watchdog phase
+                        // Stage 3e-2: playhead re-asserted before the prepare
+                        // (plugins cache the pointer; re-assert is cheap and
+                        // proof against wrapper resets).
+                        h->instance->setPlayHead(&g_audioCallback.playHead);
+                        h->instance->setPlayConfigDetails(0, 2, prepRate, prepBuf);
+                        // Stage 3e-3: the negotiation disables non-main output
+                        // buses — re-enable ALL output buses AFTER it (same
+                        // ordering as loadHostedPlugin and AboutToStart).
+                        for (int b = 0; b < h->instance->getBusCount(false); ++b)
+                            if (auto* bus = h->instance->getBus(false, b)) bus->enable(true);
+                        h->instance->prepareToPlay(prepRate, prepBuf);
+                        const int preparedLat =
+                            static_cast<int>(h->instance->getLatencySamples());
+                        h->latencySamples = static_cast<double>(preparedLat);
+                        engineLog("[plugin] prepared (worker) rate=" +
+                                  std::to_string(static_cast<int>(prepRate)) +
+                                  " buffer=" + std::to_string(prepBuf) +
+                                  " latencySamples=" + std::to_string(preparedLat) +
+                                  " instance=" + e.instanceId +
+                                  (g_deviceStarted.load(std::memory_order_acquire)
+                                       ? " (real device)"
+                                       : " (nominal — device not started yet; AboutToStart re-prepares)") +
+                                  " — pre-commit: the graph's message-thread prepare is a same-settings re-prepare");
+                    }
+                }
+                // ── M1-hotfix (heavy-load death): the retire's state capture
+                // moved BACK to the worker ──
+                // The migration put captureAndBroadcastState inside the
+                // message-thread retire job; for a heavyweight outgoing
+                // library getStateInformation is seconds-class ON THE MM (the
+                // legacy code documented it host-callable from ANY thread and
+                // captured on this worker — trigger "replace"). Captured here,
+                // before the retire job is queued; the job below only closes
+                // the editor and removes the node.
+                if (g_host.live()) {
+                    HostedPlugin* oldMeta = g_hostMeta.load(std::memory_order_acquire);
+                    if (oldMeta != nullptr) {
+                        juce::AudioPluginInstance* oldInst =
+                            oldMeta->rawInstance.load(std::memory_order_acquire);
+                        if (oldInst != nullptr)
+                            captureAndBroadcastState(oldInst, *oldMeta, "replace (worker)");
+                    }
+                }
                 // ── Milestone 1 COMMIT: the vendor's node lifecycle ──
-                // The graph prepares the node itself at the graph's current
-                // settings (real device if audioDeviceAboutToStart already
-                // reconfigured, else nominal until it does) — the worker-side
-                // real-device prepare is gone. What remains here: retire the
-                // outgoing instance (editor close → state capture → removeNode,
-                // ONE message-thread job), then commit (addPluginNode, whose
+                // The graph still prepares the node itself at the graph's
+                // current settings (its prepare-on-main-thread invariant — not
+                // ours to remove), but the M1-hotfix worker-side prepare above
+                // lands FIRST at identical settings, so the message-thread
+                // call is a cheap re-prepare, never the cold one. What remains
+                // here: retire the outgoing instance (editor close →
+                // removeNode, ONE message-thread job — its state capture moved
+                // to the worker above), then commit (addPluginNode, whose
                 // inline rebuild prepares at the graph's settings and makes
                 // the latency real), then the receipts.
                 if (!e.routing.empty()) {
@@ -4934,9 +5205,12 @@ int main(int argc, char** argv) {
                 }
                 {
                     InitPhaseGuard pg("commit", e.instanceId);   // 3f-6 watchdog phase
-                    // (a) retire-first: ONE MM job (editor close → capture →
-                    //     removeNode). FIFO puts it before the commit job.
-                    juce::MessageManager::callAsync([] { retireLiveNodeOnMessageThread(); });
+                    // (a) retire-first: ONE MM job (editor close → removeNode).
+                    //     FIFO puts it before the commit job. The state capture
+                    //     already ran on the worker (M1-hotfix) — the MM job
+                    //     must not repeat it (captureState=false).
+                    juce::MessageManager::callAsync(
+                        [] { retireLiveNodeOnMessageThread(false); });
                     // (b) commit: ownership moves here — the meta into the
                     //     graveyard (retained to exit: the LatencyListener must
                     //     outlive the instance, which the vendor may keep in an
@@ -4955,46 +5229,70 @@ int main(int argc, char** argv) {
                         }
                         auto inst = std::move(m->instance);   // the graph owns it from here
                         const auto tN = std::chrono::steady_clock::now();
-                        auto node = g_host.addPluginNode(std::move(inst));
-                        if (node == nullptr) {
-                            engineLog("[plugin] commit FAILED — the host graph refused the node | seq " +
-                                      std::to_string(seqSnapshot) + " instance=" + iid);
-                            committed->store(true, std::memory_order_release);
-                            return;
+                        // M1-hotfix (heavy-load death): this lambda runs on the
+                        // message thread and calls INTO PLUGIN CODE (the
+                        // vendor's inline rebuild → NodeStates::applySettings →
+                        // prepareToPlay on the main thread). Uncaught, an
+                        // exception or SEH here escaped runDispatchLoop →
+                        // std::terminate → process death — the user's Falcon
+                        // loads died exactly like that and the engine's
+                        // watchdogs (all log-only) never had a chance. The MM
+                        // has no realtime constraint, so a guard is safe; the
+                        // audio thread NEVER gains one. The vendor's builder
+                        // assembles a NEW sequence locally and swaps at the
+                        // end, so a throw leaves the previously-built sequence
+                        // live — the failure is contained and receipted.
+                        try {
+                            auto node = g_host.addPluginNode(std::move(inst));
+                            if (node == nullptr) {
+                                engineLog("[plugin] commit FAILED — the host graph refused the node | seq " +
+                                          std::to_string(seqSnapshot) + " instance=" + iid);
+                                committed->store(true, std::memory_order_release);
+                                return;
+                            }
+                            m->nodeID = node->nodeID;
+                            m->rawInstance.store(
+                                dynamic_cast<juce::AudioPluginInstance*>(node->getProcessor()),
+                                std::memory_order_release);
+                            // Milestone 1 silence fix, second half: the GRAPH's
+                            // playhead. The graph forwards getPlayHead() to every
+                            // node at every block (NodeOp::process), overwriting
+                            // any per-instance setPlayHead — the graph-level
+                            // pointer is the one that survives. Re-asserted at
+                            // every device start (reconfigureForDevice).
+                            g_host.setPlayhead(&g_audioCallback.playHead);
+                            g_hostMeta.store(m, std::memory_order_release);
+                            const long long liveMs = std::chrono::duration_cast<std::chrono::milliseconds>(
+                                std::chrono::steady_clock::now() - tN).count();
+                            // The midi-input wiring receipt: the graph's incoming
+                            // MidiBuffer reaches the plugin ONLY through the
+                            // midiInputNode connection (the vendor's MidiInOp) —
+                            // without it the sequence hands the plugin a cleared
+                            // buffer and no note ever arrives.
+                            const auto midiInID = g_host.midiInputNodeID();
+                            const bool midiWired = midiInID.uid != 0 &&
+                                node->getProcessor() != nullptr &&
+                                node->getProcessor()->acceptsMidi() &&
+                                g_host.graph() != nullptr &&
+                                g_host.graph()->isConnected (midiInID, node->nodeID);
+                            engineLog("[plugin] node live instance=" + iid +
+                                      " nodeUID=" + std::to_string(node->nodeID.uid) +
+                                      " midiIn=" + (midiInID.uid != 0 ? std::to_string(midiInID.uid) : "none") +
+                                      " midiWired=" + (midiWired ? "1" : "0") +
+                                      " liveMs=" + std::to_string(liveMs) +
+                                      " (graph prepared at rate " +
+                                      std::to_string(static_cast<int>(g_host.sampleRate())) +
+                                      " buffer " + std::to_string(g_host.blockSize()) + ")");
+                        } catch (const std::exception& ex) {
+                            engineLog("[plugin] commit FAILED exception=" +
+                                      std::string(ex.what() ? ex.what() : "unknown") +
+                                      " | seq " + std::to_string(seqSnapshot) + " instance=" + iid +
+                                      " — the previously-built render sequence stays live; the plugin is NOT hosted");
+                        } catch (...) {
+                            engineLog("[plugin] commit FAILED SEH/unknown | seq " +
+                                      std::to_string(seqSnapshot) + " instance=" + iid +
+                                      " — the previously-built render sequence stays live; the plugin is NOT hosted");
                         }
-                        m->nodeID = node->nodeID;
-                        m->rawInstance.store(
-                            dynamic_cast<juce::AudioPluginInstance*>(node->getProcessor()),
-                            std::memory_order_release);
-                        // Milestone 1 silence fix, second half: the GRAPH's
-                        // playhead. The graph forwards getPlayHead() to every
-                        // node at every block (NodeOp::process), overwriting
-                        // any per-instance setPlayHead — the graph-level
-                        // pointer is the one that survives. Re-asserted at
-                        // every device start (reconfigureForDevice).
-                        g_host.setPlayhead(&g_audioCallback.playHead);
-                        g_hostMeta.store(m, std::memory_order_release);
-                        const long long liveMs = std::chrono::duration_cast<std::chrono::milliseconds>(
-                            std::chrono::steady_clock::now() - tN).count();
-                        // The midi-input wiring receipt: the graph's incoming
-                        // MidiBuffer reaches the plugin ONLY through the
-                        // midiInputNode connection (the vendor's MidiInOp) —
-                        // without it the sequence hands the plugin a cleared
-                        // buffer and no note ever arrives.
-                        const auto midiInID = g_host.midiInputNodeID();
-                        const bool midiWired = midiInID.uid != 0 &&
-                            node->getProcessor() != nullptr &&
-                            node->getProcessor()->acceptsMidi() &&
-                            g_host.graph() != nullptr &&
-                            g_host.graph()->isConnected (midiInID, node->nodeID);
-                        engineLog("[plugin] node live instance=" + iid +
-                                  " nodeUID=" + std::to_string(node->nodeID.uid) +
-                                  " midiIn=" + (midiInID.uid != 0 ? std::to_string(midiInID.uid) : "none") +
-                                  " midiWired=" + (midiWired ? "1" : "0") +
-                                  " liveMs=" + std::to_string(liveMs) +
-                                  " (graph prepared at rate " +
-                                  std::to_string(static_cast<int>(g_host.sampleRate())) +
-                                  " buffer " + std::to_string(g_host.blockSize()) + ")");
                         committed->store(true, std::memory_order_release);
                     });
                     // (c) bounded, exit-aware wait — the worker must not race

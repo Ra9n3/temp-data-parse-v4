@@ -395,6 +395,8 @@ const timeout = setTimeout(() => {
     console.error(`TIMEOUT at step ${step} phase=${hostPhase} (scan=${hostScanSent} hostHwnd=${hostHwndSetOk} pluginState=${hostPluginStateOk} editorNeg=${hostEditorNegOk} editorOpen=${hostEditorOpenOk} editorFocus=${hostEditorFocusOk} editorClose=${hostEditorCloseOk} stateCap=${hostStateCaptureOk} stateRestore=${hostStateRestoreOk} stateRT=${hostStateRoundtripOk} reloadAck=${hostReloadAckOk} reject=${hostRejectOk} stillPlaying=${hostPlayingAfterReject} stops=${hostStopTick1}/${hostStopTick2} peaks A/B/C=${hostPeakA.toFixed(3)}/${hostPeakB.toFixed(3)}/${hostPeakC.toFixed(3)} entries=${hostEntries.length})`);
   } else if (mode === "multi") {
     console.error(`TIMEOUT at step ${step} phase=${multiPhase} (scan=${multiScanPlugin ? "ok" : "none"} loaded=${[...multiLoaded].join(",")} reuse=${multiReuseOk} reject=${multiRejectOk} peak=${multiPeak.toFixed(3)} wideA=${multiWideA} wideB=${multiWideB} editors=${multiEdOpenB}/${multiEdFocusB}/${multiEdOpenA}/${multiEdCloseA}/${multiEdCloseB} headlessSkip=${multiHeadlessSkip} captures=${[...multiCapIds].join(",")} entries=${multiLedger.length} stall3h=${multi3hLoaded}/2)`);
+  } else if (mode === "slowload") {
+    console.error(`TIMEOUT at step ${step} phase=${slPhase} (scan=${slScanPlugin ? "ok" : "none"} ack=${slAckOk} ackMs=${slAckMs} loaded=${slLoadedOk} loadedMs=${slLoadedMs} play=${slPlayOk} ticks=${slTicksOk} peak=${slPeak.toFixed(3)} stop=${slStopOk})`);
   } else {
     console.error(`TIMEOUT at step ${step} (hello=${helloOk} pong=${pongOk} load=${loadOk} noDeviceErr=${noDeviceErrOk} pongAfterErr=${pongAfterErrOk} stillFunctional=${stillFunctionalOk})`);
   }
@@ -406,7 +408,7 @@ const timeout = setTimeout(() => {
 // loaded-receipt bound is asserted EXPLICITLY per phase below — but the
 // wall-clock budget still covers them, plus the Stage 3h stall probe (a 2.5 s
 // audio freeze + its tail): 120 s.
-}, mode === "scan" ? 180000 : mode === "host" ? 150000 : mode === "multi" ? 120000 : mode === "latency" ? 90000 : 30000);
+}, mode === "scan" ? 180000 : mode === "host" ? 150000 : mode === "multi" ? 120000 : mode === "latency" ? 90000 : mode === "slowload" ? 90000 : 30000);
 
 // scan-mode flags
 let scanSent = false, scanResultOk = false, aliveAfterCrashOk = false, defaultScanOk = false;
@@ -421,6 +423,48 @@ let latLastTick = 0;           // last observed transport tick (playing states)
 let latTickAtLoad = {};        // seq → tick when that load was SENT (each CC rides lastTick + 960)
 let latErrorAfterLoad = false;
 let latLedger = [];            // Phase 2: dispatch ledger entries (dispatch_log enabled after hello; the downbeat pre-fire proof reads it at close)
+
+// ── M1-hotfix: slowload mode (the heavy-load death class, stand-in shape) ──
+// The engine runs with SCORCH_TESTVST_SLOW_CREATE_S=6 (the fixture's
+// CONSTRUCTOR sleeps 6 s = the cold-instantiate shape) and
+// SCORCH_TESTVST_SLOW_PREPARE_N=1 / _S=6 (the FIRST prepareToPlay sleeps 6 s
+// = the worker's create-time prepare; JUCE's wrapper early-outs
+// identical-settings re-prepares, so the fixture sees exactly one prepare
+// call per load). Wire assertions:
+//   loadAck < 3 s after the send (the ASYNC ACK contract — the loadAck is
+//     the enqueue receipt and must never wait behind plugin init; the old
+//     fixed 4000 ms timer expired DURING the death/restart window of the
+//     real Falcon loads and the user read "reload failed");
+//   plugin_state loaded >= (create + prepare - 1) s after the send (the
+//     worker really ran both sleeps — nothing shortcut the init);
+//   play -> ticks ADVANCE -> audible peak -> clean stop (the engine is
+//     fully alive behind a 12 s load).
+// Engine.log side (asserted by desktop.yml), with the JUCE 8.0.4 fact this
+// mode DOCUMENTED empirically: the VST3 wrapper serializes a plugin's cold
+// constructor AND its first prepareToPlay against the message thread
+// (MessageManagerLock inside the wrapper — the plugin's work freezes the MM
+// no matter which thread calls it; createPluginInstance and prepareToPlay
+// were both measured freezing the MM for the fixture's whole sleep). Those
+// windows are STRUCTURAL — the stock AudioPluginHost has them too. What the
+// hotfix guarantees is: (a) the engine SURVIVES them (every unresponsive
+// window ends in a recovered receipt — the real Falcon loads died with the
+// process instead), (b) the GLUE-OWNED phases (commit re-prepare early-out,
+// worker-side retire capture, publish) never ADD a window — no unresponsive
+// receipt after "[plugin] prepared (worker)".
+const SLOW_CREATE_S = parseInt(process.env.SCORCH_TESTVST_SLOW_CREATE_S ?? "0", 10) || 0;
+const SLOW_PREPARE_S = parseInt(process.env.SCORCH_TESTVST_SLOW_PREPARE_S ?? "0", 10) || 0;
+const SLOW_TOTAL_MS = Math.max(0, (SLOW_CREATE_S + SLOW_PREPARE_S - 1)) * 1000;
+const SLOW_META = { bpm: 120, ppqn: 960, timeSignature: { numerator: 4, denominator: 4 }, endTick: 8448 };
+const slowEvents = [
+  { eventType: "CONTROL_CHANGE", channel: 1, data1: 7, data2: 127, timestampTicks: 0, trackId: "t1" },
+  { eventType: "CONTROL_CHANGE", channel: 1, data1: 11, data2: 127, timestampTicks: 0, trackId: "t1" },
+  { eventType: "NOTE_ON", channel: 1, data1: 60, data2: 100, timestampTicks: 480, trackId: "t1" },
+  { eventType: "NOTE_OFF", channel: 1, data1: 60, data2: 0, timestampTicks: 8448, trackId: "t1" },
+];
+let slPhase = 0;        // 0 hello, 1 scan, 2 loading, 3 playing, 4 stopping
+let slScanPlugin = null;
+let slAckOk = false, slLoadedOk = false, slPlayOk = false, slTicksOk = false, slStopOk = false;
+let slAckMs = -1, slLoadedMs = -1, slSendMs = 0, slPeak = 0;
 
 // The fixture's plugin_state latencyMs = (h->latencySamples + 512) / 44100 * 1000
 // (the engine's standing receipts formula) — this helper is the EXPECTED value
@@ -813,9 +857,9 @@ ws.addEventListener("message", (event) => {
     }
     if (msg.type === "hello" && multiPhase === 0) {
       if (msg.protocol !== 1) fail(`expected protocol 1, got ${msg.protocol}`);
-      if (msg.engineVersion !== "0.9.0") fail(`expected 0.9.0, got ${msg.engineVersion}`);
+      if (msg.engineVersion !== "0.9.1") fail(`expected 0.9.1, got ${msg.engineVersion}`);
       if (!fixtureDir) fail("multi mode requires a fixture dir argument");
-      console.log("[test] hello OK (0.9.0) — deferral contract: scanning for the stand-in host plugin...");
+      console.log("[test] hello OK (0.9.1) — deferral contract: scanning for the stand-in host plugin...");
       multiPhase = 1;
       ws.send(JSON.stringify({ type: "scan", dirs: [fixtureDir] }));
     } else if (msg.type === "scan_result" && multiPhase === 1) {
@@ -881,6 +925,61 @@ ws.addEventListener("message", (event) => {
     } else if (msg.type === "state" && multiPhase === 6 && msg.playing === false) {
       console.log("[test] phase D-5 ✓ clean stop — deferral contract complete");
       multiPhase = 7;
+      finishAndShutdown();
+    }
+  } else if (mode === "slowload") {
+    // ── M1-hotfix: the heavy-load death class (see the state block above) ──
+    if (msg.type === "hello" && slPhase === 0) {
+      if (msg.protocol !== 1) fail(`expected protocol 1, got ${msg.protocol}`);
+      if (msg.engineVersion !== "0.9.1") fail(`expected 0.9.1, got ${msg.engineVersion}`);
+      if (!fixtureDir) fail("slowload mode requires a fixture dir argument");
+      helloOk = true;
+      console.log(`[test] hello OK (0.9.1) — slow-load knobs: create=${SLOW_CREATE_S}s prepareN=${process.env.SCORCH_TESTVST_SLOW_PREPARE_N ?? 0}(x${SLOW_PREPARE_S}s) — scanning...`);
+      slPhase = 1;
+      ws.send(JSON.stringify({ type: "scan", dirs: [fixtureDir] }));
+    } else if (msg.type === "scan_result" && slPhase === 1) {
+      const valid = (msg.plugins ?? []).find((p) => p.name === "Scorch Test Synth");
+      if (!valid) fail(`slowload: stand-in plugin not found in scan (${JSON.stringify(msg.plugins)})`);
+      slScanPlugin = valid;
+      console.log(`[test] stand-in found: "${valid.name}" — loading with the slow-create/slow-prepare knobs armed (seq 1)`);
+      slPhase = 2;
+      slSendMs = Date.now();
+      ws.send(JSON.stringify({
+        type: "load",
+        seq: 1,
+        events: slowEvents,
+        meta: SLOW_META,
+        channels: { t1: 1 },
+        plugin: { uid: valid.uid, path: valid.path, name: valid.name },
+      }));
+    } else if (msg.type === "loadAck" && slPhase === 2 && msg.seq === 1) {
+      slAckMs = Date.now() - slSendMs;
+      slAckOk = slAckMs < 3000;
+      if (!slAckOk) fail(`slowload: loadAck arrived after ${slAckMs} ms — the async ack contract is broken (loadAck is the ENQUEUE receipt; it must arrive while the fixture constructor is still sleeping ${SLOW_CREATE_S}s)`);
+      console.log(`[test] loadAck OK after ${slAckMs} ms (< 3000 ms; the fixture constructor is still sleeping) — awaiting plugin_state loaded`);
+    } else if (msg.type === "plugin_state" && slPhase === 2 && msg.state === "loaded" && msg.instanceId === "hosted") {
+      slLoadedMs = Date.now() - slSendMs;
+      if (SLOW_TOTAL_MS > 0 && slLoadedMs < SLOW_TOTAL_MS)
+        fail(`slowload: plugin_state loaded arrived after ${slLoadedMs} ms — expected >= ${SLOW_TOTAL_MS} ms (create ${SLOW_CREATE_S}s + prepare ${SLOW_PREPARE_S}s must actually run on the worker)`);
+      slLoadedOk = true;
+      console.log(`[test] plugin_state LOADED after ${slLoadedMs} ms (>= ${SLOW_TOTAL_MS} ms floor) — the 12 s init ran to completion — playing`);
+      slPhase = 3;
+      ws.send(JSON.stringify({ type: "transport", command: "play", tick: 0 }));
+    } else if (msg.type === "plugin_state" && slPhase === 2 && msg.state === "error") {
+      fail(`slowload: the slow load produced an ERROR receipt: ${msg.detail}`);
+    } else if (msg.type === "state" && slPhase === 3 && msg.playing) {
+      slPeak = Math.max(slPeak, msg.peak ?? 0);
+      if (msg.tick >= 1200) {
+        if (slPeak <= 0.05) fail(`slowload: peak ${slPeak.toFixed(3)} after the 12 s load — nothing audible (the plugin did not survive its own slow init)`);
+        slPlayOk = true;
+        slTicksOk = true;
+        console.log(`[test] play ✓ tick ${msg.tick} advanced, peak ${slPeak.toFixed(3)} — engine alive behind the heavy load — stopping`);
+        slPhase = 4;
+        ws.send(JSON.stringify({ type: "transport", command: "stop" }));
+      }
+    } else if (msg.type === "state" && slPhase === 4 && msg.playing === false) {
+      slStopOk = true;
+      console.log("[test] stop ✓ clean — slowload contract complete (engine.log [mm]-receipt absence asserted by desktop.yml)");
       finishAndShutdown();
     }
   } else if (mode === "host") {
@@ -1342,7 +1441,7 @@ ws.addEventListener("message", (event) => {
     if (msg.type === "hello" && !helloOk) {
       helloOk = true;
       if (msg.protocol !== 1) fail(`expected protocol 1, got ${msg.protocol}`);
-      if (msg.engineVersion !== "0.9.0") fail(`expected 0.9.0, got ${msg.engineVersion}`);
+      if (msg.engineVersion !== "0.9.1") fail(`expected 0.9.1, got ${msg.engineVersion}`);
       if (!fixtureDir) fail("scan mode requires a fixture dir argument");
       console.log("[test] hello OK — sending scan of fixture dir + nested dir (dedup proof):", fixtureDir);
       scanSent = true;
@@ -1502,11 +1601,11 @@ ws.addEventListener("message", (event) => {
     // ── Stage 3i: runtime latency tracking (detect, then mini-republish) ──
     if (msg.type === "hello" && latPhase === 0) {
       if (msg.protocol !== 1) fail(`expected protocol 1, got ${msg.protocol}`);
-      if (msg.engineVersion !== "0.9.0") fail(`expected 0.9.0, got ${msg.engineVersion}`);
+      if (msg.engineVersion !== "0.9.1") fail(`expected 0.9.1, got ${msg.engineVersion}`);
       if (!fixtureDir) fail("latency mode requires a fixture dir argument");
       helloOk = true;
       latPhase = 1;
-      console.log("[test] hello OK (0.9.0) — scanning for the stand-in host plugin...");
+      console.log("[test] hello OK (0.9.1) — scanning for the stand-in host plugin...");
       ws.send(JSON.stringify({ type: "dispatch_log", enable: true }));   // Phase 2: the pre-fire proof is ledger-based
       ws.send(JSON.stringify({ type: "scan", dirs: [fixtureDir] }));
     } else if (msg.type === "scan_result" && latPhase === 1) {
@@ -1562,7 +1661,7 @@ ws.addEventListener("message", (event) => {
     if (msg.type === "hello" && !helloOk) {
       helloOk = true;
       if (msg.protocol !== 1) fail(`expected protocol 1, got ${msg.protocol}`);
-      if (msg.engineVersion !== "0.9.0") fail(`expected 0.9.0, got ${msg.engineVersion}`);
+      if (msg.engineVersion !== "0.9.1") fail(`expected 0.9.1, got ${msg.engineVersion}`);
       // Stage 3c close-out: the dispatch ledger streams what the engine
       // ACTUALLY dispatched — the replay-burst and re-attack asserts read it.
       ws.send(JSON.stringify({ type: "dispatch_log", enable: true }));
@@ -1989,6 +2088,22 @@ ws.addEventListener("close", () => {
       process.exit(0);
     } else {
       console.error(`FAILED: hello=${helloOk} pong=${pongOk} scaleAck=${scaleAckOk} negArray=${negArrayOk} negEvent=${negEventOk} restore=${restoreOk} play=${scalePlayOk} ticks=${scaleTicksOk} stop=${scaleStopOk} panic=${scalePanicOk}`);
+      process.exit(1);
+    }
+  } else if (mode === "slowload") {
+    allOk = helloOk && slScanPlugin != null && slAckOk && slLoadedOk && slPlayOk && slTicksOk && slStopOk;
+    if (allOk) {
+      console.log("");
+      console.log("========================================");
+      console.log("ALL SLOW-LOAD TESTS PASSED (M1-hotfix heavy-load class):");
+      console.log(`  loadAck ${slAckMs} ms after send (< 3000) — the async ack contract holds while the fixture constructor sleeps ${SLOW_CREATE_S} s`);
+      console.log(`  plugin_state loaded ${slLoadedMs} ms after send (>= ${SLOW_TOTAL_MS} floor) — the full ${SLOW_CREATE_S}s create + ${SLOW_PREPARE_S}s worker prepare ran to completion`);
+      console.log(`  engine alive behind the heavy load: tick advanced, peak ${slPeak.toFixed(3)}, clean stop`);
+      console.log("  engine.log side: desktop.yml asserts every [mm] window RECOVERED, <= 2 windows, and none after the commit");
+      console.log("========================================");
+      process.exit(0);
+    } else {
+      console.error(`FAILED: hello=${helloOk} scan=${slScanPlugin ? "ok" : "none"} ack=${slAckOk}(${slAckMs}ms) loaded=${slLoadedOk}(${slLoadedMs}ms) play=${slPlayOk} ticks=${slTicksOk} stop=${slStopOk} phase=${slPhase}`);
       process.exit(1);
     }
   } else {

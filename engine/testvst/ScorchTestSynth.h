@@ -61,6 +61,28 @@
 //        can produce), then SETTLES at 1024. Exercises the engine's rate
 //        limit (≤ one republish per instance per second) + final-state
 //        convergence. Block-counted in processBlock: no timers, no RNG.
+//
+// M1-hotfix (heavy-load death, 2026-10-18): the class-shaped regression
+// fixture. A real heavyweight library (Falcon) wedged the engine's message
+// thread 5–7 s during its load and then died with the process; CI must
+// catch this CLASS now. Two engine-process env knobs, both deterministic,
+// both receipted to stdout ("[testvst] ..."):
+//   SCORCH_TESTVST_SLOW_CREATE_S=<seconds>   — the CONSTRUCTOR sleeps that
+//       long (the cold-instantiate shape: Falcon's module/factory init runs
+//       inside createPluginInstance). The loadAck contract proof: the
+//       engine's loadAck must arrive WHILE the constructor is still
+//       sleeping (async ack — the WS thread never waits behind plugin init).
+//   SCORCH_TESTVST_SLOW_PREPARE_N=<call#> + SCORCH_TESTVST_SLOW_PREPARE_S=<seconds>
+//       — the Nth prepareToPlay call (1-based; 0 = disabled) sleeps that
+//       long. EMPIRICAL (measured 2026-10-18): JUCE 8.0.4's VST3 wrapper
+//       early-outs prepareToPlay at identical settings WITHOUT calling the
+//       plugin, so the fixture sees exactly ONE prepare call per load — the
+//       engine's worker-side create-time prepare. The wedge-shape proof: a
+//       regression that moves the first prepare ONTO the message thread
+//       (the migration's graph-side cold prepare shape) makes the MM stall
+//       S seconds AFTER the "[plugin] prepared (worker)" receipt and the
+//       harness's after-prepare [mm] assertion fails. Counter is
+//       per-instance, block-free, no RNG.
 
 #pragma once
 
@@ -89,6 +111,17 @@ public:
         // samples for plugin-routed events (128 samples = deterministic, well
         // inside the fixture's mute-window margins).
         setLatencySamples(128);
+        // M1-hotfix: the cold-instantiate shape (see the header table above).
+        if (const char* sc = std::getenv("SCORCH_TESTVST_SLOW_CREATE_S")) {
+            const int secs = std::atoi(sc);
+            if (secs > 0) {
+                std::fprintf(stdout, "[testvst] slow-create sleeping %d s (SCORCH_TESTVST_SLOW_CREATE_S)\n", secs);
+                std::fflush(stdout);
+                std::this_thread::sleep_for(std::chrono::seconds(secs));
+                std::fprintf(stdout, "[testvst] slow-create done after %d s\n", secs);
+                std::fflush(stdout);
+            }
+        }
     }
 
     void prepareToPlay(double newSampleRate, int /*maxBlockSize*/) override {
@@ -99,6 +132,25 @@ public:
         // createPluginInstance on the message thread) happens BEFORE this, so
         // the slow-capture hook can never stall the instance's own creation.
         preparedOnce.store(true);
+        // M1-hotfix: the Nth prepareToPlay sleeps (see the header table
+        // above). 1-based call counting; 0 = disabled.
+        {
+            const int n = slowPrepareN;
+            if (n > 0) {
+                const int call = prepareCallCount.fetch_add(1) + 1;
+                if (call == n) {
+                    const int secs = slowPrepareS;
+                    if (secs > 0) {
+                        std::fprintf(stdout, "[testvst] slow-prepare call=%d sleeping %d s (SCORCH_TESTVST_SLOW_PREPARE_N=%d)\n",
+                                     call, secs, n);
+                        std::fflush(stdout);
+                        std::this_thread::sleep_for(std::chrono::seconds(secs));
+                        std::fprintf(stdout, "[testvst] slow-prepare call=%d done after %d s\n", call, secs);
+                        std::fflush(stdout);
+                    }
+                }
+            }
+        }
     }
     void releaseResources() override {}
 
@@ -311,6 +363,19 @@ private:
     // Stage 3f-6: set by prepareToPlay — the slow-capture gate (see
     // getStateInformation). A creation-time capture (pre-prepare) never stalls.
     std::atomic<bool> preparedOnce{false};
+    // M1-hotfix: the slow-prepare knobs (see the header table above). Env is
+    // read ONCE here (constructors run on whatever thread instantiates the
+    // fixture — getenv is safe to read concurrently), the sleep decision is
+    // then a plain atomic read per prepareToPlay call.
+    const int slowPrepareN{[] {
+        const char* v = std::getenv("SCORCH_TESTVST_SLOW_PREPARE_N");
+        return v != nullptr ? std::atoi(v) : 0;
+    }()};
+    const int slowPrepareS{[] {
+        const char* v = std::getenv("SCORCH_TESTVST_SLOW_PREPARE_S");
+        return v != nullptr ? std::atoi(v) : 0;
+    }()};
+    std::atomic<int> prepareCallCount{0};
 
     struct Voice {
         bool active = false;

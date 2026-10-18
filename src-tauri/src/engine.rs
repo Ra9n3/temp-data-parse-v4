@@ -12,6 +12,40 @@ const BASE_PORT: u16 = 9377;
 const MAX_RESTARTS: u32 = 3;
 const RESTART_WINDOW_SECS: u64 = 60;
 
+// M1-hotfix (heavy-load death): the engine's native output was spawned with
+// stdout/stderr → null, so a dying engine's last words (CRT messages, JUCE
+// stderr, abort text) were UNNAVIGABLE — the 2026-10-18 Falcon deaths left
+// only the [mm] wedge receipts and a respawn as evidence. Both streams are
+// now appended to <appdata>/scorch/engine-native.log (the same directory the
+// engine writes engine.log in), together with the shell's own spawn/exit
+// receipts — including the EXIT CODE, which distinguishes crash classes:
+// 0xC0000005 (3221225477) = access violation, 0xC0000409 = fast-fail/abort,
+// 3 = C abort(), 0 = clean. The engine ALSO writes its own [crash] receipt
+// + minidump (Windows) — this file is the layer below that.
+fn native_log_path() -> Option<std::path::PathBuf> {
+    let base = if cfg!(windows) {
+        std::env::var("APPDATA").ok()?
+    } else {
+        std::env::var("HOME").ok().map(|h| format!("{h}/.config"))?
+    };
+    let dir = std::path::PathBuf::from(base).join("scorch");
+    let _ = std::fs::create_dir_all(&dir);
+    Some(dir.join("engine-native.log"))
+}
+
+fn native_log_append(line: &str) {
+    if let Some(p) = native_log_path() {
+        if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(&p) {
+            use std::io::Write;
+            let ms = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_millis())
+                .unwrap_or(0);
+            let _ = writeln!(f, "[{ms}] {line}");
+        }
+    }
+}
+
 pub struct EngineState {
     child: Mutex<Option<Child>>,
     port: Mutex<u16>,
@@ -69,12 +103,30 @@ fn find_port() -> Option<u16> {
 }
 
 /// Spawn the engine process with the given port. Returns the Child handle.
+/// M1-hotfix: stdout+stderr are appended to engine-native.log (never null).
 fn spawn_engine(port: u16) -> Option<Child> {
     let exe = engine_exe_path()?;
+    let log = native_log_path();
+    let (stdout, stderr) = match &log {
+        Some(p) => match std::fs::OpenOptions::new().create(true).append(true).open(p) {
+            Ok(f) => {
+                use std::io::Write;
+                let mut g = f.try_clone().ok()?;
+                let ms = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_millis())
+                    .unwrap_or(0);
+                let _ = writeln!(g, "[{ms}] [shell] spawn engine exe={} port={}", exe.display(), port);
+                (Stdio::from(f), Stdio::from(g))
+            }
+            Err(_) => (Stdio::null(), Stdio::null()),
+        },
+        None => (Stdio::null(), Stdio::null()),
+    };
     Command::new(exe)
         .args(["--port", &port.to_string()])
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
+        .stdout(stdout)
+        .stderr(stderr)
         .spawn()
         .ok()
 }
@@ -99,8 +151,16 @@ pub fn check_and_restart(state: &EngineState) {
     let mut child_guard = state.child.lock().unwrap();
     if let Some(ref mut child) = *child_guard {
         match child.try_wait() {
-            Ok(Some(_)) => {
-                // Process exited — try to restart.
+            Ok(Some(status)) => {
+                // Process exited — try to restart. M1-hotfix: the exit code is
+                // a named receipt in engine-native.log (crash classes differ:
+                // 3221225477 = 0xC0000005 AV, 3 = abort, 0 = clean).
+                native_log_append(&format!(
+                    "[shell] engine exited code={} (raw {}) — restarting",
+                    status.code().unwrap_or(-1),
+                    format!("{:?}", status)
+                ));
+                eprintln!("[shell] engine died (code {:?}) — restarting", status.code());
                 drop(child_guard);
                 let mut count = state.restart_count.lock().unwrap();
                 let mut first_at = state.first_restart_at.lock().unwrap();

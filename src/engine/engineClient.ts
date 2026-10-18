@@ -548,7 +548,20 @@ export class EngineClient {
     reject: (f: LoadFailure) => void;
     timer: number;
   } | null = null;
-  private static readonly LOAD_ACK_TIMEOUT_MS = 4000;
+  // M1-hotfix (heavy-load death): 4000 → 120000. The loadAck itself leaves
+  // in milliseconds (the engine's WS thread sends it before queueing plugin
+  // init — that is the ASYNC ACK CONTRACT: loadAck = the ENQUEUE receipt,
+  // plugin_state = the COMPLETION proof; a heavy library's init takes
+  // seconds and must never be raced by this timer). The fixed 4 s guess
+  // fired DURING the death/restart window of the Falcon loads and the user
+  // read "reload failed" for a load the engine never had a chance to
+  // enqueue. The failure modes are owned by dedicated paths, not by this
+  // timer: socket close (engine death → "connection closed while awaiting
+  // loadAck" reject, immediately), supersede (a newer load), dispose. What
+  // remains is a 120 s BACKSTOP for a wedged-but-alive WS path, still
+  // reasoned over by describeLateLoadAck (mm unresponsive / previous load
+  // unsettled).
+  private static readonly LOAD_ACK_TIMEOUT_MS = 120000;
   // Stage 3f-7 (item 5): the message-thread heartbeat's last unresponsive
   // report (engineDiagnostic mm=unresponsive; cleared by mm=recovered) and
   // the seq of the oldest load that has been SENT but has produced NO

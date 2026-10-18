@@ -2354,3 +2354,133 @@ real device — the vendor model's promise (no use-after-free under stall, no le
 editor path on a real windowed plugin) is CI-proven mechanically against the fixture, but the
 milestone completes on the user's manual gate, not on this commit. Latency-gate by-ear items
 (convolver, downbeat) are unchanged and still parked in docs/LATENCY_GATE.md.
+
+## Stage M1-hotfix — the heavy-load death: first Falcon load wedged the MM 5–7 s then killed the process (tag `heavy-load-fix-v1`, engine 0.9.0 → 0.9.1)
+
+**The report (2026-10-18, the user's ×10 manual gate, log 00:42–00:49).** Load
+seq 1/3/6/8 each showed `[mm] message thread unresponsive for 5–7 s` during a
+Falcon instantiate → the engine restart followed within ~2 s; the retry after
+the restart succeeded in ~1.3 s; the frontend's 4000 ms loadAck expired during
+the death/restart window and the user read "reload failed".
+
+**Death mode: CRASH, not a watchdog kill — proven by exhaustive audit, not by
+inference.** Every kill path in the system is inert by design: the engine's
+watchdogs are log-only (the `[mm]` heartbeat at 3 s, the pending-open
+watchdog at 10 s, the init-phase watchdog at 60 s — "forensics, not an
+executioner"); the frontend treats `engineDiagnostic` as diagnostic-only and
+never kills; the shell never kills a live process — `check_and_restart`
+respawns only AFTER `try_wait()` reports an exit (its 2 s poll is the
+"~2 s restart"). Nothing kills a live process, so the process death was a
+CRASH (uncaught exception / SEH / abort). WHICH crash was unknowable
+post-mortem: the shell spawned the engine with stderr → `Stdio::null()` and
+no dump was captured anywhere. The fix therefore (a) makes the next
+occurrence NAME ITSELF and (b) removes the glue's own avoidable crash
+surface:
+
+- **Crash forensics (engine, Windows-only)**: `SetUnhandledExceptionFilter` +
+  SIGABRT/SIGSEGV/SIGFPE/SIGILL + `std::set_terminate` + CRT
+  invalid-parameter/purecall handlers append a named
+  `[crash] kind=… code=… addr=… thread=… dump=…` receipt DIRECTLY to
+  `%APPDATA%/scorch/engine-crash.log` (raw stdio — never through engineLog,
+  so a crash inside the log mutex cannot deadlock the receipt) and write a
+  minidump (`%APPDATA%/scorch/crashes/`) via MiniDumpWriteDump (dbghelp
+  loaded dynamically — no new link surface). No handler resumes execution.
+  A debug-build JUCE assert (breakpoint exception 0x80000003) now lands in
+  the same receipt. Note the interaction with `/EHa`: SEH inside a C++ frame
+  with a `catch(...)` above it is converted to a C++ exception and receipted
+  there (loadHostedPlugin's "SEH / unknown exception caught", the commit
+  job's new `commit FAILED SEH/unknown`); the filter catches what escapes
+  those frames (the audio thread has no guard, by the standing
+  realtime-safety rule — it never gains one).
+- **Shell stderr capture (engine.rs)**: stdout+stderr append to
+  `%APPDATA%/scorch/engine-native.log` with the shell's own spawn/exit
+  receipts, including the EXIT CODE (0xC0000005 = AV, 3 = abort, 0 = clean)
+  — the layer below the engine's own crash receipt.
+
+**The MM wedge — what was measured, and what is structural.** The empirical
+work on the stand-in fixture (slow-create/slow-prepare env knobs) established
+a JUCE 8.0.4 fact the analysis initially missed: the VST3 wrapper SERIALIZES
+a plugin's cold constructor AND its first `prepareToPlay` against the message
+thread — `VST3PluginInstance::prepareToPlay` takes a `MessageManagerLock`
+before the early-out check, and `createPluginInstance`'s component/controller
+initialisation froze the MM for the fixture's whole constructor sleep in
+direct measurement. A heavyweight plugin's cold init therefore freezes the MM
+for its duration NO MATTER WHICH THREAD calls it — the same shape the stock
+AudioPluginHost has, and the same shape the 3c-era engine measured (BBCSO
+5.708 s). The `[mm] unresponsive` receipts during a cold Falcon load are
+STRUCTURAL, not a migration regression, and are NOT fixed by this hotfix.
+What the migration DID regress, and this hotfix fixes:
+
+- **The second heavy `setActive` ran ON the message thread.** The worker
+  prepared at nominal 44100/512 (create-time), and the graph's inline commit
+  rebuild then prepared the node at the REAL device settings — different
+  settings defeat the wrapper's early-out (`isActive && same settings →
+  return`), so a real-device load paid a SECOND full setActive inside an MM
+  job. Fix: the legacy init-thread prepare is RESTORED — the worker prepares
+  at the real captured device settings (or the graph's nominal settings when
+  no device has started — a new `g_deviceStarted` atomic, because
+  `g_engine.sampleRate` initializes to a legal 44100.0 and cannot carry the
+  "device started" bit) BEFORE the commit is queued; the MM-side commit
+  prepare now lands on an already-active instance at identical settings and
+  early-outs. Order preserved (3d-3): instantiate → state → prepare →
+  commit. Receipt: `[plugin] prepared (worker) rate=… buffer=… (real
+  device|nominal)`.
+- **The retire job's state capture sat inside an MM job.** `getStateInformation`
+  of a heavyweight outgoing library is seconds-class; inside a message-thread
+  job it was also UNKILLABLE (the 3f-6 lesson). Fix: the capture moved back to
+  the init worker (the legacy code explicitly documented the function as
+  host-callable from any thread) — trigger `replace (worker)` / `unload
+  (worker)`; the MM retire job is editor close → removeNode only and logs
+  `retire capture SKIPPED — already captured on the init worker`.
+- **The commit job had no exception guard.** An exception or SEH inside the
+  MM commit escaped `runDispatchLoop` → `std::terminate` → process death —
+  the only unguarded call-into-plugin-code site on the MM. Fix: the
+  addNode/rebuild section is guarded with named receipts
+  (`[plugin] commit FAILED exception=…|SEH/unknown`); the vendor's builder
+  assembles a new sequence locally and swaps at the end, so a throw leaves
+  the previously-built sequence live and the entry takes the standard
+  failed-entry retention path. The AUDIO THREAD still gains no guard, ever.
+
+**The loadAck contract (frontend).** `LOAD_ACK_TIMEOUT_MS` 4000 → 120000 and
+the contract written down where the timer lives: loadAck is the ENQUEUE
+receipt (it leaves in milliseconds — the WS thread sends it before queueing
+plugin init and never touches the MM), `plugin_state` is the COMPLETION
+proof, and the failure modes are owned by dedicated paths (socket close =
+death, supersede, dispose). The fixed 4 s guess expired during the real
+death/restart window and turned an engine death into "reload failed" noise.
+120 s remains as a backstop for a wedged-but-alive WS path, still reasoned
+over by the 3f-7 late-loadAck causes.
+
+**The regression fixture (the class, CI-caught).** `ScorchTestSynth` gains
+two engine-process env knobs, both deterministic and stdout-receipted:
+`SCORCH_TESTVST_SLOW_CREATE_S` (the constructor sleeps — the cold-instantiate
+shape) and `SCORCH_TESTVST_SLOW_PREPARE_N/_S` (the Nth `prepareToPlay`
+sleeps; measured: the wrapper early-outs identical-settings re-prepares
+WITHOUT calling the plugin, so the fixture sees exactly ONE prepare call per
+load — the worker's create-time prepare). Harness mode `slowload`: loadAck <
+3 s after send (the constructor is still sleeping), `plugin_state loaded`
+≥ (create + prepare − 1) s (the worker really ran both sleeps), play/ticks/
+peak/stop prove the engine alive behind a 12 s load, exit 0. Desktop Test D4
+asserts the engine.log side: ≤ 2 structural `[mm]` windows (create + worker
+prepare — the wrapper's own serialization), ≥ 1 window provably RECOVERED
+(the real Falcon shape was wedge-then-DEATH), ZERO new windows after
+`[plugin] prepared (worker)` (the glue-owned phases never block the MM), and
+no `commit FAILED`.
+
+**What CI proves and what only hands can.** CI proves: the async ack
+contract, the worker-side prepare/capture receipts, the bounded+recovering
+structural windows, the clean commit, and the engine's survival behind a
+12 s load. Only hands on real Windows with the real library can prove: the
+Falcon load no longer dies (and if anything still dies, the `[crash]`
+receipt + minidump now name it), and the perceived load UX behind the
+structural MM freezes. That manual gate is the milestone's completion
+condition — this commit does not self-declare it.
+
+**Flag notes.** (1) Version ghost: the host-core-v1 TAG already says 0.9.0
+in source (`kEngineVersion`), so a binary reporting 0.8.7 is a STALE ARTIFACT
+(built at downbeat-preroll-v1), not a host-core build — Desktop CI derives
+"Expected version" from main.cpp, so this bump to 0.9.1 propagates
+automatically. (2) Gain: the user's session peak 1.211 with real material
+confirms the ×2.0 default `g_hostedOutputGain` clips — the output-stage
+milestone (gain/safety stage, the M1 deferral where aux-bus folding and the
+gain asserts return) has earned its priority; unchanged in this commit.
