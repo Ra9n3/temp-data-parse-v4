@@ -1,0 +1,372 @@
+[
+  {
+    "id": "violin_1",
+    "displayName": "Violin 1",
+    "family": "STRINGS",
+    "transpositionSemitones": 0,
+    "defaultClef": "TREBLE",
+    "rangeWritten": { "practicalMin": 55, "practicalMax": 91, "professionalMin": 55, "professionalMax": 96 },
+    "registers": [
+      { "name": "LOW", "minPitchWritten": 55, "maxPitchWritten": 62, "tonalQuality": "Dark, warm, thick G-string sonority; soft at the bottom", "velocityModifier": -6, "brightnessModifier": -8, "dynamicControlEase": "EASY" },
+      { "name": "MIDDLE", "minPitchWritten": 62, "maxPitchWritten": 81, "tonalQuality": "Sweet, lyrical, agile, versatile; the core melodic register", "velocityModifier": 2, "brightnessModifier": 0, "dynamicControlEase": "EASY" },
+      { "name": "HIGH", "minPitchWritten": 81, "maxPitchWritten": 96, "tonalQuality": "Bright, penetrating, ethereal; needs a full section to compete with brass", "velocityModifier": 5, "brightnessModifier": 8, "dynamicControlEase": "DIFFICULT" }
+    ],
+    "primaryRoles": ["LEAD", "COUNTERLINE", "OSTINATO", "PAD"],
+    "carryingPowerWeight": 0.35,
+    "unisonBlendingGroup": "strings_bowed"
+  },
+  {
+    "id": "violin_2",
+    "displayName": "Violin 2",
+    "family": "STRINGS",
+    "transpositionSemitones": 0,
+    "defaultClef": "TREBLE",
+    "rangeWritten": { "practicalMin": 55, "practicalMax": 91, "professionalMin": 55, "professionalMax": 96 },
+    "registers": [
+      { "name": "LOW", "minPitchWritten": 55, "maxPitchWritten": 62, "tonalQuality": "Dark, warm, thick G-string sonority; soft at the bottom", "velocityModifier": -6, "brightnessModifier": -8, "dynamicControlEase": "EASY" },
+      { "name": "MIDDLE", "minPitchWritten": 62, "maxPitchWritten": 81, "tonalQuality": "Sweet, lyrical, agile, warm inner-voice coloring", "velocityModifier": 2, "brightnessModifier": 0, "dynamicControlEase": "EASY" },
+      { "name": "HIGH", "minPitchWritten": 81, "maxPitchWritten": 96, "tonalQuality": "Bright, penetrating, ethereal; usually reserved for first-chair doubling", "velocityModifier": 5, "brightnessModifier": 8, "dynamicControlEase": "DIFFICULT" }
+    ],
+    "primaryRoles": ["COUNTERLINE", "PAD", "OSTINATO", "LEAD"],
+    "carryingPowerWeight": 0.35,
+    "unisonBlendingGroup": "strings_bowed"
+  },
+  {
+    "id": "viola",
+    "displayName": "Viola",
+    "family": "STRINGS",
+    "transpositionSemitones": 0,
+    "defaultClef": "ALTO",
+    "alternateClef": "TREBLE",
+    "rangeWritten": { "practicalMin": 48, "practicalMax": 81, "professionalMin": 48, "professionalMax": 88 },
+    "registers": [
+      { "name": "LOW", "minPitchWritten": 48, "maxPitchWritten": 55, "tonalQuality": "Dark, husky, somber, woody C-string sonority", "velocityModifier": -4, "brightnessModifier": -6, "dynamicControlEase": "EASY" },
+      { "name": "MIDDLE", "minPitchWritten": 55, "maxPitchWritten": 74, "tonalQuality": "Warm, neutral, mellow; excellent harmonic filler", "velocityModifier": 2, "brightnessModifier": 0, "dynamicControlEase": "EASY" },
+      { "name": "HIGH", "minPitchWritten": 74, "maxPitchWritten": 88, "tonalQuality": "Pungent, intense, thinning upper register; treble clef territory", "velocityModifier": 4, "brightnessModifier": 7, "dynamicControlEase": "MODERATE" }
+    ],
+    "primaryRoles": ["PAD", "COUNTERLINE", "OSTINATO"],
+    "carryingPowerWeight": 0.3,
+    "unisonBlendingGroup": "strings_bowed"
+  },
+  {
+    "id": "cello",
+    "displayName": "Violoncello",
+    "family": "STRINGS",
+    "transpositionSemitones": 0,
+    "defaultClef": "BASS",
+    "alternateClef": "TENOR",
+    "rangeWritten": { "practicalMin": 36, "practicalMax": 76, "professionalMin": 36, "professionalMax": 79 },
+    "registers": [
+      { "name": "LOW", "minPitchWritten": 36, "maxPitchWritten": 43, "tonalQuality": "Deep, resonant, rich bass foundation", "velocityModifier": -3, "brightnessModifier": -6, "dynamicControlEase": "EASY" },
+      { "name": "MIDDLE", "minPitchWritten": 43, "maxPitchWritten": 62, "tonalQuality": "Warm, robust tenor/baritone voice; excellent for countermelodies", "velocityModifier": 2, "brightnessModifier": 0, "dynamicControlEase": "EASY" },
+      { "name": "HIGH", "minPitchWritten": 62, "maxPitchWritten": 79, "tonalQuality": "Expressive, singing soprano quality; highly penetrating", "velocityModifier": 4, "brightnessModifier": 6, "dynamicControlEase": "MODERATE" }
+    ],
+    "primaryRoles": ["BASS", "COUNTERLINE", "LEAD", "PAD"],
+    "carryingPowerWeight": 0.45,
+    "unisonBlendingGroup": "strings_bowed"
+  },
+  {
+    "id": "double_bass",
+    "displayName": "Double Bass",
+    "family": "STRINGS",
+    "transpositionSemitones": -12,
+    "defaultClef": "BASS",
+    "rangeWritten": { "practicalMin": 28, "practicalMax": 60, "professionalMin": 24, "professionalMax": 67 },
+    "registers": [
+      { "name": "LOW", "minPitchWritten": 24, "maxPitchWritten": 33, "tonalQuality": "Extremely dark, heavy, ominous sub-bass foundation (low-C extension)", "velocityModifier": -6, "brightnessModifier": -9, "dynamicControlEase": "EASY" },
+      { "name": "MIDDLE", "minPitchWritten": 33, "maxPitchWritten": 50, "tonalQuality": "Clear, rhythmic basslines; dry pizzicato", "velocityModifier": 1, "brightnessModifier": 0, "dynamicControlEase": "EASY" },
+      { "name": "HIGH", "minPitchWritten": 50, "maxPitchWritten": 67, "tonalQuality": "Soloistic, lyrical, thinning bass; sounds an octave lower", "velocityModifier": 3, "brightnessModifier": 4, "dynamicControlEase": "MODERATE" }
+    ],
+    "primaryRoles": ["BASS", "OSTINATO"],
+    "carryingPowerWeight": 0.5,
+    "unisonBlendingGroup": "strings_bowed"
+  },
+  {
+    "id": "piccolo",
+    "displayName": "Piccolo",
+    "family": "WOODWINDS",
+    "transpositionSemitones": 12,
+    "defaultClef": "TREBLE",
+    "rangeWritten": { "practicalMin": 62, "practicalMax": 96, "professionalMin": 62, "professionalMax": 96 },
+    "registers": [
+      { "name": "LOW", "minPitchWritten": 62, "maxPitchWritten": 67, "tonalQuality": "Soft, breathy, pale; easily covered by the ensemble", "velocityModifier": -8, "brightnessModifier": -4, "dynamicControlEase": "MODERATE" },
+      { "name": "MIDDLE", "minPitchWritten": 69, "maxPitchWritten": 86, "tonalQuality": "Bright, clear, agile", "velocityModifier": 2, "brightnessModifier": 4, "dynamicControlEase": "EASY" },
+      { "name": "HIGH", "minPitchWritten": 88, "maxPitchWritten": 96, "tonalQuality": "Piercing, brilliant, extreme projection; dominates the full orchestra", "velocityModifier": 7, "brightnessModifier": 10, "dynamicControlEase": "DIFFICULT" }
+    ],
+    "primaryRoles": ["LEAD", "OSTINATO"],
+    "carryingPowerWeight": 0.7,
+    "unisonBlendingGroup": "woodwinds_flutes"
+  },
+  {
+    "id": "flute",
+    "displayName": "Flute (in C)",
+    "family": "WOODWINDS",
+    "transpositionSemitones": 0,
+    "defaultClef": "TREBLE",
+    "rangeWritten": { "practicalMin": 60, "practicalMax": 93, "professionalMin": 59, "professionalMax": 98 },
+    "registers": [
+      { "name": "LOW", "minPitchWritten": 60, "maxPitchWritten": 67, "tonalQuality": "Dark, breathy, cold, soft; easily masked by other instruments", "velocityModifier": -7, "brightnessModifier": -5, "dynamicControlEase": "MODERATE" },
+      { "name": "MIDDLE", "minPitchWritten": 69, "maxPitchWritten": 86, "tonalQuality": "Sweet, warm, lyrical, agile", "velocityModifier": 2, "brightnessModifier": 2, "dynamicControlEase": "EASY" },
+      { "name": "HIGH", "minPitchWritten": 88, "maxPitchWritten": 98, "tonalQuality": "Exceedingly bright, penetrating, loudest natural projection", "velocityModifier": 6, "brightnessModifier": 9, "dynamicControlEase": "MODERATE" }
+    ],
+    "primaryRoles": ["LEAD", "COUNTERLINE", "OSTINATO", "PAD"],
+    "carryingPowerWeight": 0.55,
+    "unisonBlendingGroup": "woodwinds_flutes"
+  },
+  {
+    "id": "oboe",
+    "displayName": "Oboe (in C)",
+    "family": "WOODWINDS",
+    "transpositionSemitones": 0,
+    "defaultClef": "TREBLE",
+    "rangeWritten": { "practicalMin": 58, "practicalMax": 89, "professionalMin": 58, "professionalMax": 93 },
+    "registers": [
+      { "name": "LOW", "minPitchWritten": 58, "maxPitchWritten": 65, "tonalQuality": "Coarse, thick, pungent; difficult soft attack", "velocityModifier": -3, "brightnessModifier": -2, "dynamicControlEase": "DIFFICULT" },
+      { "name": "MIDDLE", "minPitchWritten": 67, "maxPitchWritten": 81, "tonalQuality": "Sweet, warm, expressive; the primary lead register", "velocityModifier": 3, "brightnessModifier": 2, "dynamicControlEase": "EASY" },
+      { "name": "HIGH", "minPitchWritten": 83, "maxPitchWritten": 93, "tonalQuality": "Pinched, intense, thin", "velocityModifier": 5, "brightnessModifier": 7, "dynamicControlEase": "DIFFICULT" }
+    ],
+    "primaryRoles": ["LEAD", "COUNTERLINE"],
+    "carryingPowerWeight": 0.85,
+    "unisonBlendingGroup": "woodwinds_reeds"
+  },
+  {
+    "id": "english_horn",
+    "displayName": "English Horn (in F)",
+    "family": "WOODWINDS",
+    "transpositionSemitones": -7,
+    "defaultClef": "TREBLE",
+    "rangeWritten": { "practicalMin": 59, "practicalMax": 91, "professionalMin": 59, "professionalMax": 91 },
+    "registers": [
+      { "name": "LOW", "minPitchWritten": 59, "maxPitchWritten": 65, "tonalQuality": "Dark, deep, full, rich alto quality", "velocityModifier": -4, "brightnessModifier": -4, "dynamicControlEase": "EASY" },
+      { "name": "MIDDLE", "minPitchWritten": 67, "maxPitchWritten": 84, "tonalQuality": "Mellow, haunting, expressive, plaintive", "velocityModifier": 2, "brightnessModifier": 1, "dynamicControlEase": "EASY" },
+      { "name": "HIGH", "minPitchWritten": 86, "maxPitchWritten": 91, "tonalQuality": "Pinched, intense", "velocityModifier": 4, "brightnessModifier": 6, "dynamicControlEase": "DIFFICULT" }
+    ],
+    "primaryRoles": ["COUNTERLINE", "LEAD", "PAD"],
+    "carryingPowerWeight": 0.55,
+    "unisonBlendingGroup": "woodwinds_reeds"
+  },
+  {
+    "id": "clarinet_bb",
+    "displayName": "Clarinet in Bb",
+    "family": "WOODWINDS",
+    "transpositionSemitones": -2,
+    "defaultClef": "TREBLE",
+    "rangeWritten": { "practicalMin": 52, "practicalMax": 93, "professionalMin": 52, "professionalMax": 93 },
+    "registers": [
+      { "name": "LOW", "minPitchWritten": 52, "maxPitchWritten": 65, "tonalQuality": "Chalumeau: dark, rich, warm, hollow, soft", "velocityModifier": -4, "brightnessModifier": -6, "dynamicControlEase": "EASY" },
+      { "name": "MIDDLE", "minPitchWritten": 66, "maxPitchWritten": 71, "tonalQuality": "Throat tones: pale, weaker projection, unrefined", "velocityModifier": -5, "brightnessModifier": -3, "dynamicControlEase": "MODERATE" },
+      { "name": "MIDDLE", "minPitchWritten": 72, "maxPitchWritten": 84, "tonalQuality": "Clarino: bright, clear, ringing, highly expressive", "velocityModifier": 3, "brightnessModifier": 3, "dynamicControlEase": "EASY" },
+      { "name": "EXTREME", "minPitchWritten": 85, "maxPitchWritten": 93, "tonalQuality": "Piercing, hard to control", "velocityModifier": 4, "brightnessModifier": 8, "dynamicControlEase": "DIFFICULT" }
+    ],
+    "primaryRoles": ["LEAD", "COUNTERLINE", "PAD", "OSTINATO"],
+    "carryingPowerWeight": 0.6,
+    "unisonBlendingGroup": "woodwinds_reeds"
+  },
+  {
+    "id": "bass_clarinet",
+    "displayName": "Bass Clarinet in Bb",
+    "family": "WOODWINDS",
+    "transpositionSemitones": -14,
+    "defaultClef": "TREBLE",
+    "rangeWritten": { "practicalMin": 36, "practicalMax": 79, "professionalMin": 36, "professionalMax": 79 },
+    "registers": [
+      { "name": "LOW", "minPitchWritten": 36, "maxPitchWritten": 53, "tonalQuality": "Deep, rich, agile bass foundation", "velocityModifier": -2, "brightnessModifier": -5, "dynamicControlEase": "EASY" },
+      { "name": "MIDDLE", "minPitchWritten": 55, "maxPitchWritten": 79, "tonalQuality": "Warm, liquid, mellow accompaniment", "velocityModifier": 2, "brightnessModifier": 1, "dynamicControlEase": "EASY" }
+    ],
+    "primaryRoles": ["BASS", "PAD", "COUNTERLINE"],
+    "carryingPowerWeight": 0.5,
+    "unisonBlendingGroup": "woodwinds_reeds"
+  },
+  {
+    "id": "bassoon",
+    "displayName": "Bassoon",
+    "family": "WOODWINDS",
+    "transpositionSemitones": 0,
+    "defaultClef": "BASS",
+    "alternateClef": "TENOR",
+    "rangeWritten": { "practicalMin": 34, "practicalMax": 70, "professionalMin": 34, "professionalMax": 75 },
+    "registers": [
+      { "name": "LOW", "minPitchWritten": 34, "maxPitchWritten": 41, "tonalQuality": "Dry, brittle, thick, powerful", "velocityModifier": -3, "brightnessModifier": -4, "dynamicControlEase": "MODERATE" },
+      { "name": "MIDDLE", "minPitchWritten": 43, "maxPitchWritten": 62, "tonalQuality": "Neutral, transparent, smooth blending", "velocityModifier": 2, "brightnessModifier": 1, "dynamicControlEase": "EASY" },
+      { "name": "HIGH", "minPitchWritten": 63, "maxPitchWritten": 75, "tonalQuality": "Intense, pinched, plaintive", "velocityModifier": 4, "brightnessModifier": 6, "dynamicControlEase": "DIFFICULT" }
+    ],
+    "primaryRoles": ["BASS", "COUNTERLINE", "PAD"],
+    "carryingPowerWeight": 0.45,
+    "unisonBlendingGroup": "woodwinds_reeds"
+  },
+  {
+    "id": "french_horn",
+    "displayName": "French Horn (in F)",
+    "family": "BRASS",
+    "transpositionSemitones": -7,
+    "defaultClef": "TREBLE",
+    "alternateClef": "BASS",
+    "rangeWritten": { "practicalMin": 41, "practicalMax": 84, "professionalMin": 41, "professionalMax": 84 },
+    "registers": [
+      { "name": "LOW", "minPitchWritten": 41, "maxPitchWritten": 48, "tonalQuality": "Dark, deep, unsolid, tuba-like pedal register", "velocityModifier": -5, "brightnessModifier": -5, "dynamicControlEase": "MODERATE" },
+      { "name": "MIDDLE", "minPitchWritten": 48, "maxPitchWritten": 79, "tonalQuality": "Warm, noble, velvety, heroic; the core orchestral glue", "velocityModifier": 3, "brightnessModifier": 1, "dynamicControlEase": "EASY" },
+      { "name": "HIGH", "minPitchWritten": 81, "maxPitchWritten": 84, "tonalQuality": "Brilliant, penetrating, difficult soft attack", "velocityModifier": 5, "brightnessModifier": 7, "dynamicControlEase": "DIFFICULT" }
+    ],
+    "primaryRoles": ["PAD", "COUNTERLINE", "LEAD"],
+    "carryingPowerWeight": 0.5,
+    "unisonBlendingGroup": "brass"
+  },
+  {
+    "id": "trumpet_bb",
+    "displayName": "Trumpet in Bb",
+    "family": "BRASS",
+    "transpositionSemitones": -2,
+    "defaultClef": "TREBLE",
+    "rangeWritten": { "practicalMin": 54, "practicalMax": 86, "professionalMin": 54, "professionalMax": 86 },
+    "registers": [
+      { "name": "LOW", "minPitchWritten": 54, "maxPitchWritten": 60, "tonalQuality": "Dark, gruff, hard to play soft", "velocityModifier": -2, "brightnessModifier": -3, "dynamicControlEase": "DIFFICULT" },
+      { "name": "MIDDLE", "minPitchWritten": 60, "maxPitchWritten": 79, "tonalQuality": "Warm, robust, agile, excellent projection", "velocityModifier": 3, "brightnessModifier": 2, "dynamicControlEase": "EASY" },
+      { "name": "HIGH", "minPitchWritten": 81, "maxPitchWritten": 86, "tonalQuality": "Brilliant, piercing, dominant", "velocityModifier": 6, "brightnessModifier": 8, "dynamicControlEase": "MODERATE" }
+    ],
+    "primaryRoles": ["LEAD", "OSTINATO", "PAD"],
+    "carryingPowerWeight": 1.0,
+    "unisonBlendingGroup": "brass"
+  },
+  {
+    "id": "tenor_trombone",
+    "displayName": "Tenor Trombone",
+    "family": "BRASS",
+    "transpositionSemitones": 0,
+    "defaultClef": "BASS",
+    "alternateClef": "TENOR",
+    "rangeWritten": { "practicalMin": 40, "practicalMax": 70, "professionalMin": 40, "professionalMax": 77 },
+    "registers": [
+      { "name": "LOW", "minPitchWritten": 40, "maxPitchWritten": 53, "tonalQuality": "Full, dark, solid tenor/bass foundation", "velocityModifier": -2, "brightnessModifier": -4, "dynamicControlEase": "EASY" },
+      { "name": "MIDDLE", "minPitchWritten": 55, "maxPitchWritten": 65, "tonalQuality": "Noble, sonorous, flexible; excellent for melodies", "velocityModifier": 3, "brightnessModifier": 1, "dynamicControlEase": "EASY" },
+      { "name": "HIGH", "minPitchWritten": 67, "maxPitchWritten": 77, "tonalQuality": "Intense, bright, penetrating", "velocityModifier": 5, "brightnessModifier": 6, "dynamicControlEase": "MODERATE" }
+    ],
+    "primaryRoles": ["PAD", "BASS", "COUNTERLINE", "LEAD"],
+    "carryingPowerWeight": 1.0,
+    "unisonBlendingGroup": "brass"
+  },
+  {
+    "id": "bass_trombone",
+    "displayName": "Bass Trombone",
+    "family": "BRASS",
+    "transpositionSemitones": 0,
+    "defaultClef": "BASS",
+    "rangeWritten": { "practicalMin": 22, "practicalMax": 65, "professionalMin": 22, "professionalMax": 65 },
+    "registers": [
+      { "name": "LOW", "minPitchWritten": 22, "maxPitchWritten": 41, "tonalQuality": "Massive, heavy, dark, deep bass weight", "velocityModifier": -3, "brightnessModifier": -5, "dynamicControlEase": "EASY" },
+      { "name": "MIDDLE", "minPitchWritten": 43, "maxPitchWritten": 65, "tonalQuality": "Robust, rich, horn-like", "velocityModifier": 3, "brightnessModifier": 1, "dynamicControlEase": "EASY" }
+    ],
+    "primaryRoles": ["BASS", "PAD"],
+    "carryingPowerWeight": 1.1,
+    "unisonBlendingGroup": "brass"
+  },
+  {
+    "id": "tuba",
+    "displayName": "Tuba",
+    "family": "BRASS",
+    "transpositionSemitones": 0,
+    "defaultClef": "BASS",
+    "rangeWritten": { "practicalMin": 26, "practicalMax": 65, "professionalMin": 26, "professionalMax": 65 },
+    "registers": [
+      { "name": "LOW", "minPitchWritten": 26, "maxPitchWritten": 41, "tonalQuality": "Deep, broad, velvety, massive sub-bass anchor", "velocityModifier": -2, "brightnessModifier": -4, "dynamicControlEase": "EASY" },
+      { "name": "MIDDLE", "minPitchWritten": 43, "maxPitchWritten": 65, "tonalQuality": "Smooth, round, horn-like", "velocityModifier": 3, "brightnessModifier": 1, "dynamicControlEase": "EASY" }
+    ],
+    "primaryRoles": ["BASS"],
+    "carryingPowerWeight": 1.2,
+    "unisonBlendingGroup": "brass"
+  },
+  {
+    "id": "timpani",
+    "displayName": "Timpani",
+    "family": "PITCHED_PERCUSSION",
+    "transpositionSemitones": 0,
+    "defaultClef": "BASS",
+    "rangeWritten": { "practicalMin": 38, "practicalMax": 57, "professionalMin": 38, "professionalMax": 57 },
+    "registers": [
+      { "name": "LOW", "minPitchWritten": 38, "maxPitchWritten": 46, "tonalQuality": "Deep, sonorous, resonant pedal tones", "velocityModifier": -2, "brightnessModifier": -3, "dynamicControlEase": "EASY" },
+      { "name": "MIDDLE", "minPitchWritten": 47, "maxPitchWritten": 57, "tonalQuality": "Clear, articulate, rhetorical accents", "velocityModifier": 3, "brightnessModifier": 2, "dynamicControlEase": "MODERATE" }
+    ],
+    "primaryRoles": ["BASS", "OSTINATO"],
+    "carryingPowerWeight": 0.9,
+    "unisonBlendingGroup": "pitched_percussion"
+  },
+  {
+    "id": "glockenspiel",
+    "displayName": "Glockenspiel",
+    "family": "PITCHED_PERCUSSION",
+    "transpositionSemitones": 24,
+    "defaultClef": "TREBLE",
+    "rangeWritten": { "practicalMin": 67, "practicalMax": 96, "professionalMin": 67, "professionalMax": 96 },
+    "registers": [
+      { "name": "LOW", "minPitchWritten": 67, "maxPitchWritten": 79, "tonalQuality": "Bright, bell-like sparkle", "velocityModifier": 2, "brightnessModifier": 6, "dynamicControlEase": "MODERATE" },
+      { "name": "HIGH", "minPitchWritten": 80, "maxPitchWritten": 96, "tonalQuality": "Piercing, brilliant above the ensemble; sounds 2 octaves higher", "velocityModifier": 6, "brightnessModifier": 12, "dynamicControlEase": "MODERATE" }
+    ],
+    "primaryRoles": ["LEAD", "OSTINATO"],
+    "carryingPowerWeight": 0.6,
+    "unisonBlendingGroup": "pitched_percussion"
+  },
+  {
+    "id": "xylophone",
+    "displayName": "Xylophone",
+    "family": "PITCHED_PERCUSSION",
+    "transpositionSemitones": 12,
+    "defaultClef": "TREBLE",
+    "rangeWritten": { "practicalMin": 60, "practicalMax": 96, "professionalMin": 60, "professionalMax": 96 },
+    "registers": [
+      { "name": "LOW", "minPitchWritten": 60, "maxPitchWritten": 75, "tonalQuality": "Dry, woody, crisp", "velocityModifier": 2, "brightnessModifier": 4, "dynamicControlEase": "EASY" },
+      { "name": "HIGH", "minPitchWritten": 76, "maxPitchWritten": 96, "tonalQuality": "Bright, cutting, rattling accents; sounds 1 octave higher", "velocityModifier": 5, "brightnessModifier": 9, "dynamicControlEase": "EASY" }
+    ],
+    "primaryRoles": ["OSTINATO", "LEAD"],
+    "carryingPowerWeight": 0.7,
+    "unisonBlendingGroup": "pitched_percussion"
+  },
+  {
+    "id": "marimba",
+    "displayName": "Marimba",
+    "family": "PITCHED_PERCUSSION",
+    "transpositionSemitones": 0,
+    "defaultClef": "TREBLE",
+    "alternateClef": "BASS",
+    "rangeWritten": { "practicalMin": 36, "practicalMax": 96, "professionalMin": 36, "professionalMax": 96 },
+    "registers": [
+      { "name": "LOW", "minPitchWritten": 36, "maxPitchWritten": 60, "tonalQuality": "Round, wooden, warm and resonant", "velocityModifier": -3, "brightnessModifier": -4, "dynamicControlEase": "EASY" },
+      { "name": "MIDDLE", "minPitchWritten": 61, "maxPitchWritten": 81, "tonalQuality": "Clear, woody, present", "velocityModifier": 2, "brightnessModifier": 2, "dynamicControlEase": "EASY" },
+      { "name": "HIGH", "minPitchWritten": 82, "maxPitchWritten": 96, "tonalQuality": "Glassy, bright, thin", "velocityModifier": 3, "brightnessModifier": 7, "dynamicControlEase": "EASY" }
+    ],
+    "primaryRoles": ["PAD", "OSTINATO", "BASS"],
+    "carryingPowerWeight": 0.4,
+    "unisonBlendingGroup": "pitched_percussion"
+  },
+  {
+    "id": "vibraphone",
+    "displayName": "Vibraphone",
+    "family": "PITCHED_PERCUSSION",
+    "transpositionSemitones": 0,
+    "defaultClef": "TREBLE",
+    "rangeWritten": { "practicalMin": 53, "practicalMax": 89, "professionalMin": 53, "professionalMax": 89 },
+    "registers": [
+      { "name": "LOW", "minPitchWritten": 53, "maxPitchWritten": 64, "tonalQuality": "Dark, mellow, bathed tone", "velocityModifier": -3, "brightnessModifier": -2, "dynamicControlEase": "EASY" },
+      { "name": "MIDDLE", "minPitchWritten": 65, "maxPitchWritten": 79, "tonalQuality": "Warm, shimmering bloom", "velocityModifier": 2, "brightnessModifier": 4, "dynamicControlEase": "EASY" },
+      { "name": "HIGH", "minPitchWritten": 80, "maxPitchWritten": 89, "tonalQuality": "Brilliant, glassy, incandescent", "velocityModifier": 4, "brightnessModifier": 9, "dynamicControlEase": "MODERATE" }
+    ],
+    "primaryRoles": ["PAD", "COUNTERLINE"],
+    "carryingPowerWeight": 0.5,
+    "unisonBlendingGroup": "pitched_percussion"
+  },
+  {
+    "id": "celesta",
+    "displayName": "Celesta",
+    "family": "KEYBOARDS",
+    "transpositionSemitones": 12,
+    "defaultClef": "TREBLE",
+    "alternateClef": "BASS",
+    "rangeWritten": { "practicalMin": 48, "practicalMax": 96, "professionalMin": 48, "professionalMax": 96 },
+    "registers": [
+      { "name": "LOW", "minPitchWritten": 48, "maxPitchWritten": 65, "tonalQuality": "Delicate, soft glassy chimes", "velocityModifier": -6, "brightnessModifier": -2, "dynamicControlEase": "MODERATE" },
+      { "name": "MIDDLE", "minPitchWritten": 66, "maxPitchWritten": 84, "tonalQuality": "Tinkling, luminous, bell-like", "velocityModifier": 2, "brightnessModifier": 6, "dynamicControlEase": "EASY" },
+      { "name": "HIGH", "minPitchWritten": 85, "maxPitchWritten": 96, "tonalQuality": "Sparkling, glittering upper air; sounds 1 octave higher", "velocityModifier": 4, "brightnessModifier": 10, "dynamicControlEase": "EASY" }
+    ],
+    "primaryRoles": ["OSTINATO", "PAD"],
+    "carryingPowerWeight": 0.35,
+    "unisonBlendingGroup": "keyboards"
+  }
+]

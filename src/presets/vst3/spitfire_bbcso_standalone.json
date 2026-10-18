@@ -1,0 +1,25 @@
+{
+  "id": "spitfire-bbcso",
+  "profileName": "Spitfire BBCSO (Standalone)",
+  "vendor": "Spitfire Audio",
+  "triggerMode": "UACC",
+  "preTriggerOffsetMs": 20,
+  "ccMappings": {
+    "dynamicCc": 1,
+    "expressionCc": 11,
+    "filterCutoffCc": 74
+  },
+  "uaccControlChange": 32,
+  "cc74Scale": 0.5,
+  "articulationMap": {
+    "LEGATO": { "triggerType": "UACC_CC", "ccNumber": 32, "ccValue": 20 },
+    "DETACHE": { "triggerType": "UACC_CC", "ccNumber": 32, "ccValue": 1 },
+    "SPICCATO": { "triggerType": "UACC_CC", "ccNumber": 32, "ccValue": 42 },
+    "PIZZICATO_STD": { "triggerType": "UACC_CC", "ccNumber": 32, "ccValue": 56 },
+    "BOWED_TREMOLO": { "triggerType": "UACC_CC", "ccNumber": 32, "ccValue": 87 },
+    "MARTELE": { "triggerType": "UACC_CC", "ccNumber": 32, "ccValue": 9 },
+    "SUL_PONTICELLO": { "triggerType": "UACC_CC", "ccNumber": 32, "ccValue": 18 },
+    "COL_LEGNO": { "triggerType": "UACC_CC", "ccNumber": 32, "ccValue": 114 }
+  },
+  "_note": "UACC CC#32 values are the authoritative addendum table. fallbackKeySwitchNote values are intentionally ABSENT: upstream addendum KS data was not available at authoring time — do not guess and do not fabricate; preferKeySwitches for this profile warns and skips until real data lands. cc74Scale 0.5 = BBCSO's CC74 is attack TIGHTNESS, not brightness; our brightness offsets ride at half strength, not inverted (tunable data, see reconciliation #3). No sustainCc: BBCSO pedal lanes are library-specific — author before use."
+}

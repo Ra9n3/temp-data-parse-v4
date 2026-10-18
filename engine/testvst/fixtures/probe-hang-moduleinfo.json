@@ -1,0 +1,23 @@
+{
+  "Name": "ProbeHangDummy",
+  "Version": "1.0.0",
+  "Factory Info": {
+    "Vendor": "Scorch CI",
+    "URL": "",
+    "E-Mail": "",
+    "Flags": {}
+  },
+  "Classes": [
+    {
+      "CID": "6F1F2B8C00004F0B9E1D2C3A4B5D6E8F",
+      "Category": "Audio Module Class",
+      "Name": "ProbeHangDummy",
+      "Vendor": "Scorch CI",
+      "Version": "1.0.0",
+      "SDKVersion": "VST 3.7.12",
+      "Sub Categories": ["Instrument", "Synth"],
+      "Class Flags": 0,
+      "Cardinality": 2147483647
+    }
+  ]
+}
