@@ -577,8 +577,10 @@ function hostCycleSendUnload() {
   setTimeout(() => {
     ws.send(JSON.stringify({ type: "load", seq: 10000 + hostCycIdx * 10,
       events: HOST_EVENTS, meta: HOST_META, plugins: [] }));
-    // The unload runs on the engine's async worker (retire = editor close ->
-    // state capture -> vendor removeNode). The editor probe below is the
+    // The unload runs on the engine's async worker (worker-side state
+    // capture first — the M1-hotfix moved it off the message thread — then
+    // the message-thread job: editor close -> vendor removeNode). The editor
+    // probe below is the
     // wire proof it landed; poll-retry absorbs the queue latency.
     // STALE-TIMER GUARD (the cycle-11 CI wedge): when the unload lands fast,
     // the machine moves on (reload -> the final editor round-trip + play

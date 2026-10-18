@@ -709,15 +709,17 @@ jobs:
           if ($nodeLive -lt 11) { throw "engine.log missing vendor node-live receipts (got $nodeLive, need >= 11: test D loads + the x10 cycle reloads + the multi single load)" }
           $nodeRemoved = (Select-String -Path $engineLog -Pattern "\[plugin\] node removed instance=").Count
           if ($nodeRemoved -lt 10) { throw "engine.log missing vendor node-removed receipts (got $nodeRemoved, need >= 10: the x10 cycle unloads)" }
-          # The x10 cycle's retire path: editor close -> state capture ->
-          # removeNode, all inline on the message thread (the 3f-6 budget
-          # machinery is gone — no TIMEOUT receipts exist any more). The
-          # capture receipts under the vendored core are the 3f-7 4b pair
-          # "[plugin] capture BEGIN/END instance=... (replace)" — the OLD
-          # "retire capture" strings died with the set-retire machinery.
-          $retireBegins = (Select-String -Path $engineLog -Pattern "\[plugin\] capture BEGIN instance=.*\(replace\)").Count
-          if ($retireBegins -lt 10) { throw "engine.log missing retire-capture BEGIN receipts (got $retireBegins, need >= 10: the cycle unloads must capture the outgoing state)" }
-          $retireEnds = (Select-String -Path $engineLog -Pattern "\[plugin\] capture END instance=.*\(replace\)").Count
+          # The x10 cycle's retire path: worker-side state capture (the
+          # M1-hotfix moved the capture OFF the message thread — triggers
+          # "unload (worker)" for the cycle's explicit unloads, "replace
+          # (worker)" for replace loads) → editor close → removeNode on the
+          # message thread. The capture receipts are the 3f-7 4b pair
+          # "[plugin] capture BEGIN/END instance=... (trigger)" — the OLD
+          # "retire capture" strings died with the set-retire machinery, and
+          # the pre-hotfix inline "(replace)" trigger moved to the worker.
+          $retireBegins = (Select-String -Path $engineLog -Pattern "\[plugin\] capture BEGIN instance=.*\((replace \(worker\)|unload \(worker\))\)").Count
+          if ($retireBegins -lt 10) { throw "engine.log missing retire-capture BEGIN receipts (got $retireBegins, need >= 10: the cycle unloads must capture the outgoing state on the worker)" }
+          $retireEnds = (Select-String -Path $engineLog -Pattern "\[plugin\] capture END instance=.*\((replace \(worker\)|unload \(worker\))\)").Count
           if ($retireEnds -lt 10) { throw "engine.log missing retire-capture END receipts (got $retireEnds, need >= 10)" }
           # Milestone 1: the multi test's refused multi-entry load must name
           # the deferral in the log (the wire-side plugin_state error is
