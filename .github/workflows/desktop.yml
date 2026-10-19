@@ -973,40 +973,44 @@ jobs:
             # ── engine.log grammar (the receipt half the harness cannot see) ──
             Start-Sleep -Seconds 2
             $d7Log = @(Get-Content $engineLogD7 | Select-Object -Skip $logLinesBeforeD7)
-            $d7 = { param($pattern) @($d7Log | Where-Object { $_ -like $pattern }).Count }
+            # LITERAL substring counting (Ordinal IndexOf — no -like wildcards):
+            # -like's [char-class] semantics silently mangle the [strip] prefix
+            # and the parenthesis patterns, which is how a receipt VISIBLY
+            # present in the log (the diagnostic dump) still failed its count.
+            $d7 = { param($needle) @($d7Log | Where-Object { $_.IndexOf($needle, [System.StringComparison]::Ordinal) -ge 0 }).Count }
             try {
-            if (& $d7 "[strip] applied: v=1 strips=3 unwired=2 tornDown=0*" -ne 1) { throw "D7: expected exactly one 'applied v=1 strips=3 unwired=2' receipt" }
-            if (& $d7 "[strip] applied: v=2 strips=2*" -ne 1) { throw "D7: expected exactly one 'applied v=2 strips=2' receipt" }
-            if (& $d7 "[strip] wired: strip=s1 instance=inst-a pair=[0,1]*" -lt 2) { throw "D7: s1 must wire twice (v1 + the R3 'restored on load' rewire)" }
-            if (& $d7 "[strip] wired: strip=s2 instance=inst-a pair=[2,3]*" -ne 1) { throw "D7: s2 must wire exactly once (v1 — then the R3 guard unwires it)" }
-            if (& $d7 "[strip] wired: strip=s3 instance=inst-b pair=[0,1]*" -lt 2) { throw "D7: s3 must wire twice (v1 + v2 restore)" }
+            if (& $d7 "[strip] applied: v=1 strips=3 unwired=2 tornDown=0" -ne 1) { throw "D7: expected exactly one 'applied v=1 strips=3 unwired=2' receipt" }
+            if (& $d7 "[strip] applied: v=2 strips=2" -ne 1) { throw "D7: expected exactly one 'applied v=2 strips=2' receipt" }
+            if (& $d7 "[strip] wired: strip=s1 instance=inst-a pair=[0,1]" -lt 2) { throw "D7: s1 must wire twice (v1 + the R3 'restored on load' rewire)" }
+            if (& $d7 "[strip] wired: strip=s2 instance=inst-a pair=[2,3]" -ne 1) { throw "D7: s2 must wire exactly once (v1 — then the R3 guard unwires it)" }
+            if (& $d7 "[strip] wired: strip=s3 instance=inst-b pair=[0,1]" -lt 2) { throw "D7: s3 must wire twice (v1 + v2 restore)" }
             # ASCII-only patterns: the engine.log is BOM-less UTF-8 and
             # Windows PowerShell's Get-Content decodes it as ANSI — any
             # non-ASCII character inside a match pattern would never hit
             # (the em-dash form of this assert failed exactly that way).
-            if (& $d7 "*channel 2 (bus 1) unwired*" -ne 2) { throw "D7: expected exactly 2 'channel 2 (bus 1) unwired' receipts (inst-b at v1 + inst-b at the v2 restore)" }
-            if (& $d7 "*channel 3 (bus 1) unwired*" -ne 2) { throw "D7: expected exactly 2 'channel 3 (bus 1) unwired' receipts (inst-b at v1 + inst-b at the v2 restore)" }
-            if (& $d7 "[strip] teardown: strip=s1 instance=inst-a*" -ne 1) { throw "D7: expected exactly one s1 teardown receipt (the R2 source unload)" }
-            if (& $d7 "[strip] teardown: strip=s2 instance=inst-a*" -ne 1) { throw "D7: expected exactly one s2 teardown receipt (the R2 source unload)" }
+            if (& $d7 "channel 2 (bus 1) unwired" -ne 2) { throw "D7: expected exactly 2 'channel 2 (bus 1) unwired' receipts (inst-b at v1 + inst-b at the v2 restore)" }
+            if (& $d7 "channel 3 (bus 1) unwired" -ne 2) { throw "D7: expected exactly 2 'channel 3 (bus 1) unwired' receipts (inst-b at v1 + inst-b at the v2 restore)" }
+            if (& $d7 "[strip] teardown: strip=s1 instance=inst-a" -ne 1) { throw "D7: expected exactly one s1 teardown receipt (the R2 source unload)" }
+            if (& $d7 "[strip] teardown: strip=s2 instance=inst-a" -ne 1) { throw "D7: expected exactly one s2 teardown receipt (the R2 source unload)" }
             $flush = @($d7Log | Where-Object { $_ -like "[strip] teardown flush: slot=0 instance=inst-a held=*" })
             if ($flush.Count -ne 1) { throw "D7: expected exactly ONE teardown-flush receipt (the R4 slot wipe), got $($flush.Count)" }
             if ($flush[0] -notmatch "held=(\d+)") { throw "D7: the teardown-flush receipt must carry the held count" }
             if ([int]$flush[0] -match "held=(\d+)" -and [int]$Matches[1] -lt 1) { throw "D7: R4 flush held count must be >= 1 (note 60 was sounding when inst-a unloaded)" }
             Write-Host "D7 R4 flush: $($flush[0])"
-            if (& $d7 "[strip] mix: solos=*mutes=[s1]*" -ne 1) { throw "D7: expected exactly one strip-mix receipt naming mutes=[s1]" }
-            if (& $d7 "[strip] mix: solos=[s1]*" -ne 1) { throw "D7: expected exactly one strip-mix receipt naming solos=[s1] (solo-in-place)" }
-            if (& $d7 "*solo-in-place*" -ne 1) { throw "D7: expected exactly one solo-in-place mix receipt" }
-            if (& $d7 "[strip] layout guard: strip=s2 instance=inst-a pair=[2,3] exceeds live output channels 2*" -ne 1) { throw "D7: expected exactly one R3 layout-guard receipt naming s2 @2 live channels" }
+            if (& $d7 "[strip] mix: solos=[] mutes=[s1]" -ne 1) { throw "D7: expected exactly one strip-mix receipt naming mutes=[s1]" }
+            if (& $d7 "[strip] mix: solos=[s1]" -ne 1) { throw "D7: expected exactly one strip-mix receipt naming solos=[s1] (solo-in-place)" }
+            if (& $d7 "solo-in-place" -ne 1) { throw "D7: expected exactly one solo-in-place mix receipt" }
+            if (& $d7 "[strip] layout guard: strip=s2 instance=inst-a pair=[2,3] exceeds live output channels 2" -ne 1) { throw "D7: expected exactly one R3 layout-guard receipt naming s2 @2 live channels" }
             if (& $d7 "[strip] layout push sent: instance=inst-a liveChannels=2" -ne 1) { throw "D7: expected exactly one stripLayoutChanged push receipt" }
-            if (& $d7 "[strip] rewired SKIPPED*strip limit*" -ne 0) { throw "D7: unexpected strip-limit skips" }
-            if (& $d7 "[layout] instance=inst-a: 2 buses, 4 output channels*" -ne 1) { throw "D7: expected exactly one 4-channel layout receipt for inst-a (first commit)" }
-            if (& $d7 "[layout] instance=inst-a: 1 buses, 2 output channels*" -ne 1) { throw "D7: expected exactly one 2-channel/1-bus layout receipt for inst-a (the R3 mono commit)" }
-            if (& $d7 "[layout] instance=inst-b: 2 buses, 4 output channels*" -ne 1) { throw "D7: expected exactly one 4-channel layout receipt for inst-b" }
-            if (& $d7 "[strip] rejected: reason=unknown instanceId*" -ne 1) { throw "D7: expected exactly one R1 rejection receipt" }
-            if (& $d7 "[strip] stats: strip=s1*" -lt 1) { throw "D7: strip stats drain missing for s1 (SCORCH_STRIP_LOG=1)" }
-            if (& $d7 "[strip] stats: strip=s2*" -lt 1) { throw "D7: strip stats drain missing for s2" }
-            if (& $d7 "[strip] stats: strip=s3*" -lt 1) { throw "D7: strip stats drain missing for s3" }
-            if (& $d7 "[strip] wired FAILED*" -ne 0) { throw "D7: unexpected strip wiring failures" }
+            if (& $d7 "[strip] rewired SKIPPED" -ne 0) { throw "D7: unexpected strip-limit skips" }
+            if (& $d7 "[layout] instance=inst-a: 2 buses, 4 output channels" -ne 1) { throw "D7: expected exactly one 4-channel layout receipt for inst-a (first commit)" }
+            if (& $d7 "[layout] instance=inst-a: 1 buses, 2 output channels" -ne 1) { throw "D7: expected exactly one 2-channel/1-bus layout receipt for inst-a (the R3 mono commit)" }
+            if (& $d7 "[layout] instance=inst-b: 2 buses, 4 output channels" -ne 1) { throw "D7: expected exactly one 4-channel layout receipt for inst-b" }
+            if (& $d7 "[strip] rejected: reason=unknown instanceId" -ne 1) { throw "D7: expected exactly one R1 rejection receipt" }
+            if (& $d7 "[strip] stats: strip=s1" -lt 1) { throw "D7: strip stats drain missing for s1 (SCORCH_STRIP_LOG=1)" }
+            if (& $d7 "[strip] stats: strip=s2" -lt 1) { throw "D7: strip stats drain missing for s2" }
+            if (& $d7 "[strip] stats: strip=s3" -lt 1) { throw "D7: strip stats drain missing for s3" }
+            if (& $d7 "[strip] wired FAILED" -ne 0) { throw "D7: unexpected strip wiring failures" }
             } catch {
               # DIAGNOSTIC (any grammar failure): dump the slice's strip/layout
               # lines so the actual receipt shapes are visible in the run log.
