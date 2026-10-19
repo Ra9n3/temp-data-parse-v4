@@ -27,6 +27,16 @@
 // "Aux Out"). The aux bus emits a DISTINCT CONSTANT 0.25 while armed
 // (CC#22 > 0 — score-driven, deterministic) AND a note is sounding; default
 // silent so every earlier CI peak is byte-identical. CC#22 = 0 disarms.
+//
+// M3 PR2 (R3 CI hook): the "Scorch Test Synth M" target builds this exact
+// source with SCORCH_TESTVST_AUX_DISABLED=1 — a main-only (2-out) identity.
+// The R3 layout-guard CI swaps a strip-wired instance to it: the live node's
+// output surface is genuinely narrower and the engine's commit-time audit
+// unwires the pair it can no longer feed (receipted + pushed, never silent).
+// FINDING (ASSUMPTIONS): a plugin-side isBusesLayoutSupported refusal does
+// NOT block VST3 bus ACTIVATION through the JUCE wrapper (the host-side
+// enable-all lands regardless) — a runtime "refuse" hook cannot narrow a
+// live node; a narrower DECLARED surface is the honest simulation.
 
 // Stage 3f-7: SCORCH_TESTVST_INFTAIL=1 (engine-process env, inherited by
 // probe-worker children) makes getTailLengthSeconds return INFINITY — the
@@ -103,6 +113,17 @@
 #include <unistd.h>     // getpid
 #define SCORCH_TESTVST_GETPID getpid
 #endif
+// Milestone 2: the name is a compile definition so the SECOND fixture
+// target (Scorch Test Synth B — the diff-replace CI counterpart) shares
+// this exact source with a different scan identity.
+#ifndef SCORCH_TESTVST_NAME
+#define SCORCH_TESTVST_NAME "Scorch Test Synth"
+#endif
+// M3 PR2: the MONO identity ("Scorch Test Synth M") declares ONLY the main
+// output bus — its live node is genuinely 2-out (the R3 narrowed surface).
+#ifndef SCORCH_TESTVST_AUX_DISABLED
+#define SCORCH_TESTVST_AUX_DISABLED 0
+#endif
 #include <limits>
 #include <chrono>
 #include <thread>
@@ -116,9 +137,21 @@ public:
         // only when ARMED (CC#22 > 0) and a note is sounding; default OFF,
         // so every pre-3e-3 CI peak stays byte-identical (the arm lives in
         // the SCORE, not in state — deterministic per load).
-        : juce::AudioProcessor(juce::AudioProcessor::BusesProperties()
-                                   .withOutput("Output", juce::AudioChannelSet::stereo(), true)
-                                   .withOutput("Aux Out", juce::AudioChannelSet::stereo(), true)) {
+        : juce::AudioProcessor(SCORCH_TESTVST_AUX_DISABLED
+            ? juce::AudioProcessor::BusesProperties()
+                .withOutput("Output", juce::AudioChannelSet::stereo(), true)
+            : juce::AudioProcessor::BusesProperties()
+                .withOutput("Output", juce::AudioChannelSet::stereo(), true)
+                .withOutput("Aux Out", juce::AudioChannelSet::stereo(), true)) {
+        // M3 PR2 (R3 CI hook): the MONO-OUTPUT identity (SCORCH_TESTVST_AUX_DISABLED=1
+        // — the "Scorch Test Synth M" CMake target) declares ONLY the main bus, so
+        // its live node is genuinely 2-out. The R3 layout-guard test swaps a wired
+        // instance to this identity: a pair wired for [2,3] then exceeds the live
+        // node's channels — a REAL narrowed output surface, no activation games.
+        // (FINDING, documented in ASSUMPTIONS: a plugin-side isBusesLayoutSupported
+        // refusal does NOT block VST3 bus ACTIVATION through the JUCE wrapper — the
+        // host-side enable-all lands regardless — so a runtime "refuse" hook cannot
+        // narrow a live node; a narrower DECLARED surface is the honest simulation.)
         // Stage 3c-polish F4: report a NON-ZERO latency so the CI can assert
         // the engine's compensation arithmetic end-to-end — the ledger's
         // dispatched sample positions must shift EARLIER by exactly this many
@@ -201,7 +234,9 @@ public:
     bool isBusesLayoutSupported(const BusesLayout& layouts) const override {
         if (layouts.getMainOutputChannelSet() != juce::AudioChannelSet::stereo()) return false;
         if (!layouts.getMainInputChannelSet().isDisabled()) return false;
-        // Stage 3e-3: the aux bus (bus 1) must be stereo or disabled.
+        // Stage 3e-3: the aux bus (bus 1) must be stereo or disabled. The
+        // mono identity has NO bus 1 — the out-of-range lookup reads as
+        // disabled and the check passes.
         const auto aux = layouts.getChannelSet(false, 1);
         if (!aux.isDisabled() && !(aux == juce::AudioChannelSet::stereo())) return false;
         return true;
@@ -325,12 +360,6 @@ public:
     }
 
     // ── Boilerplate (editor since 3d-1; state arrives in 3d-3; no tail) ────
-    // Milestone 2: the name is a compile definition so the SECOND fixture
-    // target (Scorch Test Synth B — the diff-replace CI counterpart) shares
-    // this exact source with a different scan identity.
-#ifndef SCORCH_TESTVST_NAME
-#define SCORCH_TESTVST_NAME "Scorch Test Synth"
-#endif
     const juce::String getName() const override { return SCORCH_TESTVST_NAME; }
     bool acceptsMidi() const override { return true; }
     bool producesMidi() const override { return false; }

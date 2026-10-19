@@ -106,6 +106,50 @@
 //         witness). Receipts: "route applied: track=N -> instance=X ch=Y",
 //         "route applied: mapping v=N tracks=K".
 //
+// M3 PR2 protocol additions (additive; protocol version stays 1):
+//   {"type":"strips","wires":[{"strip":"<stripId>","inst":"<instanceId>",
+//         "pair":[a,a+1]},…]} — the AUDIO-domain wiring table (D1/D2: the
+//         frontend owns it; the engine executes it statelessly and applies
+//         it ATOMICALLY on the message thread). R1 ATOMIC-OR-NOTHING: the
+//         whole table validates (unique strip ids, bus-aligned pairs within
+//         each instance's live output channels, one strip per pair, ≤16
+//         strips) before ANYTHING applies; one failure → ONE receipt
+//         "[strip] rejected: reason=" and zero mutation. Full-table
+//         semantics: strips of instances absent from the message are
+//         unwired (named receipts); every output channel of a mentioned
+//         instance is accounted (wired pair → strip, unwired channel →
+//         named receipt, its default main→master wiring removed). Graph
+//         shape: plugin node → StripMixerProcessor → output node; strips
+//         sum at the output node. Lifecycle: a source-instance unload tears
+//         its ACTIVE strips down (named receipts, R2/R4 flush semantics)
+//         but the table entries SURVIVE inactive — a later load of the same
+//         instanceId rewires + reactivates them (reload continuity, gains
+//         restored). The R3 LAYOUT-CHANGE GUARD runs at every commit: a
+//         table pair the live node can no longer feed is unwired with named
+//         receipts + the stripLayoutChanged push — never a silent dead wire.
+//   server -> client: {"type":"strips_result","applied":bool,"v":<strip
+//         version>,"strips":<K>|"reason":"…"} — the routing_result
+//         arithmetic (v +EXACTLY ONE per apply, unchanged on reject).
+//         Receipts: "[strip] applied: v=N strips=K unwired=M tornDown=L",
+//         "[strip] wired: …", "[strip] teardown: …", "[strip] layout
+//         guard: …", "[strip] teardown flush: slot=S instance=X held=H
+//         wiped" (R4).
+//   {"type":"mix", … additive strip fields: "stripGains":{"s":0.0..4.0},
+//         "stripMutes":[…],"stripSolos":[…]} — wired strips are AUDIO-domain
+//         (mute = ramped gain-0; solo = SOLO-IN-PLACE, effective gains
+//         recomputed + published per message through the ~10 ms ramp).
+//         Receipts: "[strip] mix: solos=[…] mutes=[…] gains={…} ->
+//         effective: …". The per-TRACK dispatch gate is unchanged.
+//   {"type":"layoutAll"} — probe: every published instance's output layout.
+//   server -> client: {"type":"layouts","instances":[{instanceId,buses,
+//         channels,busChannels:[…]}]} and the pushes {"type":
+//         "instanceLayout",…} (per commit), {"type":"stripLayoutChanged",
+//         instanceId,liveChannels,unwired:[…],reason:"layout"} (R3 guard).
+//         Engine receipts: "[layout] instance=X: B buses, C output channels".
+//   SCORCH_STRIP_LOG=1 (engine env) — per-strip audio stats receipts
+//         ("[strip] stats: strip=S pre=P post=Q blocks=N", 1 Hz drain;
+//         prePeak = content truth, postPeak = delivery truth).
+//
 // Stage 3d-1 protocol additions (additive):
 //   {"type":"openEditor","instanceId"?:string} — request the hosted plugin's
 //         editor window (engine-OWNED popup: a JUCE DocumentWindow created on
@@ -480,7 +524,7 @@ namespace {
 // "openEditor":true); the lazy-device window is receipted (nominal fallback +
 // device-ready race re-prepare); matching requests coalesce into an in-flight
 // init instead of answering "reused" while it is still outstanding.
-constexpr const char* kEngineVersion = "0.11.0-a";   // M3 PR1: the runtime routing table
+constexpr const char* kEngineVersion = "0.11.0";   // M3 PR2: the strip mixer + multi-output buses
 constexpr int kProtocolVersion = 1;
 constexpr int kDefaultPort = 9377;
 constexpr int kMaxVoices = 64;
@@ -628,6 +672,238 @@ std::atomic<bool> g_muteFlushPending[kWideChannels] = {};
 constexpr size_t kMaxDropTrackSlots = 256;   // 1-based track slots counted for drops
 std::atomic<uint64_t> g_routingVersion{0};
 std::array<std::atomic<uint32_t>, kMaxDropTrackSlots> g_unmappedDrops{};
+
+// ─── M3 PR2 — the strip mixer (per-{instanceId, outChannelPair} audio stage) ──
+// D1 (reviewed + approved before any code): a per-strip StripMixerProcessor —
+// engine GLUE (main.cpp, like InstanceMidiSelector — the vendored core stays
+// byte-untouched and the graph's per-channel connection API is used as-is).
+// One 2-in/2-out node per wired {instanceId, outChannelPair}; the graph wiring
+// runs plugin node → strip node → output IO node, and multiple strips sum at
+// the output node (the vendor's own destination-channel accumulation). The
+// M2 unity guard is UNCHANGED in code: it measures the summed device buffer
+// after graph->processBlock, which is now post-master (behind strip gains) —
+// same semantics, new anchor (documented in ASSUMPTIONS).
+//
+// Param publication is the g_selectorMidiSource pattern: a FIXED array of
+// atomics with stable process-lifetime addresses; the WS thread publishes the
+// EFFECTIVE gain (mute/solo folded at publish — solo-in-place recomputed per
+// mix message), the strip's audio block reads it once per block. The ramp is
+// block-quantized: ramp parameters latch at block start, one lerp per sample
+// (~10 ms), two multiplies per sample per channel — the D1 CPU budget.
+constexpr int kMaxStrips = 16;
+constexpr int kStripRampMs = 10;
+// strip slot → effective target gain. Initialized to 1.0 (unity) before any
+// thread starts; slots are leased to stripIds by the apply job and released
+// at teardown (inactive strips hold no slot).
+struct StripGainSlots {
+    std::array<std::atomic<float>, kMaxStrips> a;
+    StripGainSlots() { for (auto& v : a) v.store(1.0f, std::memory_order_relaxed); }
+};
+StripGainSlots g_stripTargetGain;
+// Per-strip audio-thread stats (relaxed; worker-drained under
+// SCORCH_STRIP_LOG=1 and reset per drain window — the g_unmappedDrops
+// precedent: the audio thread never logs, the worker speaks the deltas).
+struct StripStats {
+    std::atomic<uint64_t> blocks { 0 };
+    std::atomic<float> prePeak { 0.0f };    // max |in|  — content truth (alive even when muted)
+    std::atomic<float> postPeak { 0.0f };   // max |out| — delivery truth (0 when muted/dead)
+};
+StripStats g_stripStats[kMaxStrips];
+// The strip table (D2 ownership shape, same as RoutingTable): the frontend
+// owns the wiring; the engine holds an immutable runtime snapshot published
+// behind ONE atomic shared_ptr. An entry is the frontend's INTENT and
+// outlives its source instance: a source unload tears the node down and
+// marks the entry inactive (reason named) but KEEPS it — a later load of the
+// same instanceId reactivates + rewires it (the reload-continuity contract;
+// gains re-publish from the last mix state). Only a strips-table apply can
+// remove entries (full-table semantics). v advances by EXACTLY ONE per
+// APPLIED strips message, never on lifecycle events — CI's atomicity witness.
+struct StripEntry {
+    std::string stripId;
+    std::string inst;
+    int pair0 = -1;             // source channel a (bus-aligned even); a+1 = pair1
+    int pair1 = -1;
+    int slot = -1;              // strip-slot lease (-1 = released/inactive)
+    bool active = false;        // node live in the graph + wired
+    std::string reason;         // inactive reason ("source unloaded", "layout", ...)
+};
+struct StripSet {
+    std::vector<StripEntry> strips;   // active first-stable order (apply order)
+};
+std::atomic<std::shared_ptr<const StripSet>> g_strips { std::make_shared<const StripSet>() };
+std::atomic<uint64_t> g_stripVersion { 0 };
+// The WS thread's last strip-mix intent (gains/mutes/solos) — the source of
+// every effective-gain publish (per mix message, per strips apply, per
+// reload-continuity rewire). Same discipline as g_lastMix (mutex, WS only).
+struct LastStripMix {
+    std::map<std::string, float> gains;      // stripId → gain (default 1.0)
+    std::vector<std::string> mutes, solos;
+};
+std::mutex g_lastStripMixMutex;   // WS threads only — NEVER the audio thread
+LastStripMix g_lastStripMix;      // guarded by g_lastStripMixMutex
+// R4: the audio-side slot wipe (g_slotStateClearPending servicing) counts the
+// abandoned held notes it clears — the worker speaks the named teardown-flush
+// receipt (the CC120/all-sound-off semantics receipt; see the walk).
+std::atomic<int> g_slotWipedHeldNotes[scorchhost::kMaxInstances] = {};
+// R3: the strip layout guard's protocol push goes through the WS thread — the
+// message-thread jobs set this flag with the payload; the worker drains ONE
+// push per change (the audio thread never touches it).
+std::mutex g_stripLayoutPushMutex;
+struct StripLayoutPush { std::string instanceId; int liveChannels = -1; std::vector<std::string> unwired; bool pending = false; };
+StripLayoutPush g_stripLayoutPush;   // guarded by g_stripLayoutPushMutex
+
+// The strip node itself. 2-in/2-out ONLY: the input bus must stay STEREO
+// (never disabled) because the plugin→strip connections address its input
+// channels — a disabled input would invalidate them (and the device-walk's
+// setPlayConfigDetails(0,2) probe must FAIL here, harmlessly, rather than
+// silently disable the bus). Receipt-free by the glue-node convention; its
+// per-block truth is the g_stripStats[slot] counters.
+class StripMixerProcessor final : public juce::AudioProcessor
+{
+public:
+    // Explicit stereo-in/stereo-out buses: the graph's addConnection
+    // validates channel indices against the node's CURRENT layout, and the
+    // vendor's builder never re-negotiates it after addNode — a bare default
+    // constructor (no input bus) would make every plugin→strip connection
+    // illegal forever. Declared here, the node is wireable the moment it
+    // exists. (The local strips-mode run caught exactly this.)
+    explicit StripMixerProcessor (int slotArg)
+        : juce::AudioProcessor (juce::AudioProcessor::BusesProperties()
+            .withInput ("In", juce::AudioChannelSet::stereo(), true)
+            .withOutput ("Out", juce::AudioChannelSet::stereo(), true)),
+          slot (slotArg) {}
+
+    void prepareToPlay (double newSampleRate, int) override
+    {
+        sampleRate = newSampleRate > 0.0 ? newSampleRate : 44100.0;
+        // A re-prepare must not glide from a stale ramp value: snap.
+        rampPos = rampLen = 0;
+        currentGain = g_stripTargetGain.a[(size_t) slot].load (std::memory_order_acquire);
+    }
+    void releaseResources() override {}
+
+    void processBlock (juce::AudioBuffer<float>& buffer, juce::MidiBuffer& midi) override
+    {
+        juce::ScopedNoDenormals noDenormals;
+        midi.clear();   // strips are audio-only: no MIDI enters or leaves
+        const int n = buffer.getNumSamples();
+        const int chs = juce::jmin (2, buffer.getNumChannels());
+        if (chs <= 0) return;
+
+        // Block-quantized ramp latch: a target change starts a fresh ~10 ms
+        // glide from the CURRENT interpolated value (no zipper, no jump).
+        const float target = g_stripTargetGain.a[(size_t) slot].load (std::memory_order_acquire);
+        if (rampLen == 0 || target != rampTo)
+        {
+            rampFrom = currentGain;
+            rampTo = target;
+            rampLen = juce::jmax (1, (int) (kStripRampMs * 0.001 * sampleRate));
+            rampPos = 0;
+        }
+
+        float preMax = 0.0f, postMax = 0.0f;
+        const float* inL = buffer.getReadPointer (0);
+        const float* inR = chs > 1 ? buffer.getReadPointer (1) : inL;
+        float* outL = buffer.getWritePointer (0);
+        float* outR = chs > 1 ? buffer.getWritePointer (1) : outL;
+        for (int s = 0; s < n; ++s)
+        {
+            float g;
+            if (rampPos < rampLen)
+                g = rampFrom + (rampTo - rampFrom) * ((float) rampPos / (float) rampLen);
+            else
+                g = rampTo;
+            if (rampPos < rampLen) ++rampPos;
+            currentGain = g;
+            const float l = inL[s], r = inR[s];
+            outL[s] = l * g;
+            outR[s] = r * g;
+            preMax = juce::jmax (preMax, juce::jmax (std::abs (l), std::abs (r)));
+            postMax = juce::jmax (postMax, juce::jmax (std::abs (outL[s]), std::abs (outR[s])));
+        }
+        // One CAS-max per stat per block (never per sample).
+        casMax (g_stripStats[(size_t) slot].prePeak, preMax);
+        casMax (g_stripStats[(size_t) slot].postPeak, postMax);
+        g_stripStats[(size_t) slot].blocks.fetch_add (1, std::memory_order_relaxed);
+    }
+
+    const juce::String getName() const override
+    { return "Scorch Strip Mixer " + juce::String (slot); }
+    bool acceptsMidi() const override { return false; }
+    bool producesMidi() const override { return false; }
+    bool isMidiEffect() const override { return false; }
+    int getNumPrograms() override { return 1; }
+    int getCurrentProgram() override { return 0; }
+    void setCurrentProgram (int) override {}
+    const juce::String getProgramName (int) override { return "Default"; }
+    void changeProgramName (int, const juce::String&) override {}
+    double getTailLengthSeconds() const override { return 0.0; }
+    // Stereo in / stereo out, always: see the class doc (a disabled input bus
+    // would invalidate the plugin→strip connections).
+    bool isBusesLayoutSupported (const BusesLayout& layouts) const override
+    {
+        return layouts.getMainOutputChannelSet() == juce::AudioChannelSet::stereo()
+            && layouts.getMainInputChannelSet() == juce::AudioChannelSet::stereo();
+    }
+    juce::AudioProcessorEditor* createEditor() override { return nullptr; }
+    bool hasEditor() const override { return false; }
+    // Pure: a strip's state IS its published atomics — nothing to serialize.
+    void getStateInformation (juce::MemoryBlock&) override {}
+    void setStateInformation (const void*, int) override {}
+
+    const int slot;
+
+private:
+    static void casMax (std::atomic<float>& a, float v)
+    {
+        float cur = a.load (std::memory_order_relaxed);
+        while (v > cur && !a.compare_exchange_weak (cur, v, std::memory_order_relaxed))
+        { /* cur reloaded by CAS failure */ }
+    }
+    // Audio-thread owned ramp state (written only here, read only here).
+    float sampleRate = 44100.0;
+    float currentGain = 1.0f;
+    float rampFrom = 1.0f, rampTo = 1.0f;
+    int rampLen = 0, rampPos = 0;
+};
+
+// Message thread: publish the strip gains for the CURRENT table from the last
+// mix state (reload-continuity: reactivated strips restore their gains,
+// mutes and solos — the frontend's mix intent rides through the reload).
+static float stripBaseGain(const LastStripMix& mix, const std::string& id) {
+    auto it = mix.gains.find(id);
+    return it != mix.gains.end() ? it->second : 1.0f;
+}
+static bool stripInList(const std::vector<std::string>& v, const std::string& id) {
+    return std::find(v.begin(), v.end(), id) != v.end();
+}
+// Effective per-strip gain: solo-in-place over the ACTIVE strips (any ACTIVE
+// strip soloed → non-soloed ACTIVE strips are muted; a solo naming a DEAD
+// strip holds nothing — R2: mid-solo unload of the soloed strip must restore
+// the survivors), else per-strip mute, else the strip's gain. The mute is a
+// RAMPED gain-0 (the D1 audio-domain mute — the mute must be HEARD).
+static bool anyActiveStripSolo(const StripSet& set, const LastStripMix& mix) {
+    for (const auto& e : set.strips)
+        if (e.active && stripInList(mix.solos, e.stripId)) return true;
+    return false;
+}
+static float stripEffectiveGain(const LastStripMix& mix, const StripEntry& e, bool anyActiveSolo) {
+    if (anyActiveSolo)
+        return stripInList(mix.solos, e.stripId) ? stripBaseGain(mix, e.stripId) : 0.0f;
+    if (stripInList(mix.mutes, e.stripId)) return 0.0f;
+    return stripBaseGain(mix, e.stripId);
+}
+// WS thread: publish effective gains to every ACTIVE strip's slot (called
+// after every mix message AND every strips apply AND every lifecycle change —
+// the R2 recompute path rides the teardown/reactivate publishes).
+static void publishStripGains(const StripSet& set, const LastStripMix& mix) {
+    const bool anySolo = anyActiveStripSolo(set, mix);
+    for (const auto& e : set.strips) {
+        if (!e.active || e.slot < 0 || e.slot >= kMaxStrips) continue;
+        g_stripTargetGain.a[(size_t) e.slot].store(stripEffectiveGain(mix, e, anySolo),
+                                                   std::memory_order_release);
+    }
+}
 
 // ─── Stage 3c close-out — transport transitions are musical ─────────────────
 // Musical-release request: stop / seek / end-of-score set this; the NEXT
@@ -2054,6 +2330,18 @@ public:
         // boundary (audio-thread-owned state, never touched cross-thread).
         for (int s = 0; s < scorchhost::kMaxInstances; ++s) {
             if (g_slotStateClearPending[s].exchange(false, std::memory_order_relaxed)) {
+                // M3 PR2 (R4): COUNT the abandoned held notes before the wipe —
+                // the teardown-flush receipt's audio-thread truth ("the same
+                // CC120 flush as mid-play rebinds", all-sound-off semantics:
+                // the notes die instantly with the slot's state; the worker
+                // speaks the count).
+                int wipedHeld = 0;
+                for (int c = 0; c < 16; ++c) {
+                    const int wide = wideChannelOf(s, c + 1);
+                    for (int p = 0; p < 128; ++p)
+                        if (g_heldPluginNotes[wide - 1][p]) ++wipedHeld;   // every abandoned pitch
+                }
+                g_slotWipedHeldNotes[s].fetch_add(wipedHeld, std::memory_order_relaxed);
                 for (int c = 0; c < 16; ++c) {
                     g_heldPluginNotes[wideChannelOf(s, c + 1) - 1].clear();
                     g_muteFlushPending[wideChannelOf(s, c + 1) - 1].store(false,
@@ -4648,6 +4936,18 @@ void handle_load(const juce::var& json, ix::WebSocket& ws, size_t byteSize) {
 // (gated at dispatch, BEFORE any channel send). Unknown trackIds ignored.
 // Tracks that LOSE audibility get their hosted channels CC120-flushed so the
 // change is immediately audible (already-sounding notes die).
+// M3 PR2 (additive, protocol 1 unchanged): the strip fields —
+//   "stripGains": {"<stripId>": 0.0..4.0, ...}
+//   "stripMutes": ["<stripId>", ...]
+//   "stripSolos": ["<stripId>", ...]
+// ride the SAME message: wired strips are AUDIO-domain (the D1 answer) — the
+// mute is a ramped gain-0, solo is SOLO-IN-PLACE (any strip soloed → every
+// non-soloed strip's effective gain is 0), recomputed and published by the WS
+// thread on EVERY mix message (the strip atomics; the ~10 ms ramp glides the
+// change — the mute must be HEARD). The per-TRACK (MIDI dispatch) gate above
+// is UNCHANGED and orthogonal: synth-fallback/unwired paths stay byte-stable.
+// Unknown strip ids are receipt-named (the tolerant mix precedent), and the
+// strip state persists for the reload-continuity publish (g_lastStripMix).
 void handle_mix(const juce::var& json) {
     juce::DynamicObject* obj = json.getDynamicObject();
     if (!obj) return;
@@ -4663,28 +4963,114 @@ void handle_mix(const juce::var& json) {
             if (std::find(list.begin(), list.end(), id) == list.end()) list.push_back(id);
         }
     }
-    std::lock_guard<std::mutex> lock(g_lastMixMutex);
-    const auto table = g_routing.load(std::memory_order_acquire);
-    if (table) {
-        const auto oldMix = buildMixState(*table, g_lastMix);
-        const auto newMix = buildMixState(*table, next);
-        // audibility(slot) under a mix snapshot
-        auto audible = [&oldMix, &newMix](size_t slot, bool useOld) {
-            const MixState& m = useOld ? *oldMix : *newMix;
-            return m.anySolo
-                ? (slot < m.solo.size() && m.solo[slot] != 0)
-                : !(slot < m.muted.size() && m.muted[slot] != 0);
-        };
-        for (uint32_t slot = 1; slot <= table->trackNames.size(); ++slot) {
-            if (audible(slot, true) && !audible(slot, false)) {
-                auto it = table->channelOfTrack.find(table->trackNames[slot - 1]);
-                if (it != table->channelOfTrack.end() && table->pluginChannels.count(it->second))
-                    g_muteFlushPending[it->second - 1].store(true, std::memory_order_relaxed);
+    // ── M3 PR2: the strip fields (additive; absent fields leave the last
+    // strip state untouched — the track fields' own precedent). ──
+    LastStripMix nextStrips;
+    {
+        std::lock_guard<std::mutex> slk(g_lastStripMixMutex);
+        nextStrips = g_lastStripMix;   // carry the previous strip intent
+    }
+    std::vector<std::string> unknownStrips;
+    if (auto* gainsObj = obj->getProperty("stripGains").getDynamicObject()) {
+        nextStrips.gains.clear();
+        const auto& props = gainsObj->getProperties();
+        for (int i = 0; i < props.size(); ++i) {
+            const std::string id = props.getName(i).toString().toStdString();
+            if (id.empty()) continue;
+            double g = static_cast<double>(props.getValueAt(i));
+            if (!(g >= 0.0) || g > 4.0) {   // NaN/negative/over-range → clamp, named
+                engineLog("[strip] mix: gains." + id + "=" + std::to_string(g) +
+                          " out of range [0,4] — clamped");
+                g = juce::jlimit(0.0, 4.0, g);
+            }
+            nextStrips.gains[id] = static_cast<float>(g);
+        }
+    }
+    for (const auto& [field, list] : std::initializer_list<std::pair<const char*, std::vector<std::string>*>>{
+             {"stripMutes", &nextStrips.mutes}, {"stripSolos", &nextStrips.solos}}) {
+        const auto& arr = obj->getProperty(field);
+        if (!arr.isArray()) continue;
+        list->clear();
+        for (auto& v : *arr.getArray()) {
+            std::string id = v.toString().toStdString();
+            if (id.empty()) continue;
+            if (std::find(list->begin(), list->end(), id) == list->end()) list->push_back(id);
+        }
+    }
+    {
+        std::lock_guard<std::mutex> lock(g_lastMixMutex);
+        const auto table = g_routing.load(std::memory_order_acquire);
+        if (table) {
+            const auto oldMix = buildMixState(*table, g_lastMix);
+            const auto newMix = buildMixState(*table, next);
+            // audibility(slot) under a mix snapshot
+            auto audible = [&oldMix, &newMix](size_t slot, bool useOld) {
+                const MixState& m = useOld ? *oldMix : *newMix;
+                return m.anySolo
+                    ? (slot < m.solo.size() && m.solo[slot] != 0)
+                    : !(slot < m.muted.size() && m.muted[slot] != 0);
+            };
+            for (uint32_t slot = 1; slot <= table->trackNames.size(); ++slot) {
+                if (audible(slot, true) && !audible(slot, false)) {
+                    auto it = table->channelOfTrack.find(table->trackNames[slot - 1]);
+                    if (it != table->channelOfTrack.end() && table->pluginChannels.count(it->second))
+                        g_muteFlushPending[it->second - 1].store(true, std::memory_order_relaxed);
+                }
+            }
+            g_mix.store(std::move(newMix), std::memory_order_release);
+        }
+        g_lastMix = std::move(next);
+    }
+    // ── M3 PR2: publish the effective strip gains + the named receipt. ──
+    {
+        const auto set = g_strips.load(std::memory_order_acquire);
+        if (set != nullptr) {
+            const bool anySolo = anyActiveStripSolo(*set, nextStrips);
+            std::string eff, unknown;
+            size_t activeCount = 0;
+            for (const auto& e : set->strips) {
+                if (!e.active) continue;
+                ++activeCount;
+                if (!eff.empty()) eff += " ";
+                eff += e.stripId + "=" +
+                       juce::String(stripEffectiveGain(nextStrips, e, anySolo), 2).toStdString();
+            }
+            for (const auto& [id, g] : nextStrips.gains) {
+                bool known = false;
+                for (const auto& e : set->strips) if (e.stripId == id) { known = true; break; }
+                if (!known && !stripInList(nextStrips.mutes, id) && !stripInList(nextStrips.solos, id))
+                    unknownStrips.push_back(id + " (gain)");
+            }
+            for (const auto& id : nextStrips.mutes) {
+                bool known = false;
+                for (const auto& e : set->strips) if (e.stripId == id) { known = true; break; }
+                if (!known) unknownStrips.push_back(id + " (mute)");
+            }
+            for (const auto& id : nextStrips.solos) {
+                bool known = false;
+                for (const auto& e : set->strips) if (e.stripId == id) { known = true; break; }
+                if (!known) unknownStrips.push_back(id + " (solo)");
+            }
+            for (const auto& u : unknownStrips)
+                engineLog("[strip] mix: unknown strip id " + u + " ignored (not in the table)");
+            if (activeCount > 0) {
+                std::string solos, mutes, gains;
+                for (const auto& id : nextStrips.solos) { if (!solos.empty()) solos += ","; solos += id; }
+                for (const auto& id : nextStrips.mutes) { if (!mutes.empty()) mutes += ","; mutes += id; }
+                for (const auto& [id, g] : nextStrips.gains) {
+                    if (!gains.empty()) gains += ",";
+                    gains += id + ":" + juce::String(g, 2).toStdString();
+                }
+                engineLog("[strip] mix: solos=[" + solos + "] mutes=[" + mutes + "] gains={" + gains +
+                          "} -> effective: " + eff +
+                          (nextStrips.solos.empty() ? "" : " (solo-in-place)"));
             }
         }
-        g_mix.store(std::move(newMix), std::memory_order_release);
+        std::lock_guard<std::mutex> slk(g_lastStripMixMutex);
+        g_lastStripMix = std::move(nextStrips);
+        if (auto set2 = g_strips.load(std::memory_order_acquire))
+            publishStripGains(*set2, g_lastStripMix);
     }
-    g_lastMix = std::move(next);
 }
 
 // {"type":"dispatch_log","enable":bool} — CI observability: stream what was
@@ -4845,6 +5231,526 @@ void handle_routing(const juce::var& json, ix::WebSocket& ws) {
               " (rebinds=" + std::to_string(rebinds) + " flushed)");
     ws.send(std::string("{\"type\":\"routing_result\",\"applied\":true,\"v\":") +
             std::to_string(v) + ",\"tracks\":" + std::to_string(lines.size()) + "}");
+}
+
+// ─── M3 PR2 — strips: message-thread graph operations ───────────────────────
+// All graph mutation for strips happens ON THE MESSAGE THREAD (the vendor's
+// Nodes-table discipline — the same thread addPluginNode/removeNodeByID run
+// on). The WS handler validates (R1 atomic-or-nothing) and enqueues ONE job;
+// FIFO ordering serializes it against the commit/retire jobs. Strip nodes go
+// through g_host.graph()->addNode/removeNode DIRECTLY (public API — the
+// vendored core stays byte-untouched): removeNodeByID is reserved for PLUGIN
+// nodes because it owns liveCount_ (the "is anything live" counter); strip
+// nodes must not pollute it.
+
+// The strip node map: stripId → graph node. MESSAGE THREAD ONLY (created/
+// destroyed by the jobs below — never touched by WS/audio/worker threads).
+std::mutex g_stripNodesMutex;   // belt-and-braces: all callers ARE the message thread
+std::map<std::string, juce::AudioProcessorGraph::Node::Ptr> g_stripNodes;
+
+// Message thread: the node's LIVE output channel count (the R3 truth — the
+// meta's captured layout can drift from the live processor; this is what the
+// guard audits against).
+static int stripLiveOutputChannels(juce::AudioProcessorGraph::Node::Ptr node) {
+    if (node == nullptr || node->getProcessor() == nullptr) return -1;
+    return node->getProcessor()->getTotalNumOutputChannels();
+}
+
+// Message thread: connect ONE wired pair through its strip node. Removes the
+// default main→master connections this pair replaces (they exist only for
+// channels 0/1 — the vendored addPluginNode wiring), then wires
+// plugin a/b → strip in0/in1 and strip out0/out1 → master 0/1. Idempotent per
+// endpoint pair (addConnection refuses duplicates; removeConnection returns
+// false on absence — both receipt-free no-ops).
+static bool wireStripPair(juce::AudioProcessorGraph& graph,
+                          juce::AudioProcessorGraph::NodeID pluginID,
+                          juce::AudioProcessorGraph::NodeID outputID,
+                          juce::AudioProcessorGraph::NodeID stripID,
+                          int a, int b) {
+    if (b != a + 1 || a < 0) return false;
+    // Defaults first (only the main bus pair has them): a strip wired over
+    // [0,1] must REPLACE the direct wiring, not sum with it (the frontend's
+    // table is the whole truth for the pairs it manages).
+    if (a == 0) {
+        graph.removeConnection({ { pluginID, 0 }, { outputID, 0 } });
+        graph.removeConnection({ { pluginID, 1 }, { outputID, 1 } });
+        // Mono-fold shape (vendored wiring duplicates channel 0 to master R):
+        graph.removeConnection({ { pluginID, 0 }, { outputID, 1 } });
+    }
+    const bool inOk = graph.addConnection({ { pluginID, a }, { stripID, 0 } })
+                   && graph.addConnection({ { pluginID, b }, { stripID, 1 } });
+    const bool outOk = graph.addConnection({ { stripID, 0 }, { outputID, 0 } })
+                    && graph.addConnection({ { stripID, 1 }, { outputID, 1 } });
+    return inOk && outOk;
+}
+
+// Message thread: create the node for ONE strip entry (the caller has already
+// leased e.slot) and wire it. Returns the node (nullptr = the graph refused —
+// caller receipts).
+static juce::AudioProcessorGraph::Node::Ptr createAndWireStripNode(
+        juce::AudioProcessorGraph& graph,
+        juce::AudioProcessorGraph::NodeID pluginID,
+        juce::AudioProcessorGraph::NodeID outputID,
+        StripEntry& e) {
+    auto node = graph.addNode(std::make_unique<StripMixerProcessor>(e.slot));
+    if (node == nullptr) return nullptr;
+    if (!wireStripPair(graph, pluginID, outputID, node->nodeID, e.pair0, e.pair1)) {
+        graph.removeNode(node->nodeID);
+        return nullptr;
+    }
+    {
+        std::lock_guard<std::mutex> lk(g_stripNodesMutex);
+        g_stripNodes[e.stripId] = node;
+    }
+    return node;
+}
+
+// Message thread: remove ONE strip's node (the vendor retires it via the
+// render-sequence exchange — the same ≤500 ms policy as plugin nodes; the
+// slot's atomics outlive it, a retiring node may render one stale-gain block
+// window, documented in ASSUMPTIONS).
+static void removeStripNode(const std::string& stripId, const StripEntry& e) {
+    juce::AudioProcessorGraph::Node::Ptr node;
+    {
+        std::lock_guard<std::mutex> lk(g_stripNodesMutex);
+        auto it = g_stripNodes.find(stripId);
+        if (it != g_stripNodes.end()) { node = it->second; g_stripNodes.erase(it); }
+    }
+    if (node != nullptr && g_host.graph() != nullptr)
+        g_host.graph()->removeNode(node->nodeID);
+    (void) e;
+}
+
+// Message thread: the R2/R3-aware per-instance strip reconcile — called from
+// the commit job AFTER the plugin node is live. For every table entry bound
+// to this instanceId:
+//   live pair valid   → reactivate (if inactive) + create/wire the node +
+//                       receipt (the reload-continuity path: unload → reload
+//                       restores the wiring with its gains);
+//   live pair INVALID → the R3 LAYOUT-CHANGE GUARD: the strip stays dead,
+//                       the receipt names it, the stripLayoutChanged push
+//                       fires — never a silent dead wire.
+// Publishes the updated table on any change.
+static void rewireStripsForInstanceOnMessageThread(const std::string& iid,
+                                                   juce::AudioProcessorGraph::Node::Ptr pluginNode) {
+    auto cur = g_strips.load(std::memory_order_acquire);
+    if (cur == nullptr || cur->strips.empty()) return;
+    auto* graph = g_host.graph();
+    if (graph == nullptr || pluginNode == nullptr) return;
+    const auto outputID = g_host.outputNodeID();
+    const int liveCh = stripLiveOutputChannels(pluginNode);
+
+    bool changed = false;
+    std::vector<std::string> guardUnwired;
+    auto next = std::make_shared<StripSet>(*cur);
+    for (auto& e : next->strips) {
+        if (e.inst != iid) continue;
+        const bool valid = e.pair0 >= 0 && e.pair1 == e.pair0 + 1 && e.pair1 < liveCh;
+        if (!valid) {
+            // R3: the live node cannot feed this pair. Unwire cleanly (the
+            // node may still exist from a same-message apply — remove it),
+            // keep the TABLE entry (the frontend's intent), name everything.
+            if (e.active) { removeStripNode(e.stripId, e); e.active = false; changed = true; }
+            e.slot = -1;
+            e.reason = "layout";
+            guardUnwired.push_back(e.stripId);
+            engineLog("[strip] layout guard: strip=" + e.stripId + " instance=" + iid +
+                      " pair=[" + std::to_string(e.pair0) + "," + std::to_string(e.pair1) +
+                      "] exceeds live output channels " + std::to_string(liveCh) +
+                      " — unwired (named, never a silent dead wire)");
+            continue;
+        }
+        if (e.active) continue;   // kept node — connections untouched
+        // (Re)activate: lease a strip slot, create the node, wire, publish.
+        bool slotTaken[kMaxStrips] = {};
+        for (const auto& o : next->strips)
+            if (o.active && o.slot >= 0 && o.slot < kMaxStrips) slotTaken[o.slot] = true;
+        int slot = -1;
+        for (int s = 0; s < kMaxStrips; ++s) if (!slotTaken[s]) { slot = s; break; }
+        if (slot < 0) {
+            e.reason = "strip limit exhausted";
+            engineLog("[strip] rewired SKIPPED strip=" + e.stripId + " instance=" + iid +
+                      " — " + e.reason);
+            continue;
+        }
+        e.slot = slot;
+        e.active = false;
+        auto node = createAndWireStripNode(*graph, pluginNode->nodeID, outputID, e);
+        if (node == nullptr) {
+            e.slot = -1;
+            e.reason = "graph refused the strip node";
+            engineLog("[strip] rewired FAILED strip=" + e.stripId + " instance=" + iid +
+                      " — the graph refused the node/wiring");
+            continue;
+        }
+        e.active = true;
+        e.reason.clear();
+        changed = true;
+        engineLog("[strip] wired: strip=" + e.stripId + " instance=" + iid +
+                  " pair=[" + std::to_string(e.pair0) + "," + std::to_string(e.pair1) +
+                  "] slot=" + std::to_string(slot) + " gain=" +
+                  juce::String(stripEffectiveGain(g_lastStripMix, e, anyActiveStripSolo(*next, g_lastStripMix)), 2).toStdString() +
+                  " (restored on load)");
+    }
+    if (changed) {
+        g_strips.store(next, std::memory_order_release);
+        publishStripGains(*next, g_lastStripMix);
+    }
+    if (!guardUnwired.empty()) {
+        std::lock_guard<std::mutex> lk(g_stripLayoutPushMutex);
+        g_stripLayoutPush = { iid, liveCh, guardUnwired, true };
+    }
+}
+
+// Message thread: tear down every ACTIVE strip bound to iid (the source
+// unload path — R2/R4). The TABLE entries stay (inactive, reason named): a
+// later reload of the same instanceId reactivates them. R4's note hygiene is
+// the audio-side slot wipe (g_slotStateClearPending → counts abandoned held
+// notes → the worker's teardown-flush receipt); the retire job's own receipt
+// names the strips and the flush handoff.
+static void teardownStripsForInstanceOnMessageThread(const std::string& iid) {
+    auto cur = g_strips.load(std::memory_order_acquire);
+    if (cur == nullptr || cur->strips.empty()) return;
+    bool changed = false;
+    auto next = std::make_shared<StripSet>(*cur);
+    for (auto& e : next->strips) {
+        if (e.inst != iid || !e.active) continue;
+        removeStripNode(e.stripId, e);
+        e.active = false;
+        e.slot = -1;
+        e.reason = "source unloaded";
+        changed = true;
+        engineLog("[strip] teardown: strip=" + e.stripId + " instance=" + iid +
+                  " pair=[" + std::to_string(e.pair0) + "," + std::to_string(e.pair1) +
+                  "] — source unloaded; abandoned notes flushed by the slot wipe"
+                  " (all-sound-off semantics, receipted by the worker); the table"
+                  " entry survives for the next load");
+    }
+    if (changed) {
+        g_strips.store(next, std::memory_order_release);
+        publishStripGains(*next, g_lastStripMix);
+    }
+}
+
+// Message thread: the strips-table apply (ONE job per message — R1: the whole
+// table validates on the WS thread first, and THIS job re-validates every
+// live truth before ANY mutation; one failure = zero mutation = applied:false).
+// Full-table semantics: the message IS the table — instances absent from it
+// lose their strips (receipted); instances present get exactly their wires,
+// and every output channel they own is accounted (wired pair → strip,
+// unwired channel → named receipt).
+struct StripsApplyOutcome {
+    std::atomic<bool> done { false };
+    std::atomic<bool> ok { false };
+    std::string error;             // guarded by done-then-read (the bounded wait)
+    uint64_t appliedV = 0;
+    size_t wiredCount = 0, unwiredCount = 0, tornDownCount = 0;
+    std::vector<std::string> receipts;
+};
+static void applyStripsJob(std::shared_ptr<StripsApplyOutcome> out,
+                           std::shared_ptr<std::vector<StripEntry>> wanted,
+                           std::shared_ptr<std::vector<std::string>> wantedInsts) {
+    auto* graph = g_host.graph();
+    if (graph == nullptr) { out->error = "no host graph"; out->done.store(true); return; }
+    const auto outputID = g_host.outputNodeID();
+    const auto cur = g_strips.load(std::memory_order_acquire);
+
+    // ── Live re-validation pass: NOTHING mutates until everything passes. ──
+    std::map<std::string, juce::AudioProcessorGraph::Node::Ptr> nodeOf;   // iid → live plugin node
+    std::map<std::string, int> liveChOf;
+    const auto liveNow = g_liveSet.load(std::memory_order_acquire);
+    for (const auto& iid : *wantedInsts) {
+        HostedPlugin* m = nullptr;
+        if (liveNow != nullptr)
+            for (auto* h : liveNow->bySlot)
+                if (h != nullptr && h->instanceId == iid) { m = h; break; }
+        juce::AudioProcessorGraph::Node::Ptr node;
+        int ch = -1;
+        if (m != nullptr && m->rawInstance.load(std::memory_order_acquire) != nullptr
+            && m->nodeID.uid != 0 && graph->getNodeForId(m->nodeID) != nullptr) {
+            node = graph->getNodeForId(m->nodeID);
+            ch = stripLiveOutputChannels(node);
+        }
+        if (node == nullptr || ch < 0) {
+            out->error = "instance \"" + iid + "\" has no live plugin node (state changed since validation)";
+            out->done.store(true);
+            return;
+        }
+        nodeOf[iid] = node;
+        liveChOf[iid] = ch;
+    }
+    for (const auto& w : *wanted) {
+        if (w.pair0 < 0 || w.pair1 != w.pair0 + 1 || w.pair1 >= liveChOf[w.inst]) {
+            out->error = "instance \"" + w.inst + "\" pair [" + std::to_string(w.pair0) + "," +
+                         std::to_string(w.pair1) + "] exceeds live output channels " +
+                         std::to_string(liveChOf[w.inst]) + " (layout changed since validation)";
+            out->done.store(true);
+            return;
+        }
+    }
+
+    // ── Mutate: the validation gate has passed. ──
+    std::vector<StripEntry> nextStrips;
+    // (a) teardown: every CURRENT ACTIVE entry that no wire in the message
+    //     re-creates — an instance absent from the message (full-table
+    //     semantics: the frontend owns the table) OR a stripId the message
+    //     replaced/renamed. Inactive entries of absent instances die silently
+    //     here (they were already receipted at their own teardown).
+    {
+        std::set<std::string> wantedIds;
+        for (const auto& w : *wanted) wantedIds.insert(w.stripId);
+        for (const auto& e : cur->strips) {
+            if (!e.active) continue;
+            if (wantedIds.count(e.stripId) != 0) continue;
+            removeStripNode(e.stripId, e);
+            ++out->tornDownCount;
+            out->receipts.push_back("[strip] unwired: strip=" + e.stripId + " instance=" + e.inst +
+                                    " pair=[" + std::to_string(e.pair0) + "," + std::to_string(e.pair1) +
+                                    "] — removed by strips table (not in the message)");
+        }
+    }
+    // (b) build the new table: one entry per wire (slot leased here — lowest
+    //     free — BEFORE the node exists; the processor reads its slot atomics).
+    for (const auto& w : *wanted) {
+        StripEntry e = w;
+        bool slotTaken[kMaxStrips] = {};
+        for (const auto& done : nextStrips)
+            if (done.active && done.slot >= 0 && done.slot < kMaxStrips) slotTaken[done.slot] = true;
+        int slot = -1;
+        for (int s = 0; s < kMaxStrips; ++s) if (!slotTaken[s]) { slot = s; break; }
+        if (slot < 0) {
+            out->error = "strip limit exhausted (" + std::to_string(kMaxStrips) + ") while wiring \"" +
+                         w.stripId + "\"";
+            out->receipts.push_back("[strip] wired FAILED: strip=" + w.stripId + " — " + out->error);
+            // Wired prefix stays; the unwired remainder is receipted + inactive.
+            std::vector<StripEntry> finalTable;
+            for (const auto& req : *wanted) {
+                StripEntry f = req;
+                f.active = false; f.slot = -1; f.reason = "apply failed before this wire";
+                finalTable.push_back(f);
+            }
+            for (size_t k = 0; k < nextStrips.size() && k < finalTable.size(); ++k)
+                finalTable[k] = nextStrips[k];
+            g_strips.store(std::make_shared<const StripSet>(StripSet{ finalTable }),
+                           std::memory_order_release);
+            publishStripGains(*g_strips.load(std::memory_order_acquire), g_lastStripMix);
+            out->done.store(true);
+            return;
+        }
+        e.slot = slot;
+        e.active = false;
+        auto node = createAndWireStripNode(*graph, nodeOf[w.inst]->nodeID, outputID, e);
+        if (node == nullptr) {
+            // Mid-apply graph refusal: the vendor's builder assembled-and-
+            // swapped or refused; the failure is contained and receipted (the
+            // commit-path precedent). The successfully wired prefix stays —
+            // the NEXT strips message reconciles; the receipts name everything.
+            out->error = "the graph refused the strip node/wiring for strip \"" + w.stripId + "\"";
+            out->receipts.push_back("[strip] wired FAILED: strip=" + w.stripId + " instance=" + w.inst +
+                                    " pair=[" + std::to_string(w.pair0) + "," + std::to_string(w.pair1) + "]");
+            std::vector<StripEntry> finalTable;
+            for (const auto& req : *wanted) {
+                StripEntry f = req;
+                f.active = false; f.slot = -1; f.reason = "apply failed before this wire";
+                finalTable.push_back(f);
+            }
+            for (size_t k = 0; k < nextStrips.size() && k < finalTable.size(); ++k)
+                finalTable[k] = nextStrips[k];
+            g_strips.store(std::make_shared<const StripSet>(StripSet{ finalTable }),
+                           std::memory_order_release);
+            publishStripGains(*g_strips.load(std::memory_order_acquire), g_lastStripMix);
+            out->done.store(true);
+            return;
+        }
+        e.active = true;
+        nextStrips.push_back(e);
+        ++out->wiredCount;
+        const bool anySolo = std::any_of(nextStrips.begin(), nextStrips.end(),
+            [&](const StripEntry& s) { return s.active && stripInList(g_lastStripMix.solos, s.stripId); });
+        out->receipts.push_back("[strip] wired: strip=" + w.stripId + " instance=" + w.inst +
+                                " pair=[" + std::to_string(w.pair0) + "," + std::to_string(w.pair1) +
+                                "] slot=" + std::to_string(e.slot) + " gain=" +
+                                juce::String(stripEffectiveGain(g_lastStripMix, e, anySolo), 2).toStdString());
+    }
+    // (c) unwired-channel accounting: every channel of every wanted instance
+    //     not covered by a wired pair is NAMED (never silent) and its default
+    //     direct wiring (main pair only) is removed — the table is the whole
+    //     truth for instances it mentions.
+    for (const auto& [iid, ch] : liveChOf) {
+        (void) ch;
+        // Which channels does the instance own? Walk its captured bus table
+        // (immutable meta) for the NAMED receipt, live count for the truth.
+        HostedPlugin* m = nullptr;
+        if (liveNow != nullptr)
+            for (auto* h : liveNow->bySlot)
+                if (h != nullptr && h->instanceId == iid) { m = h; break; }
+        const int total = liveChOf[iid];
+        int covered = 0;
+        for (const auto& w : *wanted)
+            if (w.inst == iid) covered = std::max(covered, w.pair1 + 1);
+        // Defaults for the main pair go when a strip covers [0,1] — already
+        // removed by wireStripPair. If NOTHING covers the main pair, remove
+        // the defaults explicitly (the table says this instance is unwired).
+        if (covered == 0) {
+            graph->removeConnection({ { nodeOf[iid]->nodeID, 0 }, { outputID, 0 } });
+            graph->removeConnection({ { nodeOf[iid]->nodeID, 1 }, { outputID, 1 } });
+            graph->removeConnection({ { nodeOf[iid]->nodeID, 0 }, { outputID, 1 } });
+        }
+        // Per-channel named receipts, bus-attributed from the meta's table.
+        int bus = 0, busStart = 0;
+        const std::vector<int>* busTable = m != nullptr ? &m->outputBusChannels : nullptr;
+        for (int c = 0; c < total; ++c) {
+            if (busTable != nullptr) {
+                while (bus < (int) busTable->size() && c >= busStart + (*busTable)[bus]) {
+                    busStart += (*busTable)[bus];
+                    ++bus;
+                }
+            }
+            if (c < covered) continue;
+            ++out->unwiredCount;
+            out->receipts.push_back("[strip] instance=" + iid + " channel " + std::to_string(c) +
+                                    " (bus " + std::to_string(bus) + ") unwired — named, silent by design");
+        }
+    }
+    // (d) slot leases were assigned by createAndWireStripNode (lowest-free);
+    //     publish the table + the gains, advance v by EXACTLY ONE.
+    g_strips.store(std::make_shared<const StripSet>(StripSet{ nextStrips }),
+                   std::memory_order_release);
+    publishStripGains(*g_strips.load(std::memory_order_acquire), g_lastStripMix);
+    out->appliedV = g_stripVersion.fetch_add(1, std::memory_order_acq_rel) + 1;
+    out->ok.store(true);
+    out->done.store(true);
+}
+
+// {"type":"strips","wires":[{"strip":"s1","inst":"inst-a","pair":[0,1]},…]}
+// — the audio-domain counterpart of the routing table (D2 ownership: the
+// frontend owns the wiring; the engine validates atomically, applies on the
+// message thread, publishes an immutable snapshot, echoes ONE result).
+// R1 ATOMIC-OR-NOTHING: any validation failure = exactly one
+// "[strip] rejected: reason=" receipt, zero mutation, v unchanged.
+// Protocol stays 1 (additive): strips_result + [strip] receipts only.
+void handle_strips(const juce::var& json, ix::WebSocket& ws) {
+    juce::DynamicObject* obj = json.getDynamicObject();
+    const auto reject = [&ws](const std::string& reason) {
+        engineLog("[strip] rejected: reason=" + reason);
+        ws.send(std::string("{\"type\":\"strips_result\",\"applied\":false,\"reason\":\"") +
+                escape_json(reason) + "\",\"v\":" + std::to_string(g_stripVersion.load()) + "}");
+    };
+    if (obj == nullptr) { reject("message is not an object"); return; }
+    const auto& wiresVar = obj->getProperty("wires");
+    if (!wiresVar.isArray()) { reject("wires must be an array of {strip, inst, pair} (empty array = full teardown)"); return; }
+
+    // ── R1 validation pass (WS thread, published truth only) ──
+    auto wanted = std::make_shared<std::vector<StripEntry>>();
+    std::set<std::string> stripIds;
+    std::set<std::pair<std::string, int>> pairTaken;   // (iid, pair0)
+    std::set<std::string> wantedInsts0;
+    for (const auto& wv : *wiresVar.getArray()) {
+        juce::DynamicObject* w = wv.getDynamicObject();
+        if (w == nullptr) { reject("each wire must be an object {strip, inst, pair}"); return; }
+        StripEntry e;
+        e.stripId = w->getProperty("strip").toString().toStdString();
+        e.inst = w->getProperty("inst").toString().toStdString();
+        if (e.stripId.empty() || e.stripId.size() > 64) { reject("strip id must be a non-empty string (<=64 chars)"); return; }
+        if (!stripIds.insert(e.stripId).second) { reject("duplicate strip id \"" + e.stripId + "\""); return; }
+        if (e.inst.empty()) { reject("strip \"" + e.stripId + "\" is missing inst"); return; }
+        const auto& pairVar = w->getProperty("pair");
+        if (!pairVar.isArray() || pairVar.getArray()->size() != 2) { reject("strip \"" + e.stripId + "\" pair must be [a, a+1]"); return; }
+        e.pair0 = static_cast<int>(static_cast<double>(pairVar.getArray()->getUnchecked(0)));
+        e.pair1 = static_cast<int>(static_cast<double>(pairVar.getArray()->getUnchecked(1)));
+        if (e.pair1 != e.pair0 + 1 || e.pair0 < 0) { reject("strip \"" + e.stripId + "\" pair must be [a, a+1]"); return; }
+        if (e.pair0 % 2 != 0) { reject("strip \"" + e.stripId + "\" pair start must be bus-aligned (even channel)"); return; }
+        if (!pairTaken.insert({ e.inst, e.pair0 }).second) {
+            reject("instance \"" + e.inst + "\" pair [" + std::to_string(e.pair0) + "," +
+                   std::to_string(e.pair1) + "] wired twice");
+            return;
+        }
+        wantedInsts0.insert(e.inst);
+        wanted->push_back(e);
+    }
+    if (wanted->size() > kMaxStrips) {
+        reject("strip limit is " + std::to_string(kMaxStrips) + " (message carries " +
+               std::to_string(wanted->size()) + ")");
+        return;
+    }
+    const auto liveNow = g_liveSet.load(std::memory_order_acquire);
+    for (const auto& iid : wantedInsts0) {
+        HostedPlugin* m = nullptr;
+        if (liveNow != nullptr)
+            for (auto* h : liveNow->bySlot)
+                if (h != nullptr && h->instanceId == iid) { m = h; break; }
+        if (m == nullptr) { reject("unknown instanceId \"" + iid + "\" (not in the published set)"); return; }
+        if (m->rawInstance.load(std::memory_order_acquire) == nullptr) {
+            reject("instance \"" + iid + "\" has no live node (wire strips after the load commits)");
+            return;
+        }
+    }
+    for (const auto& e : *wanted) {
+        if (liveNow == nullptr) { reject("no published instance set (internal)"); return; }
+        HostedPlugin* m = nullptr;
+        for (auto* h : liveNow->bySlot)
+            if (h != nullptr && h->instanceId == e.inst) { m = h; break; }
+        if (m == nullptr) { reject("unknown instanceId \"" + e.inst + "\" (not in the published set)"); return; }
+        if (e.pair1 >= m->totalOutputChannels) {
+            reject("strip \"" + e.stripId + "\" pair [" + std::to_string(e.pair0) + "," +
+                   std::to_string(e.pair1) + "] exceeds instance \"" + e.inst + "\" output channels " +
+                   std::to_string(m->totalOutputChannels));
+            return;
+        }
+    }
+
+    // ── Apply: ONE message-thread job, bounded wait (the commit-path shape). ──
+    auto insts = std::make_shared<std::vector<std::string>>(wantedInsts0.begin(), wantedInsts0.end());
+    auto out = std::make_shared<StripsApplyOutcome>();
+    juce::MessageManager::callAsync([out, wanted, insts] { applyStripsJob(out, wanted, insts); });
+    const auto t0 = std::chrono::steady_clock::now();
+    while (!out->done.load(std::memory_order_acquire) && !g_should_exit.load()) {
+        if (std::chrono::duration_cast<std::chrono::milliseconds>(
+                std::chrono::steady_clock::now() - t0).count() >= 10000) break;
+        std::this_thread::sleep_for(std::chrono::milliseconds(2));
+    }
+    if (!out->done.load(std::memory_order_acquire)) {
+        reject("the message-thread apply job did not run within 10000 ms");
+        return;
+    }
+    for (const auto& line : out->receipts) engineLog(line);
+    if (!out->ok.load()) {
+        // The job mutated partially (mid-apply graph refusal) or re-validated
+        // false: the receipts above name the exact state; the echo carries
+        // applied:false with the UNCHANGED v when nothing applied.
+        engineLog("[strip] rejected: reason=" + out->error);
+        ws.send(std::string("{\"type\":\"strips_result\",\"applied\":false,\"reason\":\"") +
+                escape_json(out->error) + "\",\"v\":" + std::to_string(g_stripVersion.load()) + "}");
+        return;
+    }
+    engineLog("[strip] applied: v=" + std::to_string(out->appliedV) +
+              " strips=" + std::to_string(out->wiredCount) +
+              " unwired=" + std::to_string(out->unwiredCount) +
+              " tornDown=" + std::to_string(out->tornDownCount));
+    ws.send(std::string("{\"type\":\"strips_result\",\"applied\":true,\"v\":") +
+            std::to_string(out->appliedV) + ",\"strips\":" + std::to_string(out->wiredCount) + "}");
+}
+
+// {"type":"layoutAll"} — additive probe: every published instance's output
+// layout (bus/channel counts), from the immutable metas. The frontend's
+// strip-wiring UI rides this (the [layout] receipts name the same truth).
+void handle_layoutAll(const juce::var& json, ix::WebSocket& ws) {
+    (void) json;
+    const auto liveNow = g_liveSet.load(std::memory_order_acquire);
+    std::string rows;
+    if (liveNow != nullptr) {
+        for (auto* h : liveNow->bySlot) {
+            if (h == nullptr) continue;
+            if (!rows.empty()) rows += ",";
+            rows += "{\"instanceId\":\"" + escape_json(h->instanceId) + "\",\"buses\":" +
+                    std::to_string(h->outputBusChannels.size()) + ",\"channels\":" +
+                    std::to_string(h->totalOutputChannels) + ",\"busChannels\":[";
+            for (size_t b = 0; b < h->outputBusChannels.size(); ++b)
+                rows += (b ? "," : "") + std::to_string(h->outputBusChannels[b]);
+            rows += "]}";
+        }
+    }
+    ws.send("{\"type\":\"layouts\",\"instances\":[" + rows + "]}");
 }
 
 // Seed the per-channel articulation knowledge from the score's PAST: the
@@ -5271,6 +6177,13 @@ void retireInstanceNodeOnMessageThread(const std::string& iid) {
     }
     destroyEditorWindow(old->instanceId, false);   // the editor must not outlive the node
     const auto t0 = std::chrono::steady_clock::now();
+    // M3 PR2 (R2/R4): tear down this instance's ACTIVE strips BEFORE the
+    // plugin node removal — receipts name every strip; the table entries
+    // survive (inactive) for the next load. The R4 note hygiene rides the
+    // audio-side slot wipe this retire triggers (g_slotStateClearPending set
+    // by the worker's removal/unload paths): the wipe counts the abandoned
+    // held notes it clears and the worker speaks the teardown-flush receipt.
+    teardownStripsForInstanceOnMessageThread(iid);
     // Milestone 2: remove the PLUGIN node AND its selector (the MIDI bridge)
     // — the vendor disconnects both automatically.
     auto selNode = g_host.removeNodeByID(old->selectorNodeID);
@@ -5577,6 +6490,10 @@ int main(int argc, char** argv) {
                     handle_mix(parsed);
                 } else if (type == "routing") {
                     handle_routing(parsed, ws);
+                } else if (type == "strips") {
+                    handle_strips(parsed, ws);   // M3 PR2: the strip wiring table
+                } else if (type == "layoutAll") {
+                    handle_layoutAll(parsed, ws);   // M3 PR2: per-instance layout probe
                 } else if (type == "dispatch_log") {
                     handle_dispatch_log(parsed, ws);
                 } else if (type == "setHostWindow") {
@@ -5820,6 +6737,87 @@ int main(int argc, char** argv) {
                                   std::to_string(delta) + " notes dropped" + name);
                     }
                     dropLastEmit = dropNow;
+                }
+            }
+
+            // ── M3 PR2 worker drains (1 Hz, the same sampler as the drops) ──
+            // (1) R4 teardown-flush receipts: the audio-side slot wipe counted
+            //     the abandoned held notes it cleared (all-sound-off semantics)
+            //     — speak them, once, with the instance identity from the
+            //     graveyard/live set.
+            for (int s = 0; s < scorchhost::kMaxInstances; ++s) {
+                const int held = g_slotWipedHeldNotes[s].exchange(0, std::memory_order_relaxed);
+                if (held <= 0) continue;
+                std::string iid;
+                {
+                    std::lock_guard<std::mutex> lk(g_hostGraveyardMutex);
+                    for (auto it = g_hostGraveyard.rbegin(); it != g_hostGraveyard.rend(); ++it)
+                        if (*it != nullptr && (*it)->slot == s) { iid = (*it)->instanceId; break; }
+                }
+                if (iid.empty())
+                    if (auto set = liveSetSnapshot())
+                        for (auto* h : set->bySlot)
+                            if (h != nullptr && h->slot == s) { iid = h->instanceId; break; }
+                engineLog("[strip] teardown flush: slot=" + std::to_string(s) +
+                          (iid.empty() ? "" : " instance=" + iid) +
+                          " held=" + std::to_string(held) +
+                          " wiped — all-sound-off (CC120) semantics for the abandoned"
+                          " notes (the rebind-flush precedent); the node's voices die"
+                          " with the vendor sequence retire");
+            }
+            // (2) R3 layout-guard protocol push: the message-thread guard set
+            //     the payload — ONE push per change, from here (the audio
+            //     thread never sends).
+            {
+                std::string iid, unwiredJson;
+                int liveChannels = -1;
+                {
+                    std::lock_guard<std::mutex> lk(g_stripLayoutPushMutex);
+                    if (g_stripLayoutPush.pending) {
+                        g_stripLayoutPush.pending = false;
+                        iid = g_stripLayoutPush.instanceId;
+                        liveChannels = g_stripLayoutPush.liveChannels;
+                        for (size_t i = 0; i < g_stripLayoutPush.unwired.size(); ++i) {
+                            if (!unwiredJson.empty()) unwiredJson += ",";
+                            unwiredJson += "\"" + escape_json(g_stripLayoutPush.unwired[i]) + "\"";
+                        }
+                    } else {
+                        iid.clear();
+                    }
+                }
+                if (!iid.empty()) {
+                    broadcastJson(std::string("{\"type\":\"stripLayoutChanged\",\"instanceId\":\"") +
+                                  escape_json(iid) + "\",\"liveChannels\":" +
+                                  std::to_string(liveChannels) + ",\"unwired\":[" + unwiredJson +
+                                  "],\"reason\":\"layout\"}");
+                    engineLog("[strip] layout push sent: instance=" + iid +
+                              " liveChannels=" + std::to_string(liveChannels));
+                }
+            }
+            // (3) Strip stats (SCORCH_STRIP_LOG=1 — CI observability): per
+            //     ACTIVE strip, the drain-window pre/post peaks + block count,
+            //     then the window resets. prePeak = content truth (alive even
+            //     when muted), postPeak = delivery truth (0 when muted/dead).
+            {
+                static const bool stripLogEnabled = std::getenv("SCORCH_STRIP_LOG") != nullptr;
+                if (stripLogEnabled) {
+                    const auto set = g_strips.load(std::memory_order_acquire);
+                    if (set != nullptr) {
+                        for (const auto& e : set->strips) {
+                            if (!e.active || e.slot < 0 || e.slot >= kMaxStrips) continue;
+                            StripStats& st = g_stripStats[e.slot];
+                            const uint64_t blocks = st.blocks.exchange(0, std::memory_order_relaxed);
+                            if (blocks == 0) continue;
+                            const float pre = st.prePeak.exchange(0.0f, std::memory_order_relaxed);
+                            const float post = st.postPeak.exchange(0.0f, std::memory_order_relaxed);
+                            engineLog("[strip] stats: strip=" + e.stripId +
+                                      " instance=" + e.inst +
+                                      " pair=[" + std::to_string(e.pair0) + "," + std::to_string(e.pair1) +
+                                      "] pre=" + juce::String(pre, 4).toStdString() +
+                                      " post=" + juce::String(post, 4).toStdString() +
+                                      " blocks=" + std::to_string(blocks));
+                        }
+                    }
                 }
             }
             PluginInitRequest req;
@@ -6438,6 +7436,41 @@ int main(int argc, char** argv) {
                                       " (graph prepared at rate " +
                                       std::to_string(static_cast<int>(g_host.sampleRate())) +
                                       " buffer " + std::to_string(g_host.blockSize()) + ")");
+                            // ── M3 PR2 — strip rewire + layout probe (the commit
+                            // is the layout-change checkpoint; R3 guard inside).
+                            // rewireStripsForInstanceOnMessageThread:
+                            //   • reactivate + rewire the instance's table
+                            //     strips against the NEW node (reload
+                            //     continuity — unload → reload restores the
+                            //     wiring with its gains);
+                            //   • the R3 LAYOUT-CHANGE GUARD: a table pair the
+                            //     live node can no longer feed is unwired with
+                            //     named receipts + the stripLayoutChanged push
+                            //     (never a silent dead wire).
+                            rewireStripsForInstanceOnMessageThread(iid, node);
+                            // The [layout] probe receipt (the brief's "instance
+                            // X: 2 buses, 4 channels" grammar) + the additive
+                            // instanceLayout push. Live-node truth, not the
+                            // captured table (the guard may just have fired).
+                            {
+                                const int buses = m->outputBusChannels.size();
+                                const int chans = node->getProcessor() != nullptr
+                                    ? node->getProcessor()->getTotalNumOutputChannels()
+                                    : m->totalOutputChannels;
+                                std::string busList;
+                                for (size_t b = 0; b < m->outputBusChannels.size(); ++b)
+                                    busList += (b ? "," : "") + std::to_string(m->outputBusChannels[b]);
+                                engineLog("[layout] instance=" + iid + ": " + std::to_string(buses) +
+                                          " buses, " + std::to_string(chans) + " output channels" +
+                                          (busList.empty() ? "" : " (busChannels=[" + busList + "])"));
+                                std::string push = std::string("{\"type\":\"instanceLayout\",\"instanceId\":\"") +
+                                    escape_json(iid) + "\",\"buses\":" + std::to_string(buses) +
+                                    ",\"channels\":" + std::to_string(chans) + ",\"busChannels\":[";
+                                for (size_t b = 0; b < m->outputBusChannels.size(); ++b)
+                                    push += (b ? "," : "") + std::to_string(m->outputBusChannels[b]);
+                                push += "]}";
+                                broadcastJson(push);
+                            }
                         } catch (const std::exception& ex) {
                             engineLog("[plugin] commit FAILED exception=" +
                                       std::string(ex.what() ? ex.what() : "unknown") +

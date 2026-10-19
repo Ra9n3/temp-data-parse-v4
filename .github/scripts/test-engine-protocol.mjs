@@ -317,6 +317,52 @@ const rtBump = (e) => { if (e.k === 1) { const key = `${e.a}:${e.c}`; rtSlice[ke
 const rtCount = (key) => rtSlice[key] ?? 0;
 const rtSendTable = (routes) => ws.send(JSON.stringify({ type: "routing", routes }));
 
+// ── M3 PR2 strips-mode state (the strip wiring table — see the header) ──
+const STRIP_META = { bpm: 120, ppqn: 960, timeSignature: { numerator: 4, denominator: 4 }, endTick: 8448 };
+// Two parts: t1 rides inst-a (SUSTAINED note 60 — still held when the R2
+// mid-solo unload lands, so the R4 teardown-flush count is ≥1) with the aux
+// bus ARMED (CC#22 → the 0.25 constant through strip s2); t2 rides inst-b
+// (sustained 67). CC7/CC11 fader priming + CC21 normalize per the MO rules.
+const stripPartT1 = [
+  { eventType: "CONTROL_CHANGE", channel: 1, data1: 7, data2: 127, timestampTicks: 0, trackId: "t1" },
+  { eventType: "CONTROL_CHANGE", channel: 1, data1: 11, data2: 127, timestampTicks: 0, trackId: "t1" },
+  { eventType: "CONTROL_CHANGE", channel: 1, data1: 21, data2: 127, timestampTicks: 0, trackId: "t1" },
+  { eventType: "CONTROL_CHANGE", channel: 1, data1: 22, data2: 127, timestampTicks: 0, trackId: "t1" },
+  { eventType: "NOTE_ON", channel: 1, data1: 60, data2: 100, timestampTicks: 480, trackId: "t1" },
+  { eventType: "NOTE_OFF", channel: 1, data1: 60, data2: 0, timestampTicks: 8448, trackId: "t1" },
+];
+const stripPartT2 = [
+  { eventType: "CONTROL_CHANGE", channel: 1, data1: 7, data2: 127, timestampTicks: 0, trackId: "t2" },
+  // CC11=64: t2 renders at HALF t1's amplitude (.198 vs .394) — the R2
+  // survivor restore must change the master peak (.394 from the soloed t1
+  // strip → .198 from the restored t2 strip), so a vacuous same-value pass
+  // is impossible.
+  { eventType: "CONTROL_CHANGE", channel: 1, data1: 11, data2: 64, timestampTicks: 0, trackId: "t2" },
+  { eventType: "CONTROL_CHANGE", channel: 1, data1: 21, data2: 127, timestampTicks: 0, trackId: "t2" },
+  { eventType: "NOTE_ON", channel: 1, data1: 67, data2: 100, timestampTicks: 480, trackId: "t2" },
+  { eventType: "NOTE_OFF", channel: 1, data1: 67, data2: 0, timestampTicks: 8448, trackId: "t2" },
+];
+const stripEvents = [...stripPartT1, ...stripPartT2];
+const STRIP_ROUTING = { t1: { inst: "inst-a", ch: 1 }, t2: { inst: "inst-b", ch: 1 } };
+const STRIPS_V1 = [
+  { strip: "s1", inst: "inst-a", pair: [0, 1] },
+  { strip: "s2", inst: "inst-a", pair: [2, 3] },
+  { strip: "s3", inst: "inst-b", pair: [0, 1] },
+];
+const STRIPS_V2 = [
+  { strip: "s1", inst: "inst-a", pair: [0, 1] },
+  { strip: "s3", inst: "inst-b", pair: [0, 1] },
+];
+const sendStrips = (wires) => ws.send(JSON.stringify({ type: "strips", wires }));
+const sendStripMix = (fields) => ws.send(JSON.stringify({ type: "mix", ...fields }));
+let stPhase = 0, stScanA = null, stScanM = null, stLoadedCount = 0;
+const stAppliedVs = []; let stRejected = 0, stRejectV = -1, stRejectReason = "";
+let stPeak = 0; const stWindow = [];
+let stLayouts = [], stLayoutPushCount = 0, stStripLayoutChanged = null;
+const stMark = () => { stWindow.length = 0; };
+const stWindowMax = () => Math.max(...stWindow, 0);
+const stStop = () => ws.send(JSON.stringify({ type: "transport", command: "stop" }));
+
 // Events chosen so a note IS sounding when the test stops (tick ~600): the
 // stop-panic kill count in the engine's stdout ("voices killed (n=…)") is then
 // ≥1 — real evidence, not an empty-path no-op. The first note (0→300) lies
@@ -454,6 +500,8 @@ const timeout = setTimeout(() => {
     console.error(`TIMEOUT at step ${step} phase=${multiPhase} (scanA=${multiScanPlugin ? "ok" : "none"} scanB=${multiScanPluginB ? "ok" : "none"} loaded=${JSON.stringify(multiLoadedCount)} acks=${[...multiAckSeqs].join(",")} peak=${multiPeak.toFixed(3)} wide=${JSON.stringify(multiWide)} editors=${multiEdOpenA}/${multiEdOpenB}/${multiEdFocus}/${multiEdCloseA}/${multiEdCloseB} headlessSkip=${multiHeadlessSkip} captures=${[...multiCapIds].join(",")} entries=${multiLedger.length})`);
   } else if (mode === "routing") {
     console.error(`TIMEOUT at step ${step} phase=${rtPhase} (scan=${rtScanPlugin ? "ok" : "none"} appliedVs=[${rtAppliedVs.join(",")}] rejected=${rtRejected}@v${rtRejectV} reason="${rtRejectReason}" peak=${rtPeak.toFixed(3)} slice=${JSON.stringify(rtSlice)} stopped=${rtLastStop})`);
+  } else if (mode === "strips") {
+    console.error(`TIMEOUT at step ${step} phase=${stPhase} (scanA=${stScanA ? "ok" : "none"} scanM=${stScanM ? "ok" : "none"} loaded=${stLoadedCount} appliedVs=[${stAppliedVs.join(",")}] rejected=${stRejected}@v${stRejectV} reason="${stRejectReason}" windowMax=${stWindowMax().toFixed(3)} layouts=${JSON.stringify(stLayouts)} layoutPushes=${stLayoutPushCount} stripLayoutChanged=${JSON.stringify(stStripLayoutChanged)})`);
   } else if (mode === "slowload") {
     console.error(`TIMEOUT at step ${step} phase=${slPhase} (scan=${slScanPlugin ? "ok" : "none"} ack=${slAckOk} ackMs=${slAckMs} loaded=${slLoadedOk} loadedMs=${slLoadedMs} play=${slPlayOk} ticks=${slTicksOk} peak=${slPeak.toFixed(3)} stop=${slStopOk})`);
   } else if (mode === "terminal") {
@@ -469,7 +517,7 @@ const timeout = setTimeout(() => {
 // loaded-receipt bound is asserted EXPLICITLY per phase below — but the
 // wall-clock budget still covers them, plus the Stage 3h stall probe (a 2.5 s
 // audio freeze + its tail): 120 s.
-}, mode === "scan" ? 180000 : mode === "host" ? 150000 : mode === "multi" ? 120000 : mode === "latency" ? 90000 : mode === "slowload" ? 90000 : mode === "terminal" ? 150000 : mode === "routing" ? 120000 : 30000);
+}, mode === "scan" ? 180000 : mode === "host" ? 150000 : mode === "multi" ? 120000 : mode === "latency" ? 90000 : mode === "slowload" ? 90000 : mode === "terminal" ? 150000 : mode === "routing" ? 120000 : mode === "strips" ? 150000 : 30000);
 
 // scan-mode flags
 let scanSent = false, scanResultOk = false, aliveAfterCrashOk = false, defaultScanOk = false;
@@ -948,9 +996,9 @@ ws.addEventListener("message", (event) => {
     }
     if (msg.type === "hello" && multiPhase === 0) {
       if (msg.protocol !== 1) fail(`expected protocol 1, got ${msg.protocol}`);
-      if (msg.engineVersion !== "0.11.0-a") fail(`expected 0.10.0, got ${msg.engineVersion}`);
+      if (msg.engineVersion !== "0.11.0") fail(`expected 0.10.0, got ${msg.engineVersion}`);
       if (!fixtureDir) fail("multi mode requires a fixture dir argument");
-      console.log("[test] hello OK (0.10.0) — M2 multi-instance: scanning for BOTH fixture identities...");
+      console.log("[test] hello OK (0.11.0) — M2 multi-instance: scanning for BOTH fixture identities...");
       multiPhase = 1;
       ws.send(JSON.stringify({ type: "scan", dirs: [fixtureDir] }));
     } else if (msg.type === "scan_result" && multiPhase === 1) {
@@ -1110,9 +1158,9 @@ ws.addEventListener("message", (event) => {
     } else if (msg.type === "hello" && rtPhase === 0) {
       helloOk = true;
       if (msg.protocol !== 1) fail(`expected protocol 1, got ${msg.protocol}`);
-      if (msg.engineVersion !== "0.11.0-a") fail(`expected 0.11.0-a, got ${msg.engineVersion}`);
+      if (msg.engineVersion !== "0.11.0") fail(`expected 0.11.0, got ${msg.engineVersion}`);
       if (!fixtureDir) fail("routing mode requires a fixture dir argument");
-      console.log("[test] hello OK (0.11.0-a) — M3 PR1: scanning for the stand-in identity...");
+      console.log("[test] hello OK (0.11.0) — M3 PR1: scanning for the stand-in identity...");
       rtPhase = 1;
       ws.send(JSON.stringify({ type: "scan", dirs: [fixtureDir] }));
     } else if (msg.type === "scan_result" && rtPhase === 1) {
@@ -1188,14 +1236,208 @@ ws.addEventListener("message", (event) => {
         finishAndShutdown();
       }
     }
+  } else if (mode === "strips") {
+    // ── M3 PR2: the strip wiring table (see the header + the state block) ──
+    // Peak windows (the MO-test arithmetic, now with strips at unity):
+    //   t1 sine .394 + t2 sine .198 + aux .25, envelope peaks align ≈ .842
+    //   mute s1 → .448 · solo s1 → .394 (t1 only)
+    //   R2: mid-solo unload → the RESTORED s3 renders t2 at .198 (a DIFFERENT
+    //     number than the soloed .394 — the vacuous-pass killer; the synth
+    //     fallback t1 notes add ≤.079 at their ×0.2 render gain)
+    //   post-R3 (restart replays the tick-0 priming CCs; both mains render,
+    //     the mono identity has NO aux) → .592 — the aux-dead + s1-restored
+    //     grammar is the engine.log half (desktop.yml).
+    if (msg.type === "strips_result") {
+      if (msg.applied === true) {
+        stAppliedVs.push(msg.v);
+        console.log(`[test] strips_result applied v=${msg.v} strips=${msg.strips}`);
+        if (stPhase === 2) {
+          if (msg.v !== 1) fail(`strips: first apply must be v=1, got ${msg.v}`);
+          if (msg.strips !== 3) fail(`strips: v1 must wire 3 strips, got ${msg.strips}`);
+          stPhase = 3;
+          ws.send(JSON.stringify({ type: "layoutAll" }));
+        } else if (stPhase === 12) {
+          if (msg.v !== 2) fail(`strips: restore apply must be v=2, got ${msg.v}`);
+          stPhase = 13;
+          ws.send(JSON.stringify({ type: "layoutAll" }));
+        }
+      } else {
+        stRejected++;
+        stRejectReason = msg.reason ?? "";
+        stRejectV = msg.v ?? -1;
+        console.log(`[test] strips_result REJECTED v=${stRejectV} (unchanged): "${stRejectReason}"`);
+        if (stPhase === 12) {
+          if (stRejectV !== 1) fail(`strips: a rejection must echo the UNCHANGED v=1, got ${stRejectV}`);
+          if (!stRejectReason.includes("unknown instanceId")) fail(`strips: the reject reason must name the unknown instance, got "${stRejectReason}"`);
+          sendStrips(STRIPS_V2);   // full-table restore (s2 is GONE — R3 unwired it)
+        }
+      }
+      return;
+    }
+    if (msg.type === "layouts") {
+      stLayouts = msg.instances ?? [];
+      console.log(`[test] layouts: ${JSON.stringify(stLayouts)}`);
+      if (stPhase === 3) {
+        const a = stLayouts.find((r) => r.instanceId === "inst-a");
+        const b = stLayouts.find((r) => r.instanceId === "inst-b");
+        if (!a || !b) fail(`strips: layoutAll must name both instances, got ${JSON.stringify(stLayouts)}`);
+        if (a.buses !== 2 || a.channels !== 4 || b.buses !== 2 || b.channels !== 4)
+          fail(`strips: expected 2 buses / 4 channels per instance, got ${JSON.stringify(stLayouts)}`);
+        console.log("[test] layout probe ✓ both instances 2 buses / 4 channels — playing with strips at unity");
+        stPhase = 4;
+        ws.send(JSON.stringify({ type: "transport", command: "play", tick: 0 }));
+      } else if (stPhase === 13) {
+        const a = stLayouts.find((r) => r.instanceId === "inst-a");
+        if (!a || a.channels !== 2) fail(`strips: post-R3 inst-a must report 2 channels, got ${JSON.stringify(stLayouts)}`);
+        console.log("[test] M3 PR2 ✓ full strip lifecycle complete — shutting down");
+        finishAndShutdown();
+      }
+      return;
+    }
+    if (msg.type === "instanceLayout") {
+      stLayoutPushCount++;
+      console.log(`[test] instanceLayout push: ${JSON.stringify(msg)}`);
+      return;
+    }
+    if (msg.type === "stripLayoutChanged") {
+      stStripLayoutChanged = msg;
+      console.log(`[test] stripLayoutChanged push (R3 GUARD): ${JSON.stringify(msg)}`);
+      if (msg.instanceId !== "inst-a" || msg.liveChannels !== 2) fail(`strips: R3 push must name inst-a @2 channels, got ${JSON.stringify(msg)}`);
+      if (!(msg.unwired ?? []).includes("s2")) fail(`strips: R3 push must name s2 as unwired, got ${JSON.stringify(msg)}`);
+      return;
+    }
+    if (msg.type === "error") {
+      fail(`strips: unexpected error: ${JSON.stringify(msg)}`);
+    } else if (msg.type === "hello" && stPhase === 0) {
+      helloOk = true;
+      if (msg.protocol !== 1) fail(`expected protocol 1, got ${msg.protocol}`);
+      if (msg.engineVersion !== "0.11.0") fail(`expected 0.11.0, got ${msg.engineVersion}`);
+      if (!fixtureDir) fail("strips mode requires a fixture dir argument");
+      console.log("[test] hello OK (0.11.0) — M3 PR2: scanning for the fixture identities...");
+      stPhase = 1;
+      ws.send(JSON.stringify({ type: "scan", dirs: [fixtureDir] }));
+    } else if (msg.type === "scan_result" && stPhase === 1) {
+      stScanA = (msg.plugins ?? []).find((p) => p.name === "Scorch Test Synth");
+      stScanM = (msg.plugins ?? []).find((p) => p.name === "Scorch Test Synth M");
+      if (!stScanA) fail(`strips mode: identity A ("Scorch Test Synth") required, got ${JSON.stringify(msg.plugins)}`);
+      if (!stScanM) fail(`strips mode: identity M ("Scorch Test Synth M", the mono-output R3 identity) required — the engine build must compile the fixture`);
+      console.log(`[test] identities A (${stScanA.uid}) + M (${stScanM.uid}, 2-out) — loading inst-a + inst-b from A; strips table v1 next`);
+      stPhase = 2;
+      ws.send(JSON.stringify({
+        type: "load", seq: 1,
+        events: stripEvents,
+        meta: STRIP_META,
+        plugins: [
+          { instanceId: "inst-a", uid: stScanA.uid, path: stScanA.path, name: stScanA.name },
+          { instanceId: "inst-b", uid: stScanA.uid, path: stScanA.path, name: stScanA.name },
+        ],
+        routing: STRIP_ROUTING,
+      }));
+    } else if (msg.type === "plugin_state" && msg.state === "loaded" && stPhase === 2) {
+      stLoadedCount++;
+      if (stLoadedCount === 2) {
+        console.log("[test] both instances live (4-out each) — applying strips v1 (s1=inst-a main, s2=inst-a AUX, s3=inst-b main)");
+        sendStrips(STRIPS_V1);
+      }
+    } else if (msg.type === "plugin_state" && msg.state === "loaded" && stPhase === 9) {
+      // inst-a re-committed (identity M, 2-out) — the R3 guard must have
+      // fired on s2 (the push handler above asserts the payload). Give the
+      // push a beat (the worker drains it within 1 s), then play.
+      stPhase = 10;
+      setTimeout(() => {
+        if (stStripLayoutChanged === null) fail("strips R3: no stripLayoutChanged push within 1 s of the narrowed commit — the layout guard never fired");
+        console.log("[test] phase S-5 ✓ R3 guard pushed (s2 named, liveChannels=2) — playing the narrowed graph");
+        stMark();
+        ws.send(JSON.stringify({ type: "transport", command: "play", tick: 0 }));
+      }, 1200);
+    } else if (msg.type === "state") {
+      stPeak = Math.max(stPeak, msg.peak ?? 0);
+      if (stPhase >= 4) stWindow.push(msg.peak ?? 0);
+      if (stPhase === 4 && msg.playing && msg.tick >= 2000) {
+        const pk = stWindowMax();
+        if (!(pk > 0.74 && pk < 0.92)) fail(`strips unity: master peak ${pk.toFixed(3)} must be ≈0.842 (t1 main .394 + t1 aux .25 + t2 main .198 through strips) — window=${stWindow.map((p) => p.toFixed(2)).join(",")}`);
+        console.log(`[test] phase S-1 ✓ all strips unity (peak ${pk.toFixed(3)} ≈ .394+.25+.198) — muting s1 MID-PLAY`);
+        stMark();
+        stPhase = 5;
+        sendStripMix({ stripMutes: ["s1"] });
+      } else if (stPhase === 5 && msg.playing && msg.tick >= 2800) {
+        const pk = stWindowMax();
+        if (!(pk > 0.36 && pk < 0.55)) fail(`strips mute: master peak ${pk.toFixed(3)} must be ≈0.448 (t1 main ramped out; aux .25 + t2 main .198 remain) — the ramped audio-domain mute failed`);
+        console.log(`[test] phase S-2 ✓ s1 muted MID-PLAY (peak ${pk.toFixed(3)} ≈ .25+.198) — unmuting, soloing s1 (solo-in-place)`);
+        stMark();
+        stPhase = 6;
+        sendStripMix({ stripMutes: [], stripSolos: ["s1"] });
+      } else if (stPhase === 6 && msg.playing && msg.tick >= 3600) {
+        const pk = stWindowMax();
+        if (!(pk > 0.30 && pk < 0.50)) fail(`strips solo: master peak ${pk.toFixed(3)} must be ≈0.394 (t1 main ONLY — solo-in-place muted s2+s3)`);
+        console.log(`[test] phase S-3 ✓ solo s1 (peak ${pk.toFixed(3)} ≈ .394; s2+s3 muted) — R2: MID-SOLO unloading inst-a`);
+        stMark();
+        stPhase = 7;
+        ws.send(JSON.stringify({
+          type: "load", seq: 2,
+          events: stripEvents,
+          meta: STRIP_META,
+          plugins: [
+            { instanceId: "inst-b", uid: stScanA.uid, path: stScanA.path, name: stScanA.name },
+          ],
+          // t1 leaves the ROUTING with its instance (the load-borne routing
+          // validator refuses a set that references the removed inst-a): t1
+          // falls back to the byte-stable synth path (×0.2 render gain) —
+          // its unmap is the R2 story's own receipt trail.
+          routing: { t2: STRIP_ROUTING.t2 },
+        }));
+      } else if (stPhase === 7 && msg.playing && msg.tick >= 4400) {
+        const pk = stWindowMax();
+        // R2's wire-side truth: the SOLOED strip's source died mid-solo and
+        // the survivor (s3, t2's sine) is AUDIBLE AGAIN at ≈0.198 — a
+        // DIFFERENT number than the soloed .394 (no vacuous pass), so the
+        // effective-mute recompute provably ran on the teardown. The engine.log
+        // grammar names the recompute + the R4 flush (desktop.yml's half).
+        if (!(pk > 0.14 && pk < 0.32)) fail(`strips R2: survivor peak ${pk.toFixed(3)} must restore to ≈0.198 (t2 audible via s3 after the soloed strip's source unloaded mid-solo; .394 would mean the unload never ran)`);
+        console.log(`[test] phase S-4 ✓ R2 survivor restored (peak ${pk.toFixed(3)} ≈ .198 — s3 audible after mid-solo unload) — clearing the solo, stopping for the R3 swap`);
+        stMark();
+        stPhase = 8;
+        sendStripMix({ stripSolos: [] });
+        stStop();
+      } else if (stPhase === 8 && msg.playing === false) {
+        stPhase = 9;
+        console.log("[test] stopped — R3: swapping inst-a to identity M (the mono-output build — live node genuinely narrows to 2 channels)");
+        ws.send(JSON.stringify({
+          type: "load", seq: 3,
+          events: stripEvents,
+          meta: STRIP_META,
+          plugins: [
+            { instanceId: "inst-a", uid: stScanM.uid, path: stScanM.path, name: stScanM.name },
+            { instanceId: "inst-b", uid: stScanA.uid, path: stScanA.path, name: stScanA.name },
+          ],
+          routing: STRIP_ROUTING,
+        }));
+      } else if (stPhase === 10 && msg.playing && msg.tick >= 1200) {
+        const pk = stWindowMax();
+        // The transport restarted at tick 0, so the reloaded inst-a (identity
+        // M) DOES receive the tick-0 priming CCs → both sines render (t1 via
+        // the RESTORED s1 + t2 via s3) ≈ .788. The M identity HAS no aux bus:
+        // a stuck s2 wire (silent dead wire) or an aux double-render would
+        // push the peak to ≈1.038; a lost s1 restore would drop it to ≈.394.
+        if (!(pk > 0.50 && pk < 0.68)) fail(`strips R3: post-swap peak ${pk.toFixed(3)} must be ≈0.592 (both mains .394+.198 via s1+s3 — a stuck s2/aux leak would read ≈0.842, a lost s1 restore ≈0.198)`);
+        console.log(`[test] phase S-6 ✓ post-R3 graph honest (peak ${pk.toFixed(3)} = both mains; no dead wire, no aux leak) — stopping, R1 reject next`);
+        stMark();
+        stPhase = 11;
+        stStop();
+      } else if (stPhase === 11 && msg.playing === false) {
+        stPhase = 12;
+        console.log("[test] stopped — sending the R1-BAD strips table (unknown instance)");
+        sendStrips([{ strip: "sX", inst: "inst-nope", pair: [0, 1] }]);
+      }
+    }
   } else if (mode === "slowload") {
     // ── M1-hotfix: the heavy-load death class (see the state block above) ──
     if (msg.type === "hello" && slPhase === 0) {
       if (msg.protocol !== 1) fail(`expected protocol 1, got ${msg.protocol}`);
-      if (msg.engineVersion !== "0.11.0-a") fail(`expected 0.11.0-a, got ${msg.engineVersion}`);
+      if (msg.engineVersion !== "0.11.0") fail(`expected 0.11.0, got ${msg.engineVersion}`);
       if (!fixtureDir) fail("slowload mode requires a fixture dir argument");
       helloOk = true;
-      console.log(`[test] hello OK (0.10.0) — slow-load knobs: create=${SLOW_CREATE_S}s prepareN=${process.env.SCORCH_TESTVST_SLOW_PREPARE_N ?? 0}(x${SLOW_PREPARE_S}s) — scanning...`);
+      console.log(`[test] hello OK (0.11.0) — slow-load knobs: create=${SLOW_CREATE_S}s prepareN=${process.env.SCORCH_TESTVST_SLOW_PREPARE_N ?? 0}(x${SLOW_PREPARE_S}s) — scanning...`);
       slPhase = 1;
       ws.send(JSON.stringify({ type: "scan", dirs: [fixtureDir] }));
     } else if (msg.type === "scan_result" && slPhase === 1) {
@@ -1247,10 +1489,10 @@ ws.addEventListener("message", (event) => {
     // ── 0.9.2: the init-queue terminal-receipt invariant (see the state block) ──
     if (msg.type === "hello" && trPhase === 0) {
       if (msg.protocol !== 1) fail(`expected protocol 1, got ${msg.protocol}`);
-      if (msg.engineVersion !== "0.11.0-a") fail(`expected 0.11.0-a, got ${msg.engineVersion}`);
+      if (msg.engineVersion !== "0.11.0") fail(`expected 0.11.0, got ${msg.engineVersion}`);
       if (!fixtureDir) fail("terminal mode requires a fixture dir argument");
       helloOk = true;
-      console.log(`[test] hello OK (0.10.0) — terminal-receipt knobs: jam=${TR_JAM_S}s timeout=${TR_TIMEOUT_S}s — scanning...`);
+      console.log(`[test] hello OK (0.11.0) — terminal-receipt knobs: jam=${TR_JAM_S}s timeout=${TR_TIMEOUT_S}s — scanning...`);
       trPhase = 1;
       ws.send(JSON.stringify({ type: "scan", dirs: [fixtureDir] }));
     } else if (msg.type === "scan_result" && trPhase === 1) {
@@ -1876,7 +2118,7 @@ ws.addEventListener("message", (event) => {
     if (msg.type === "hello" && !helloOk) {
       helloOk = true;
       if (msg.protocol !== 1) fail(`expected protocol 1, got ${msg.protocol}`);
-      if (msg.engineVersion !== "0.11.0-a") fail(`expected 0.11.0-a, got ${msg.engineVersion}`);
+      if (msg.engineVersion !== "0.11.0") fail(`expected 0.11.0, got ${msg.engineVersion}`);
       if (!fixtureDir) fail("scan mode requires a fixture dir argument");
       console.log("[test] hello OK — sending scan of fixture dir + nested dir (dedup proof):", fixtureDir);
       scanSent = true;
@@ -2036,11 +2278,11 @@ ws.addEventListener("message", (event) => {
     // ── Stage 3i: runtime latency tracking (detect, then mini-republish) ──
     if (msg.type === "hello" && latPhase === 0) {
       if (msg.protocol !== 1) fail(`expected protocol 1, got ${msg.protocol}`);
-      if (msg.engineVersion !== "0.11.0-a") fail(`expected 0.11.0-a, got ${msg.engineVersion}`);
+      if (msg.engineVersion !== "0.11.0") fail(`expected 0.11.0, got ${msg.engineVersion}`);
       if (!fixtureDir) fail("latency mode requires a fixture dir argument");
       helloOk = true;
       latPhase = 1;
-      console.log("[test] hello OK (0.10.0) — scanning for the stand-in host plugin...");
+      console.log("[test] hello OK (0.11.0) — scanning for the stand-in host plugin...");
       ws.send(JSON.stringify({ type: "dispatch_log", enable: true }));   // Phase 2: the pre-fire proof is ledger-based
       ws.send(JSON.stringify({ type: "scan", dirs: [fixtureDir] }));
     } else if (msg.type === "scan_result" && latPhase === 1) {
@@ -2096,7 +2338,7 @@ ws.addEventListener("message", (event) => {
     if (msg.type === "hello" && !helloOk) {
       helloOk = true;
       if (msg.protocol !== 1) fail(`expected protocol 1, got ${msg.protocol}`);
-      if (msg.engineVersion !== "0.11.0-a") fail(`expected 0.11.0-a, got ${msg.engineVersion}`);
+      if (msg.engineVersion !== "0.11.0") fail(`expected 0.11.0, got ${msg.engineVersion}`);
       // Stage 3c close-out: the dispatch ledger streams what the engine
       // ACTUALLY dispatched — the replay-burst and re-attack asserts read it.
       ws.send(JSON.stringify({ type: "dispatch_log", enable: true }));
@@ -2587,6 +2829,26 @@ ws.addEventListener("close", () => {
       process.exit(0);
     } else {
       console.error(`FAILED: hello=${helloOk} scan=${rtScanPlugin ? "ok" : "none"} appliedVs=[${rtAppliedVs}] rejected=${rtRejected}@v${rtRejectV} reason="${rtRejectReason}" stopped=${rtLastStop} ledger79=${rtLedger.some((e) => e.k === 1 && e.a === 79)} phase=${rtPhase}`);
+      process.exit(1);
+    }
+  } else if (mode === "strips") {
+    allOk = helloOk && stScanA != null && stScanM != null && stAppliedVs.join(",") === "1,2" &&
+        stRejected === 1 && stRejectV === 1 && stStripLayoutChanged != null && stLayoutPushCount >= 2;
+    if (allOk) {
+      console.log("");
+      console.log("========================================");
+      console.log("ALL STRIPS TESTS PASSED (M3 PR2):");
+      console.log("  strips v1 applied: s1=inst-a main, s2=inst-a AUX (the 4-out fixture), s3=inst-b main; unwired channels NAMED");
+      console.log("  layout probe: both instances 2 buses / 4 channels (layoutAll + per-commit instanceLayout pushes)");
+      console.log("  audio-domain mix mid-play: mute s1 (≈0.644), solo-in-place s1 (≈0.394), unmute — the ~10ms ramped gains");
+      console.log("  R2: the SOLOED strip's source unloaded mid-solo → survivor s3 audible again at ≈0.394 (effective-mute recompute)");
+      console.log("  R3: inst-a swapped to the MONO identity (a genuinely narrower live node, 2-out) — the guard unwired s2 with the stripLayoutChanged push (s2 named), no silent dead wire, no aux leak");
+      console.log("  R1: the unknown-instance strips table REJECTED — v stayed 1; the restore applied as v2");
+      console.log("  engine.log side: desktop.yml asserts the receipt grammar ([strip] wired/teardown/teardown flush/layout guard/mix) + the v arithmetic");
+      console.log("========================================");
+      process.exit(0);
+    } else {
+      console.error(`FAILED: hello=${helloOk} scanA=${stScanA ? "ok" : "none"} scanM=${stScanM ? "ok" : "none"} appliedVs=[${stAppliedVs}] rejected=${stRejected}@v${stRejectV} reason="${stRejectReason}" layouts=${JSON.stringify(stLayouts)} layoutPushes=${stLayoutPushCount} stripLayoutChanged=${JSON.stringify(stStripLayoutChanged)} phase=${stPhase}`);
       process.exit(1);
     }
   } else {

@@ -2909,3 +2909,132 @@ frontend owns the table — this PR).
   vendor-boundary rule stands — extending `InstanceMidiSelector` would touch
   the vendored file, which this PR did NOT need (channel tagging/filtering is
   callback-side in main.cpp; the selector passes what it is given).
+
+## M3 PR2 — the strip mixer + multi-output buses (engine 0.11.0)
+
+Stage B of the approved M3 brief, on top of PR1's routing table. D1's
+per-strip `StripMixerProcessor` is ENGINE GLUE in main.cpp (like
+`InstanceMidiSelector` — the vendored core stays byte-untouched, diff vs
+`0fd032c` = 0 lines); the graph wiring uses the vendor's PUBLIC per-channel
+connection API exactly as `HostCore::addPluginNode` does.
+
+### Mechanics (the D1 answer, as shipped)
+
+- One 2-in/2-out `StripMixerProcessor` per wired `{instanceId, outChannelPair}`;
+  graph shape: plugin node → strip node → output IO node. Multiple strips sum
+  at the output node (the vendor's destination-channel accumulation). Strip
+  nodes go through `g_host.graph()->addNode/removeNode` DIRECTLY — public API;
+  `removeNodeByID` stays plugin-only because it owns `liveCount_` (strips must
+  not pollute the "is anything live" counter).
+- Params ride the `g_selectorMidiSource` pattern: a fixed 16-slot array of
+  atomics (`kMaxStrips = 16`), WS-published EFFECTIVE gain, one acquire per
+  block. The mute is a RAMPED gain-0; solo is SOLO-IN-PLACE over the ACTIVE
+  strips; the ramp is block-quantized (~10 ms, one lerp + two multiplies per
+  sample per channel — the D1 CPU budget).
+- The M2 unity guard is UNCHANGED in code: it measures the summed device
+  buffer after `graph->processBlock`, which is now post-master (behind strip
+  gains). Same semantics, new anchor; the clip counter still reads zero at
+  unity.
+- `{"type":"strips","wires":[…]}` is the audio-domain counterpart of the
+  routing table (D2 ownership): R1 atomic-or-nothing (WS validation pass +
+  a message-thread job that RE-VALIDATES every live truth before ANY
+  mutation), full-table semantics (instances absent from the message are
+  unwired, receipted), every output channel of a mentioned instance accounted
+  (wired pair → strip; unwired channel → NAMED receipt, its default
+  main→master wiring removed), `strips_result` v arithmetic (+EXACTLY ONE per
+  apply, unchanged on reject). Protocol stays 1 (additive only).
+- `mix` gains the strip fields additively (`stripGains` 0..4 clamped+named,
+  `stripMutes`, `stripSolos`); the per-TRACK dispatch gate is untouched.
+- Lifecycle: a source-instance unload tears its ACTIVE strips down (named
+  receipts) but the TABLE entries survive inactive — a later load of the same
+  instanceId rewires + reactivates them ("restored on load"), gains re-published
+  from the last mix state. `v` advances ONLY on applied strips messages.
+- Layout probe: `{"type":"layoutAll"}` → `layouts`; a per-commit
+  `instanceLayout` push + the `[layout] instance=X: B buses, C output channels`
+  receipt (live-node truth, not the captured table).
+
+### The riders, as landed
+
+- **R2 SOLO/UNLOAD INTERACTION**: solo-in-place evaluates over the ACTIVE
+  strips (`anyActiveStripSolo`) — a solo naming a DEAD strip holds nothing.
+  The teardown/reactivate publishes re-run the effective-gain computation, so
+  a mid-solo unload of the soloed strip's source restores the survivors.
+  CI: the strips-mode S-4 phase — the survivor's peak is a DIFFERENT number
+  (t2 renders at CC11=64 → .198) than the soloed strip's (.394), so a vacuous
+  same-value pass is impossible (the first local run caught exactly that
+  vacuous pass: the R2 load was refused wholesale by the load-borne routing
+  validator because its routing still referenced the removed instance — the
+  load now re-branches t1 out of the routing with its instance).
+- **R3 LAYOUT-CHANGE GUARD**: the commit is the checkpoint — the rewire pass
+  compares every bound pair against the LIVE node's
+  `getTotalNumOutputChannels()`; a pair the node can no longer feed is
+  unwired with named receipts + the `stripLayoutChanged` push (never a silent
+  dead wire), and the apply job re-checks live truth before mutating
+  (one failure = zero mutation).
+  **The honest limitation, stated (not skipped):** a TRUE mid-stream
+  plugin-initiated bus-count change is NOT producible by a VST3 fixture —
+  bus topology is construction-fixed and host-negotiated, and the FINDING
+  below shows the JUCE wrapper acknowledges `activateBus` for any declared
+  bus, so a plugin-side layout refusal cannot narrow a live node either. The
+  CI exercises the guard with the REAL narrow-surface shape that exists: a
+  binary swap to the mono-output identity ("Scorch Test Synth M", main bus
+  only, 2-out — a third CMake target of the same fixture source), which makes
+  a wired pair [2,3] genuinely exceed the live node. The guard's mismatch
+  path (audit → receipt → clean unwire → push) runs end-to-end there.
+- **R4 STRIP TEARDOWN NOTE HYGIENE**: the audio-side slot wipe
+  (`g_slotStateClearPending` servicing) now COUNTS the abandoned held notes
+  it clears (all-sound-off semantics — the notes die with the slot's state,
+  exactly like the rebind-flush's ledger clear) and the worker speaks the
+  named receipt: `[strip] teardown flush: slot=S instance=X held=H wiped`.
+  The CC120 events themselves cannot reach a node that is being removed (no
+  two-phase retire exists — that would be a redesign, outside the
+  receipt-level rider budget); the receipt says exactly what happened, and
+  the CI asserts held>=1 with a note sounding at the unload. The retire job's
+  own `[strip] teardown:` receipts name every strip before the node goes.
+
+### FINDING — the JUCE VST3 wrapper and bus activation (why the first R3
+### fixture design was replaced)
+
+The first implementation armed the fixture to REFUSE aux-bus layouts at
+runtime (`isBusesLayoutSupported` returning false for enabled-aux layouts).
+The local strips run showed the host's enable-all landing ANYWAY: the
+host-side wrapper (`juce_VST3PluginFormat.cpp`) maps bus enable to
+`IComponent::activateBus`, and the module-side wrapper acknowledges
+activation of any DECLARED bus — the AudioProcessor's layout-support override
+is consulted for ARRANGEMENTS, not for ACTIVATION. Conclusion recorded here
+so nobody re-attempts it: under this hosting stack, a live node's channel
+count can only be narrowed by a narrower DECLARED surface (the M identity) or
+a re-negotiation the host itself performs. The runtime-refuse hook was
+removed; the M identity is the simulation.
+
+### Protocol additions (additive; version stays 1)
+
+`strips` / `strips_result`, the `mix` strip fields, `layoutAll` / `layouts`,
+the `instanceLayout` + `stripLayoutChanged` pushes, the `[strip] …` and
+`[layout] …` receipt grammar, and the `SCORCH_STRIP_LOG=1` per-strip stats
+drain (1 Hz; prePeak = content truth, postPeak = delivery truth — the
+stats-reset races the audio max by at most one sample's contribution per
+window, the same bounded-artifact class as the drop counter).
+
+### Byte-stability contract
+
+Instances never mentioned by a strips message keep the pre-PR2 direct wiring
+byte-for-byte (the strips machinery only rewires instances the table
+mentions); the aux bus stays enabled-but-unconnected (the 3e-3 shape) until a
+strip claims it; every pre-existing CI peak assertion is untouched.
+
+### Validation receipts (local, null device per the M1-runner precedent)
+
+ALL ELEVEN protocol modes at 0.11.0 — null-audio, no-device, scale, host
+(INFTAIL), multi, routing, strips (the new eleventh), latency, slowload (CI
+knobs), terminal (CI watchdog knobs), scan (happy path + probe-timeout +
+nested walk + dedup) — engine exit 0 each, plus the strips-mode engine.log
+grammar verified slice-by-slice against every desktop D7 assertion
+(v=1/v=2 exactly-once, teardown ×2, `teardown flush: slot=0 instance=inst-a
+held=1 wiped`, the layout guard + push, the 4ch→1bus/2ch layout receipts, the
+R1 rejection, the stats drains). Two local substitutions, both documented:
+no-device ran against `--no-audio` (this box exposes an ALSA null device;
+Windows CI's device-less runner is the authoritative environment), and the
+scan crash/corrupt negative paths are Windows-only (JUCE's Linux describe
+never loads binaries without a moduleinfo.json, so a gcc-built CrashDummy
+cannot crash the scan child locally — the cl-built CI fixtures do).

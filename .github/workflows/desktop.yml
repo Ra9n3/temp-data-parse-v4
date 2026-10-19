@@ -66,8 +66,12 @@ jobs:
           }
           # Stage 3c-1: also build the free stand-in host target ("Scorch Test
           # Synth") — the CI fixture for scan + hosting tests (commercial
-          # libraries like BBCSO cannot run in CI).
+          # libraries like BBCSO cannot run in CI). M3 PR2: Test D7's R3 swap
+          # needs the MONO-output identity ("Scorch Test Synth M") as well —
+          # both fixture targets are explicit existence asserts here.
           cmake --build engine/build --target scorch-test-synth_VST3 --parallel
+          cmake --build engine/build --target scorch-test-synth-b_VST3 --parallel
+          cmake --build engine/build --target scorch-test-synth-m_VST3 --parallel
           New-Item -ItemType Directory -Path src-tauri/binaries -Force | Out-Null
           Copy-Item engine/build/scorch-engine.exe src-tauri/binaries/scorch-engine.exe -Force
           Write-Host "Engine exe copied to src-tauri/binaries/"
@@ -90,6 +94,7 @@ jobs:
           $stagedNames = ($vst3s | ForEach-Object { $_.Name }) -join ", "
           if (-not ($vst3s | Where-Object { $_.Name -eq "Scorch Test Synth.vst3" })) { throw "the A host fixture (Scorch Test Synth.vst3) missing from the build output" }
           if (-not ($vst3s | Where-Object { $_.Name -eq "Scorch Test Synth B.vst3" })) { throw "the M2 diff-replace fixture (Scorch Test Synth B.vst3) missing from the build output" }
+          if (-not ($vst3s | Where-Object { $_.Name -eq "Scorch Test Synth M.vst3" })) { throw "the M3 PR2 mono-output fixture (Scorch Test Synth M.vst3) missing from the build output" }
           Write-Host "Valid fixtures staged: $stagedNames"
 
           # 2. Crash dummy: a VALID shared library whose GetPluginFactory
@@ -915,6 +920,95 @@ jobs:
           } finally {
             Stop-Process -Id $procD6.Id -Force -ErrorAction SilentlyContinue
             Remove-Item Env:\SCORCH_TESTVST_LOG -ErrorAction SilentlyContinue
+          }
+
+          # Test D7 — M3 PR2: the STRIP wiring table (multi-output buses +
+          # per-strip gain/mute/solo). Two instances (4-out each: the fixture's
+          # main + aux stereo buses); strips v1 wires s1=inst-a main, s2=inst-a
+          # AUX (the 0.25 constant through CC#22), s3=inst-b main; unwired
+          # channels NAMED. Mid-play: audio-domain mute (ramped), solo-in-place,
+          # then R2 — the SOLOED strip's source instance unloads mid-solo and
+          # the survivor must come back audible (effective-mute recompute) with
+          # the R4 teardown-flush receipt counting the abandoned held notes.
+          # Then R3 — inst-a swaps to the MONO-output identity ("Scorch Test
+          # Synth M", main bus only): the live node's output surface is
+          # genuinely narrower (2-out), and the layout guard unwires s2 with
+          # named receipts + the stripLayoutChanged push; s1 rewires/restores
+          # on the new node, and the master renders the honest narrowed graph
+          # (no silent dead wire, no aux leak). (A plugin-side layout REFUSAL
+          # cannot produce this: the JUCE VST3 wrapper acknowledges activateBus
+          # for any declared bus, so the host's enable-all always lands — the
+          # narrower DECLARED surface is the honest simulation.) R1 — the bad
+          # table rejected with v unchanged; the restore lands as v2. The
+          # harness proves the wire side (strips_result v arithmetic, the
+          # pushes, the peak windows); this step asserts the engine.log
+          # grammar: [strip] wired/teardown/teardown flush/layout guard/mix,
+          # the [layout] probe receipts, the [strip] stats drains.
+          Write-Host "=== Test D7: M3 strips (atomic wiring, ramped mix, R2 solo/unload, R3 layout guard, R4 flush) ==="
+          $env:SCORCH_TESTVST_LOG = "1"
+          $env:SCORCH_STRIP_LOG = "1"
+          $engineLogD7 = Join-Path $env:APPDATA "scorch\engine.log"
+          $logLinesBeforeD7 = 0
+          if (Test-Path $engineLogD7) { $logLinesBeforeD7 = (Get-Content $engineLogD7 | Measure-Object -Line).Lines }
+          $procD7 = Start-Process -FilePath "engine/build/scorch-engine.exe" -ArgumentList "--port","9388","--null-audio" -PassThru -NoNewWindow -RedirectStandardOutput "engine-d7-stdout.txt" -RedirectStandardError "engine-d7-stderr.txt"
+          Start-Sleep -Seconds 3
+          try {
+            if ($procD7.HasExited) {
+              Write-Host "Engine D7 exited early (code=$($procD7.ExitCode)). stdout:"
+              if (Test-Path engine-d7-stdout.txt) { Get-Content engine-d7-stdout.txt }
+              throw "Engine D7 process exited before test could connect"
+            }
+            node .github/scripts/test-engine-protocol.mjs 9388 strips "$env:SCAN_FIXTURES"
+            if ($LASTEXITCODE -ne 0) {
+              Write-Host "Engine D7 stdout:"
+              if (Test-Path engine-d7-stdout.txt) { Get-Content engine-d7-stdout.txt }
+              Write-Host "Engine D7 stderr:"
+              if (Test-Path engine-d7-stderr.txt) { Get-Content engine-d7-stderr.txt }
+              if (Test-Path $engineLogD7) {
+                Write-Host "Engine D7 engine.log slice (last 120 lines):"
+                Get-Content $engineLogD7 | Select-Object -Last 120
+              }
+              throw "Engine D7 strips test failed"
+            }
+            # ── engine.log grammar (the receipt half the harness cannot see) ──
+            Start-Sleep -Seconds 2
+            $d7Log = @(Get-Content $engineLogD7 | Select-Object -Skip $logLinesBeforeD7)
+            $d7 = { param($pattern) @($d7Log | Where-Object { $_ -like $pattern }).Count }
+            if (& $d7 "[strip] applied: v=1 strips=3 unwired=2 tornDown=0*" -ne 1) { throw "D7: expected exactly one 'applied v=1 strips=3 unwired=2' receipt" }
+            if (& $d7 "[strip] applied: v=2 strips=2*" -ne 1) { throw "D7: expected exactly one 'applied v=2 strips=2' receipt" }
+            if (& $d7 "[strip] wired: strip=s1 instance=inst-a pair=[0,1]*" -lt 2) { throw "D7: s1 must wire twice (v1 + the R3 'restored on load' rewire)" }
+            if (& $d7 "[strip] wired: strip=s2 instance=inst-a pair=[2,3]*" -ne 1) { throw "D7: s2 must wire exactly once (v1 — then the R3 guard unwires it)" }
+            if (& $d7 "[strip] wired: strip=s3 instance=inst-b pair=[0,1]*" -lt 2) { throw "D7: s3 must wire twice (v1 + v2 restore)" }
+            if (& $d7 "*unwired — named, silent by design" -ne 4) { throw "D7: expected exactly 4 unwired-channel receipts (inst-b bus 1 at v1 + both bus-1 pairs at the v2 restore)" }
+            if (& $d7 "[strip] teardown: strip=s1 instance=inst-a*" -ne 1) { throw "D7: expected exactly one s1 teardown receipt (the R2 source unload)" }
+            if (& $d7 "[strip] teardown: strip=s2 instance=inst-a*" -ne 1) { throw "D7: expected exactly one s2 teardown receipt (the R2 source unload)" }
+            $flush = @($d7Log | Where-Object { $_ -like "[strip] teardown flush: slot=0 instance=inst-a held=*" })
+            if ($flush.Count -ne 1) { throw "D7: expected exactly ONE teardown-flush receipt (the R4 slot wipe), got $($flush.Count)" }
+            if ($flush[0] -notmatch "held=(\d+)") { throw "D7: the teardown-flush receipt must carry the held count" }
+            if ([int]$flush[0] -match "held=(\d+)" -and [int]$Matches[1] -lt 1) { throw "D7: R4 flush held count must be >= 1 (note 60 was sounding when inst-a unloaded)" }
+            Write-Host "D7 R4 flush: $($flush[0])"
+            if (& $d7 "[strip] mix: solos=*mutes=[s1]*" -ne 1) { throw "D7: expected exactly one strip-mix receipt naming mutes=[s1]" }
+            if (& $d7 "[strip] mix: solos=[s1]*" -ne 1) { throw "D7: expected exactly one strip-mix receipt naming solos=[s1] (solo-in-place)" }
+            if (& $d7 "*solo-in-place*" -ne 1) { throw "D7: expected exactly one solo-in-place mix receipt" }
+            if (& $d7 "[strip] layout guard: strip=s2 instance=inst-a pair=[2,3] exceeds live output channels 2*" -ne 1) { throw "D7: expected exactly one R3 layout-guard receipt naming s2 @2 live channels" }
+            if (& $d7 "[strip] layout push sent: instance=inst-a liveChannels=2" -ne 1) { throw "D7: expected exactly one stripLayoutChanged push receipt" }
+            if (& $d7 "[strip] rewired SKIPPED*strip limit*" -ne 0) { throw "D7: unexpected strip-limit skips" }
+            if (& $d7 "[layout] instance=inst-a: 2 buses, 4 output channels*" -ne 1) { throw "D7: expected exactly one 4-channel layout receipt for inst-a (first commit)" }
+            if (& $d7 "[layout] instance=inst-a: 1 buses, 2 output channels*" -ne 1) { throw "D7: expected exactly one 2-channel/1-bus layout receipt for inst-a (the R3 mono commit)" }
+            if (& $d7 "[layout] instance=inst-b: 2 buses, 4 output channels*" -ne 1) { throw "D7: expected exactly one 4-channel layout receipt for inst-b" }
+            if (& $d7 "[strip] rejected: reason=unknown instanceId*" -ne 1) { throw "D7: expected exactly one R1 rejection receipt" }
+            if (& $d7 "[strip] stats: strip=s1*" -lt 1) { throw "D7: strip stats drain missing for s1 (SCORCH_STRIP_LOG=1)" }
+            if (& $d7 "[strip] stats: strip=s2*" -lt 1) { throw "D7: strip stats drain missing for s2" }
+            if (& $d7 "[strip] stats: strip=s3*" -lt 1) { throw "D7: strip stats drain missing for s3" }
+            if (& $d7 "[strip] wired FAILED*" -ne 0) { throw "D7: unexpected strip wiring failures" }
+            Write-Host "D7 engine.log receipts: v=1/2 exactly-once, teardown x2 + R4 flush (held>=1), R3 guard + push, layout receipts 4ch->2ch, R1 rejection, stats drains"
+            $procD7.WaitForExit(20000) | Out-Null
+            if (-not $procD7.HasExited -or $procD7.ExitCode -ne 0) { throw "Engine D7 did not exit cleanly (code=$($procD7.ExitCode))" }
+            Write-Host "Engine D7 clean exit 0 (strip atomicity + riders verified: no silent dead wires, ever)"
+          } finally {
+            Stop-Process -Id $procD7.Id -Force -ErrorAction SilentlyContinue
+            Remove-Item Env:\SCORCH_TESTVST_LOG -ErrorAction SilentlyContinue
+            Remove-Item Env:\SCORCH_STRIP_LOG -ErrorAction SilentlyContinue
           }
 
           # Test E — Stage 3c-hotfix: REAL-PROJECT-SIZED load. The CI gap was
