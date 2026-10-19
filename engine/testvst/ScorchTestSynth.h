@@ -106,8 +106,9 @@
 //       CC7/CC11 = 127, vel 100) into a ~1.211 peak — THE USER'S REAL
 //       MEASURED FAILURE becomes the regression vector, meaningfully above
 //       the 1.0 ceiling (+1.66 dB, not borderline). While armed the fixture
-//       self-reports its post-hot buffer peak at ~1 Hz
-//       ("[testvst] hot peak=...") so the harness/CI can assert the
+//       self-reports its post-hot buffer peak on the FIRST SOUNDING block
+//       and then on a ~250 ms cadence ("[testvst] hot peak=...", running
+//       max, silent while silent) so the harness/CI can assert the
 //       OVER-CEILING fixture truth independently of the engine's
 //       post-limiter measurement. 0 (default) = inert, byte-identical output.
 
@@ -336,20 +337,28 @@ public:
         }
 
         // M4 (R-B): the hot vector's self-report — while the knob is armed,
-        // track the post-hot MAIN-bus buffer peak and log it at ~1 Hz (block
-        // arithmetic like the playhead throttle; no RNG, no allocation). The
-        // harness/CI asserts this value is MEANINGFULLY above the ceiling
-        // (the fixture-side truth) while the engine's post-limiter peak
-        // stays at/below it — the two numbers together ARE the GR proof.
+        // track the post-hot MAIN-bus buffer peak and log it on the FIRST
+        // SOUNDING block + a ~250 ms cadence (block arithmetic like the
+        // playhead throttle; no RNG, no allocation). The CI transport in the
+        // limiter mode rolls ~0.8 s — a 1 Hz cadence would log ONLY the
+        // silent first block (peak 0.000, the Windows D8 finding) — so the
+        // receipt waits for REAL sound and then follows the running max.
+        // Only meaningful values log; the harness/CI asserts the value is
+        // MEANINGFULLY above the ceiling (the fixture-side truth) while the
+        // engine's post-limiter peak stays at/below it — the two numbers
+        // together ARE the GR proof.
         if (hotAmp.load() > 0.0f) {
             float hotPk = 0.0f;
             for (int s = 0; s < numSamples; ++s)
                 hotPk = std::max(hotPk, std::fabs(buffer.getSample(0, s)));
             const float prev = hotPeakMax.exchange(std::max(hotPeakMax.load(), hotPk));
-            if (blockStart - hotLastLogAt >= static_cast<long long>(sampleRate)) {
+            const float cur = std::max(prev, hotPk);
+            const bool firstSound = hotPk > 0.0f && prev <= 0.0f;
+            if (cur > 0.0f &&
+                (firstSound || blockStart - hotLastLogAt >= static_cast<long long>(sampleRate * 0.25f))) {
                 hotLastLogAt = blockStart;
                 std::fprintf(stdout, "[testvst] hot peak=%.3f (post-hot buffer peak, pre-host; ceiling is 1.0)\n",
-                             static_cast<double>(std::max(prev, hotPk)));
+                             static_cast<double>(cur));
                 std::fflush(stdout);
             }
         }

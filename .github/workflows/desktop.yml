@@ -1108,9 +1108,12 @@ jobs:
             # -- fixture-side truth (R-B): the vector is REAL --
             $hotAmpProof = Select-String -Path "engine-d8-stdout.txt" -Pattern "hot output amp=3.0736"
             if (-not $hotAmpProof) { throw "D8: the hot-vector receipt is missing (SCORCH_TESTVST_HOT_AMP did not reach the fixture?)" }
-            $hotPeakLine = Select-String -Path "engine-d8-stdout.txt" -Pattern "hot peak=([0-9.]+)" | Select-Object -Last 1
+            $hotPeakLine = Select-String -Path "engine-d8-stdout.txt" -Pattern "hot peak=([0-9.]+)"
             if (-not $hotPeakLine) { throw "D8: the fixture's hot peak self-report is missing" }
-            $hotPeakVal = [double]$hotPeakLine.Matches[0].Groups[1].Value
+            # Take the MAX across every self-report (the receipt logs the
+            # running max on first sound + ~250 ms cadence — the max of the
+            # reported values IS the fixture-side over-ceiling truth).
+            $hotPeakVal = ($hotPeakLine.Matches | ForEach-Object { [double]$_.Groups[1].Value } | Measure-Object -Maximum).Maximum
             if ($hotPeakVal -lt 1.15 -or $hotPeakVal -gt 1.27) { throw "D8: fixture hot peak $hotPeakVal outside [1.15, 1.27] (expected ~1.211, R-B's real measured failure — meaningfully over the ceiling)" }
             Write-Host "D8 fixture-side proof: hot peak $hotPeakVal (meaningfully over the 1.0 ceiling)"
             # -- engine.log grammar (the receipt half) --
