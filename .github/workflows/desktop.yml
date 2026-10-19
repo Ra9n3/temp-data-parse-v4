@@ -974,6 +974,7 @@ jobs:
             Start-Sleep -Seconds 2
             $d7Log = @(Get-Content $engineLogD7 | Select-Object -Skip $logLinesBeforeD7)
             $d7 = { param($pattern) @($d7Log | Where-Object { $_ -like $pattern }).Count }
+            try {
             if (& $d7 "[strip] applied: v=1 strips=3 unwired=2 tornDown=0*" -ne 1) { throw "D7: expected exactly one 'applied v=1 strips=3 unwired=2' receipt" }
             if (& $d7 "[strip] applied: v=2 strips=2*" -ne 1) { throw "D7: expected exactly one 'applied v=2 strips=2' receipt" }
             if (& $d7 "[strip] wired: strip=s1 instance=inst-a pair=[0,1]*" -lt 2) { throw "D7: s1 must wire twice (v1 + the R3 'restored on load' rewire)" }
@@ -1006,6 +1007,13 @@ jobs:
             if (& $d7 "[strip] stats: strip=s2*" -lt 1) { throw "D7: strip stats drain missing for s2" }
             if (& $d7 "[strip] stats: strip=s3*" -lt 1) { throw "D7: strip stats drain missing for s3" }
             if (& $d7 "[strip] wired FAILED*" -ne 0) { throw "D7: unexpected strip wiring failures" }
+            } catch {
+              # DIAGNOSTIC (any grammar failure): dump the slice's strip/layout
+              # lines so the actual receipt shapes are visible in the run log.
+              Write-Host "D7 GRAMMAR FAILURE — the slice's [strip]/[layout] lines:"
+              $d7Log | Where-Object { $_ -match "\[strip\]|\[layout\]" } | ForEach-Object { Write-Host $_ }
+              throw
+            }
             Write-Host "D7 engine.log receipts: v=1/2 exactly-once, teardown x2 + R4 flush (held>=1), R3 guard + push, layout receipts 4ch->2ch, R1 rejection, stats drains"
             $procD7.WaitForExit(20000) | Out-Null
             if (-not $procD7.HasExited -or $procD7.ExitCode -ne 0) { throw "Engine D7 did not exit cleanly (code=$($procD7.ExitCode))" }
