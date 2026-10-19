@@ -370,6 +370,13 @@ jobs:
           # terminals) + the plugin-side ordinal isolation are asserted in the
           # summary block below.
           Write-Host "=== Test D2: M2 multi-instance hosting (diff reuse, routing, editors, state) ==="
+          # M4: the multi run stays on the RAW output path (SCORCH_LIMITER_OFF,
+          # receipt-named by the engine's armed receipt): its summed ~1.18
+          # peak window is the frozen PRE-M4 graph-semantics assertion (three
+          # sources exceed the single-instance cap), and its clip-counter
+          # advances are the machinery proof Test E asserts. The limiter
+          # itself is proven by Test D8 (armed + bypass runs).
+          $env:SCORCH_LIMITER_OFF = "1"
           $env:SCORCH_TESTVST_LOG = "1"
           # The M2 engine.log grammar is asserted against D2's OWN slice of
           # the log (the file accumulates across tests A-E — seq numbers
@@ -474,6 +481,7 @@ jobs:
           } finally {
             Stop-Process -Id $procD2.Id -Force -ErrorAction SilentlyContinue
             Remove-Item Env:\SCORCH_TESTVST_LOG -ErrorAction SilentlyContinue
+            Remove-Item Env:\SCORCH_LIMITER_OFF -ErrorAction SilentlyContinue
           }
 
           # Test D3 — Stage 3i: RUNTIME LATENCY TRACKING (detect, then
@@ -1056,6 +1064,137 @@ jobs:
             Remove-Item Env:\SCORCH_STRIP_LOG -ErrorAction SilentlyContinue
           }
 
+          # Test D8 — M4: THE REAL OUTPUT STAGE (the soft-knee brickwall
+          # limiter). The M2 guard grows teeth at the D3 anchor (post-graph,
+          # pre-device — where the peak truth pass already measures). Two
+          # runs of harness mode "limiter":
+          #   D8a ARMED — the fixture's hot vector (SCORCH_TESTVST_HOT_AMP
+          #     = 3.0736, so its t1 sine peaks ~1.211: R-B's REAL measured
+          #     failure, meaningfully over the ceiling, not borderline) must
+          #     land in the knee's mapped window on the wire (~0.914); the
+          #     engine.log must carry the armed receipt, the 1 Hz limiter gr
+          #     advance, a [stop] grMax in [1.0, 4.0] dB, and ZERO clip-
+          #     counter advances (the re-anchored counter's post-limiter
+          #     zero invariant — nonzero would name a limiter defect).
+          #   D8b BYPASS (SCORCH_LIMITER_OFF=1) — the same vector passes
+          #     UN-limited (> 1.05 on the wire) and the clip counter MUST
+          #     advance: the D8a zero is only meaningful if the counter
+          #     demonstrably still works (never vacuous).
+          # ASCII-only needles throughout (the D7 lesson); literal
+          # -match + [regex]::Escape counting (the D7-hardened form).
+          Write-Host "=== Test D8: M4 output stage (limiter armed: brickwall + gr receipts; bypass: counter advance) ==="
+          $env:SCORCH_TESTVST_LOG = "1"
+          $env:SCORCH_TESTVST_HOT_AMP = "3.0736"
+          $engineLogD8 = Join-Path $env:APPDATA "scorch\engine.log"
+          $logLinesBeforeD8 = 0
+          if (Test-Path $engineLogD8) { $logLinesBeforeD8 = (Get-Content $engineLogD8 | Measure-Object -Line).Lines }
+          $procD8 = Start-Process -FilePath "engine/build/scorch-engine.exe" -ArgumentList "--port","9389","--null-audio" -PassThru -NoNewWindow -RedirectStandardOutput "engine-d8-stdout.txt" -RedirectStandardError "engine-d8-stderr.txt"
+          Start-Sleep -Seconds 3
+          try {
+            if ($procD8.HasExited) {
+              Write-Host "Engine D8 exited early (code=$($procD8.ExitCode)). stdout:"
+              if (Test-Path engine-d8-stdout.txt) { Get-Content engine-d8-stdout.txt }
+              throw "Engine D8 process exited before test could connect"
+            }
+            node .github/scripts/test-engine-protocol.mjs 9389 limiter "$env:SCAN_FIXTURES"
+            if ($LASTEXITCODE -ne 0) {
+              Write-Host "Engine D8 stdout:"
+              if (Test-Path engine-d8-stdout.txt) { Get-Content engine-d8-stdout.txt }
+              Write-Host "Engine D8 stderr:"
+              if (Test-Path engine-d8-stderr.txt) { Get-Content engine-d8-stderr.txt }
+              if (Test-Path $engineLogD8) { Write-Host "Engine D8 engine.log slice (last 120 lines):"; Get-Content $engineLogD8 | Select-Object -Last 120 }
+              throw "Engine D8 limiter test failed"
+            }
+            # -- fixture-side truth (R-B): the vector is REAL --
+            $hotAmpProof = Select-String -Path "engine-d8-stdout.txt" -Pattern "hot output amp=3.0736"
+            if (-not $hotAmpProof) { throw "D8: the hot-vector receipt is missing (SCORCH_TESTVST_HOT_AMP did not reach the fixture?)" }
+            $hotPeakLine = Select-String -Path "engine-d8-stdout.txt" -Pattern "hot peak=([0-9.]+)" | Select-Object -Last 1
+            if (-not $hotPeakLine) { throw "D8: the fixture's hot peak self-report is missing" }
+            $hotPeakVal = [double]$hotPeakLine.Matches[0].Groups[1].Value
+            if ($hotPeakVal -lt 1.15 -or $hotPeakVal -gt 1.27) { throw "D8: fixture hot peak $hotPeakVal outside [1.15, 1.27] (expected ~1.211, R-B's real measured failure — meaningfully over the ceiling)" }
+            Write-Host "D8 fixture-side proof: hot peak $hotPeakVal (meaningfully over the 1.0 ceiling)"
+            # -- engine.log grammar (the receipt half) --
+            Start-Sleep -Seconds 2
+            $d8Log = @(Get-Content $engineLogD8 | Select-Object -Skip $logLinesBeforeD8)
+            $d8 = { param($needle) @($d8Log | Where-Object { $_ -match [regex]::Escape($needle) }).Count }
+            try {
+            $cntArmed = & $d8 "[audio] limiter: armed (ceiling 1.0, knee -6 dB, release 80 ms, zero added latency; post-limiter clip counter armed"
+            if ($cntArmed -ne 1) { Write-Host ("D8 count miss: count=" + $cntArmed); throw "D8: expected exactly one ARMED limiter receipt" }
+            $cntGr = & $d8 "[audio] limiter gr + "
+            if ($cntGr -lt 1) { Write-Host ("D8 count miss: count=" + $cntGr); throw "D8: expected at least one limiter gr advance receipt (the hot vector engages the knee for seconds)" }
+            $cntPeakArmed = & $d8 " limiter=armed (M4 output stage, post-graph)"
+            if ($cntPeakArmed -lt 1) { Write-Host ("D8 count miss: count=" + $cntPeakArmed); throw "D8: the 1 Hz peak receipt must name the armed limiter" }
+            $cntClipD8a = & $d8 "[audio] clip counter +"
+            if ($cntClipD8a -ne 0) { Write-Host ("D8 count miss: count=" + $cntClipD8a); throw "D8: clip-counter receipts in the ARMED run are a LIMITER DEFECT by construction (the counter is re-anchored post-limiter)" }
+            $stopGrLine = @($d8Log | Where-Object { $_ -match [regex]::Escape("limiter grMax") })[0]
+            if ($null -eq $stopGrLine) { throw "D8: the [stop] receipt must carry limiter grMax" }
+            if ($stopGrLine -notmatch "limiter grMax ([0-9.]+)dB") { throw "D8: the [stop] grMax value is unparsable: $stopGrLine" }
+            $grMaxVal = [double]$Matches[1]
+            if ($grMaxVal -lt 1.0 -or $grMaxVal -gt 4.0) { throw "D8: session grMax $grMaxVal outside [1.0, 4.0] dB (the ~1.211 vector maps to ~2.45 dB of knee reduction)" }
+            Write-Host "D8 engine.log receipts: armed x1, gr advance x$cntGr, peak receipts name the armed stage, ZERO clip advances (post-limiter zero), [stop] grMax $grMaxVal dB"
+            } catch {
+              # DIAGNOSTIC (any grammar failure): dump the slice's audio/stop
+              # lines so the actual receipt shapes are visible in the run log.
+              Write-Host "D8 GRAMMAR FAILURE — the slice's [audio]/[stop] lines:"
+              $d8Log | Where-Object { $_ -match "\[audio\]|\[stop\]" } | ForEach-Object { Write-Host $_ }
+              throw
+            }
+            $procD8.WaitForExit(20000) | Out-Null
+            if (-not $procD8.HasExited -or $procD8.ExitCode -ne 0) { throw "Engine D8 did not exit cleanly (code=$($procD8.ExitCode))" }
+            Write-Host "Engine D8 clean exit 0 (the brickwall held: over-ceiling in, mapped knee out, zero clips)"
+          } finally {
+            Stop-Process -Id $procD8.Id -Force -ErrorAction SilentlyContinue
+            Remove-Item Env:\SCORCH_TESTVST_HOT_AMP -ErrorAction SilentlyContinue
+            Remove-Item Env:\SCORCH_TESTVST_LOG -ErrorAction SilentlyContinue
+          }
+
+          # D8b — the BYPASS run: same mode, same hot vector, the stage OUT.
+          # The re-anchored clip counter must ADVANCE here (the D8a zero is
+          # only meaningful if the counter demonstrably still works).
+          $env:SCORCH_LIMITER_OFF = "1"
+          $env:SCORCH_TESTVST_HOT_AMP = "3.0736"
+          $logLinesBeforeD8b = (Get-Content $engineLogD8 | Measure-Object -Line).Lines
+          $procD8b = Start-Process -FilePath "engine/build/scorch-engine.exe" -ArgumentList "--port","9390","--null-audio" -PassThru -NoNewWindow -RedirectStandardOutput "engine-d8b-stdout.txt" -RedirectStandardError "engine-d8b-stderr.txt"
+          Start-Sleep -Seconds 3
+          try {
+            if ($procD8b.HasExited) {
+              Write-Host "Engine D8b exited early (code=$($procD8b.ExitCode)). stdout:"
+              if (Test-Path engine-d8b-stdout.txt) { Get-Content engine-d8b-stdout.txt }
+              throw "Engine D8b process exited before test could connect"
+            }
+            node .github/scripts/test-engine-protocol.mjs 9390 limiter "$env:SCAN_FIXTURES"
+            if ($LASTEXITCODE -ne 0) {
+              Write-Host "Engine D8b stdout:"
+              if (Test-Path engine-d8b-stdout.txt) { Get-Content engine-d8b-stdout.txt }
+              Write-Host "Engine D8b stderr:"
+              if (Test-Path engine-d8b-stderr.txt) { Get-Content engine-d8b-stderr.txt }
+              throw "Engine D8b bypass test failed"
+            }
+            Start-Sleep -Seconds 2
+            $d8bLog = @(Get-Content $engineLogD8 | Select-Object -Skip $logLinesBeforeD8b)
+            $d8b = { param($needle) @($d8bLog | Where-Object { $_ -match [regex]::Escape($needle) }).Count }
+            try {
+            $cntBypass = & $d8b "[audio] limiter: armed (ceiling 1.0, knee -6 dB, release 80 ms, zero added latency; BYPASS via SCORCH_LIMITER_OFF"
+            if ($cntBypass -ne 1) { Write-Host ("D8b count miss: count=" + $cntBypass); throw "D8b: expected exactly one BYPASS armed receipt" }
+            $cntClipB = & $d8b "[audio] clip counter +"
+            if ($cntClipB -lt 1) { Write-Host ("D8b count miss: count=" + $cntClipB); throw "D8b: the re-anchored clip counter MUST advance on the un-limited hot signal (the D8a zero is vacuous otherwise)" }
+            $stopBLine = @($d8bLog | Where-Object { $_ -match [regex]::Escape("limiter off via SCORCH_LIMITER_OFF") })[0]
+            if ($null -eq $stopBLine) { throw "D8b: the [stop] receipt must name the bypass" }
+            Write-Host "D8b engine.log receipts: BYPASS armed x1, clip counter advanced x$cntClipB, [stop] names the bypass (grMax 0.00)"
+            } catch {
+              Write-Host "D8b GRAMMAR FAILURE — the slice's [audio]/[stop] lines:"
+              $d8bLog | Where-Object { $_ -match "\[audio\]|\[stop\]" } | ForEach-Object { Write-Host $_ }
+              throw
+            }
+            $procD8b.WaitForExit(20000) | Out-Null
+            if (-not $procD8b.HasExited -or $procD8b.ExitCode -ne 0) { throw "Engine D8b did not exit cleanly (code=$($procD8b.ExitCode))" }
+            Write-Host "Engine D8b clean exit 0 (the bypass run: the counter advance is real — the D8a zero is not vacuous)"
+          } finally {
+            Stop-Process -Id $procD8b.Id -Force -ErrorAction SilentlyContinue
+            Remove-Item Env:\SCORCH_LIMITER_OFF -ErrorAction SilentlyContinue
+            Remove-Item Env:\SCORCH_TESTVST_HOT_AMP -ErrorAction SilentlyContinue
+          }
+
           # Test E — Stage 3c-hotfix: REAL-PROJECT-SIZED load. The CI gap was
           # scale; this closes it: a deterministic 13,824-event (~1.1 MB)
           # fixture is sent as ONE load message and the loadAck receipt must
@@ -1183,10 +1322,12 @@ jobs:
           # contract on the wire: ACK + the new binary's loaded receipt +
           # transport continuity). The reuse receipt below is its fast-path
           # sibling (the exact-set score edit).
-          # Milestone 2 output guard: unity + clip counter + per-render peak.
-          # The multi test's THREE summed fixtures exceed unity (~1.18), so
-          # the clip counter MUST have fired at least once (machinery proof);
-          # the per-render peak receipt rolls at 1 Hz while playing; the
+          # Milestone 2 output guard, POST-M4: unity + clip counter + per-render
+          # peak. The multi test runs BYPASSED (SCORCH_LIMITER_OFF — its ~1.18
+          # sum is the frozen pre-M4 graph window) and D8b runs bypassed on
+          # purpose, so this log carries REAL clip-counter advances; D8a's
+          # armed run contributes the limiter gr receipts + its post-limiter
+          # zero. The per-render peak receipt rolls at 1 Hz while playing; the
           # unity/no-multiplication wording rides every opened-device receipt.
           $clipReceipts = (Select-String -Path $engineLog -Pattern "\[audio\] clip counter \+").Count
           if ($clipReceipts -lt 1) { throw "engine.log missing the M2 clip-counter receipt (the multi test's summed fixtures exceed unity — the counter must fire)" }

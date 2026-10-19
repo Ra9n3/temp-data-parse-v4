@@ -2613,7 +2613,68 @@ truth pass — zero extra passes), the init worker's janitor speaks a 1 Hz
 `[audio] render peak=` receipt (with per-selector emission counters) and an
 immediate (1/s rate-limited) `[audio] clip counter +` receipt, and the [stop]
 receipt carries the cumulative `clipsTotal`. Per-bus gains + a soft limiter are
-the named NEXT milestone.
+the named NEXT milestone. (M4 CLOSE-OUT: the gains shipped as the M3 strips; the
+soft limiter shipped as the M4 output stage — see the next section. The counter
+re-anchors to POST-limiter; this section's wording is kept as the historical
+record of the M2 contract.)
+
+### M4 — the real output stage (the limiter; the guard grows teeth)
+
+D3 (reviewed + approved before code): the limiter is POST-GRAPH, PRE-DEVICE,
+inside the audio callback — the exact anchor where the M2 peak truth pass
+already measures. It is deliberately NOT a graph node: zero topology change (no
+render-sequence accounting churn, no R3 layout-guard interaction), it cannot be
+wired around (every sample reaching the device crosses it regardless of future
+wiring or bus shapes), and the latency system is untouched (zero ADDED latency
+by design — no lookahead; "Parked: latency" respected). The M2 clip counter
+RE-ANCHORS to post-limiter: samples above unity behind an armed limiter name a
+LIMITER DEFECT, so the manual gate's "clip counter zero" becomes the limiter's
+own regression tripwire. The D8b CI run (SCORCH_LIMITER_OFF=1) proves the
+re-anchored counter still advances on a raw over-ceiling signal — the zero must
+never be vacuous.
+
+D4: hand-rolled soft-knee brickwall, engine GLUE in main.cpp (the vendored core
+stays byte-untouched; NO juce_dsp dependency). Stereo-LINKED envelope on
+max(|L|,|R|) (imaging preserved), instant attack, ~80 ms exponential release
+(rate-derived per buffer). Knee geometry in dB (T = 0 dBFS ceiling, W = 12):
+transparent at or below -6 dBFS; the Zolzer-form soft knee y = x - (x+6)^2/24
+spans [-6, +6] dB, derivative-continuous at both knee edges, output
+mathematically unable to exceed the ceiling (1:1 clamp only above +6 dB over).
+At ceiling-level input the knee reads -1.5 dB. The CI amplitudes (.198/.394,
+about -14/-8 dBFS) sit below the knee: gain there is EXACTLY 1.0 — the R2/R3
+peak assertions stay byte-exact (mathematical transparency, not a tolerance).
+R-A (the denormal rider): the multiplicative release decay is the classic
+denormal GENERATOR under sustained digital silence; the named defense is the
+EXPLICIT FLOOR env = max(env * decay, 1e-9) firing EVERY sample before any use
+(primary, unconditional — the envelope can never enter the denormal range
+regardless of FTZ). JUCE's ScopedNoDenormals (FTZ/DAZ) also guards the thread;
+belt and braces, both named in the code receipt.
+
+R-C (IN-KNEE DOCUMENTATION — read this before reporting a "defect"): material
+peaking between -6 dBFS and the ceiling gets GENTLE INTENDED reduction. A -3
+dBFS peak renders about -3.375 dBFS (0.375 dB of knee reduction); a 0 dBFS peak
+renders about -1.5 dB; the ~1.211 CI vector (+1.663 dB) maps to about -0.784 dB
+(~0.914 linear, ~2.45 dB of reduction). That is the knee WORKING, not a defect
+— a future "why did my -3 dB peak move" question points at this paragraph. The
+1 Hz `[audio] limiter gr +` receipt and the [stop] `grMax` field make the
+engagement observable in every run; healthy below-knee material asserts the
+receipt's SILENCE (the transparency proof's log side).
+
+Fixed defaults, NOT protocol-configurable: protocol stays 1, zero new wire
+messages; `--plugin-gain` stays accepted-but-inert exactly as before.
+SCORCH_LIMITER_OFF=1 (read once at startup, receipt-named at device open) is a
+CI-only bypass; the multi mode's frozen pre-M4 graph window (three summed
+sources ~1.18) runs behind it receipt-named in the workflow. Receipts: the
+one-shot armed line at every device open (`[audio] limiter: armed (ceiling 1.0,
+knee -6 dB, release 80 ms, zero added latency; ...)` — ASCII-only per the D7
+Windows grep lesson), the 1 Hz peak receipt gains `gr=` + `limiter=armed/off`,
+the 1 Hz gr-advance receipt, and the [stop] receipt gains `limiter grMax`. CI:
+harness mode `limiter` (the twelfth) runs twice in Test D8 — D8a armed (the
+~1.211 hot vector from SCORCH_TESTVST_HOT_AMP=3.0736, R-B's real measured
+failure, asserted meaningfully over the ceiling by the fixture's self-report
+and mapped to the knee window on the wire) and D8b bypassed (counter advance).
+The other eleven modes are untouched; engine 0.12.0; vendored diff vs 769f161
+is zero lines.
 
 ### Kept entries apply the project's embedded state (M2 CI-closure revision)
 

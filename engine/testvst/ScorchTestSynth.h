@@ -100,6 +100,16 @@
 //       S seconds AFTER the "[plugin] prepared (worker)" receipt and the
 //       harness's after-prepare [mm] assertion fails. Counter is
 //       per-instance, block-free, no RNG.
+//   SCORCH_TESTVST_HOT_AMP=<amp> — M4 (R-B): multiplies every rendered voice
+//       sample so the fixture's OUTPUT peaks land where the CI hot vector
+//       needs them. The CI value 3.0736 turns the standard t1 sine (.394 at
+//       CC7/CC11 = 127, vel 100) into a ~1.211 peak — THE USER'S REAL
+//       MEASURED FAILURE becomes the regression vector, meaningfully above
+//       the 1.0 ceiling (+1.66 dB, not borderline). While armed the fixture
+//       self-reports its post-hot buffer peak at ~1 Hz
+//       ("[testvst] hot peak=...") so the harness/CI can assert the
+//       OVER-CEILING fixture truth independently of the engine's
+//       post-limiter measurement. 0 (default) = inert, byte-identical output.
 
 #pragma once
 
@@ -209,6 +219,20 @@ public:
 
     void prepareToPlay(double newSampleRate, int /*maxBlockSize*/) override {
         sampleRate = newSampleRate > 0 ? newSampleRate : 44100.0;
+        // M4 (R-B): the hot vector knob — read once per process (the env is
+        // stable in CI); the one-shot receipt names the vector so the run
+        // log carries its provenance.
+        {
+            static const float hot = [] {
+                const char* v = std::getenv("SCORCH_TESTVST_HOT_AMP");
+                return v ? static_cast<float>(std::atof(v)) : 0.0f;
+            }();
+            hotAmp.store(hot > 0.0f ? hot : 1.0f);   // ABSENT/0 = INERT (x1.0) — never a zero-multiply: the doc'd default is byte-identical output, not silence
+            if (hot > 0.0f && !hotReceiptDone.exchange(true))
+                std::fprintf(stdout, "[testvst] hot output amp=%.4f (SCORCH_TESTVST_HOT_AMP) - the over-ceiling regression vector is armed\n",
+                             static_cast<double>(hot));
+            std::fflush(stdout);
+        }
         // M1-hotfix: the Nth prepareToPlay sleeps (see the header table
         // above). 1-based call counting; 0 = disabled.
         {
@@ -266,7 +290,7 @@ public:
                     if (v.env <= 0.0f) { v.env = 0.0f; v.releasing = false; break; }
                 }
                 const float out = std::sin(v.phase) * v.amp * v.env * cc7Scale * cc11Scale
-                                  * masterScale.load();
+                                  * masterScale.load() * hotAmp.load();
                 buffer.setSample(0, s, buffer.getSample(0, s) + out);
                 if (buffer.getNumChannels() > 1)
                     buffer.setSample(1, s, buffer.getSample(1, s) + out);
@@ -309,6 +333,25 @@ public:
                 for (int ch = 2; ch < juce::jmin(4, buffer.getNumChannels()); ++ch)
                     for (int s = 0; s < numSamples; ++s)
                         buffer.setSample(ch, s, buffer.getSample(ch, s) + kAuxLevel);
+        }
+
+        // M4 (R-B): the hot vector's self-report — while the knob is armed,
+        // track the post-hot MAIN-bus buffer peak and log it at ~1 Hz (block
+        // arithmetic like the playhead throttle; no RNG, no allocation). The
+        // harness/CI asserts this value is MEANINGFULLY above the ceiling
+        // (the fixture-side truth) while the engine's post-limiter peak
+        // stays at/below it — the two numbers together ARE the GR proof.
+        if (hotAmp.load() > 0.0f) {
+            float hotPk = 0.0f;
+            for (int s = 0; s < numSamples; ++s)
+                hotPk = std::max(hotPk, std::fabs(buffer.getSample(0, s)));
+            const float prev = hotPeakMax.exchange(std::max(hotPeakMax.load(), hotPk));
+            if (blockStart - hotLastLogAt >= static_cast<long long>(sampleRate)) {
+                hotLastLogAt = blockStart;
+                std::fprintf(stdout, "[testvst] hot peak=%.3f (post-hot buffer peak, pre-host; ceiling is 1.0)\n",
+                             static_cast<double>(std::max(prev, hotPk)));
+                std::fflush(stdout);
+            }
         }
 
         // Stage 3e-2 — playhead observability: read the host's PositionInfo
@@ -423,6 +466,13 @@ private:
     // capture (must differ) → re-host WITH the captured blob → peak proves
     // the restored state APPLIED → capture again (must be byte-identical).
     std::atomic<float> masterScale{1.0f};
+    // M4 (R-B): the hot-vector output multiplier (SCORCH_TESTVST_HOT_AMP).
+    // 0 = inert (byte-identical to every pre-M4 run). Read at the first
+    // prepareToPlay; the audio thread only LOADS it.
+    std::atomic<float> hotAmp{0.0f};
+    std::atomic<bool> hotReceiptDone{false};
+    std::atomic<float> hotPeakMax{0.0f};
+    long long hotLastLogAt = -(1LL << 40);
     // Milestone 2: the per-instance ordinal (see logMidi). Construction-order
     // — the engine's init worker instantiates sequentially on ONE thread.
     const int instOrdinal = [] {

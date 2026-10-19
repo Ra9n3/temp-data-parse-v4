@@ -524,7 +524,7 @@ namespace {
 // "openEditor":true); the lazy-device window is receipted (nominal fallback +
 // device-ready race re-prepare); matching requests coalesce into an in-flight
 // init instead of answering "reused" while it is still outstanding.
-constexpr const char* kEngineVersion = "0.11.0";   // M3 PR2: the strip mixer + multi-output buses
+constexpr const char* kEngineVersion = "0.12.0";   // M4: the real output stage (soft-knee brickwall limiter, post-graph)
 constexpr int kProtocolVersion = 1;
 constexpr int kDefaultPort = 9377;
 constexpr int kMaxVoices = 64;
@@ -946,6 +946,10 @@ constexpr uint8_t kEvCCSuppressed = 6;
 // rate-limited per-render peak receipt + an immediate clip-advance receipt,
 // and the [stop] receipt carries the cumulative clip total. The manual gate's
 // "clip counter zero" reads this counter on real plugins at unity.
+// M4 CLOSE-OUT: per-bus gains SHIPPED as the M3 strips; the soft limiter
+// SHIPPED as the M4 output stage (see the M4 block). The counter RE-ANCHORS
+// to POST-limiter — nonzero behind an armed limiter names a limiter defect —
+// and the guard's "temporary" status retires.
 std::atomic<float> g_hostedOutputGain{1.0f};
 // Samples (post-sum, pre-device) with |value| > 1.0 since process start.
 // Audio-thread incremented (one compare inside the peak truth pass), read by
@@ -955,6 +959,67 @@ std::atomic<uint64_t> g_clipCount{0};
 // Session peak for the receipt pair: reset at play, maxed by the callback,
 // logged at stop ("[stop] ... | session peak X").
 std::atomic<float> g_playPeakMax{0.0f};
+
+// ─── Milestone 4 — THE REAL OUTPUT STAGE (the soft-knee brickwall limiter) ──
+// The M2 guard's "temporary" status retires here: observability grows teeth.
+// D3 (reviewed + approved before any code): POST-GRAPH, PRE-DEVICE, inside
+// the audio callback — the exact anchor where the M2 peak truth pass already
+// measures. NOT a graph node, for three named reasons: (1) zero topology
+// change — no render-sequence accounting churn, no R3 layout-guard
+// interaction; (2) it cannot be wired around — every sample reaching the
+// device crosses this stage regardless of future wiring or bus shapes;
+// (3) the latency system is untouched — zero ADDED latency by design (no
+// lookahead; "Parked: latency" respected). The M2 clip counter RE-ANCHORS
+// to post-limiter: samples above unity behind an armed limiter name a
+// DEFECT, so the manual gate's "clip counter zero" becomes the limiter's
+// own regression tripwire. SCORCH_LIMITER_OFF=1 (receipt-named, CI-only)
+// runs the raw path so CI can prove the re-anchored counter still advances
+// (the zero must not be vacuous) — and the multi mode's frozen pre-M4
+// graph-semantics window (three summed sources ~1.18) runs behind the same
+// bypass, receipt-named in the workflow.
+//
+// D4: hand-rolled soft-knee brickwall, engine GLUE (main.cpp, like
+// StripMixerProcessor — the vendored core stays byte-untouched; NO juce_dsp
+// dependency). Stereo-LINKED envelope on max(|L|,|R|) (imaging preserved):
+// instant attack, exponential release (~80 ms, rate-derived per buffer).
+// Knee geometry in dB (T = 0 dBFS ceiling, W = 12): transparent at or below
+// -6 dBFS; the Zolzer-form soft knee y = x - (x+6)^2/24 spans [-6, +6] dB —
+// derivative-continuous at BOTH knee edges (1 at the transparent side, 0 at
+// the clamp side), output mathematically unable to exceed the ceiling
+// (1:1 clamp only above +6 dB over). At ceiling-level input the knee reads
+// -1.5 dB (1.5 dB of intended reduction — see R-C). The CI amplitudes
+// (.198/.394 ~ -14/-8 dBFS) sit below the knee: gain there is EXACTLY 1.0 —
+// the R2/R3 peak assertions stay byte-exact (mathematical transparency,
+// not a tolerance argument).
+// R-C (in-knee documentation, per the rider): material peaking between
+// -6 dBFS and the ceiling gets GENTLE INTENDED reduction — e.g. a -3 dBFS
+// peak renders ~ -3.375 dBFS (0.375 dB of knee reduction). That is the knee
+// WORKING, not a defect; documented in ASSUMPTIONS so a future "why did my
+// -3 dB peak move" question has a receipt to point at.
+// R-A (the denormal rider): the multiplicative release decay is the classic
+// denormal GENERATOR under sustained digital silence (env shrinks until it
+// enters the denormal range and x86 microcode assists stall the audio
+// thread). The explicit floor env = max(env * decay, kLimiterEnvFloor)
+// (1e-9, ~ -180 dBFS) fires EVERY sample before any use — the envelope can
+// never enter denormal territory regardless of FTZ. JUCE's
+// ScopedNoDenormals (FTZ/DAZ) also guards the thread; per the rider, the
+// named defense is the FLOOR (primary, unconditional), FTZ is
+// belt-and-braces.
+// Fixed defaults, NOT protocol-configurable: protocol stays 1, zero new
+// wire messages; --plugin-gain stays accepted-but-inert exactly as before.
+constexpr float kLimiterKneeStartDb = -6.0f;   // reduction begins here
+constexpr float kLimiterKneeWidthDb = 12.0f;   // full clamp at +6 dB over the ceiling
+constexpr float kLimiterReleaseMs = 80.0f;
+constexpr float kLimiterEnvFloor = 1e-9f;      // R-A: the denormal floor (~ -180 dBFS)
+std::atomic<bool> g_limiterBypassed{std::getenv("SCORCH_LIMITER_OFF") != nullptr};    // SCORCH_LIMITER_OFF (receipt-named at device open; read once at startup, before any thread)
+std::atomic<float> g_limiterGrDb{0.0f};        // last buffer's max gain reduction, dB
+std::atomic<float> g_limiterGrMaxDb{0.0f};     // session max GR, dB (reset at play; [stop] carries it)
+static std::string limiterArmedReceipt() {
+    return std::string("[audio] limiter: armed (ceiling 1.0, knee -6 dB, release 80 ms, zero added latency") +
+           (g_limiterBypassed.load(std::memory_order_relaxed)
+                ? "; BYPASS via SCORCH_LIMITER_OFF - the clip counter measures the raw path)"
+                : "; post-limiter clip counter armed - nonzero now names a defect)");
+}
 
 // ─── Engine state (shared between WS thread, audio thread, state thread) ────
 // Stage 3b polish — position contract: lastTick is the SINGLE source of truth
@@ -2490,6 +2555,11 @@ public:
                 for (int ch = 0; ch < numOutputChannels; ++ch)
                     outputChannelData[ch][s] += out;
             }
+            // M4 output stage: the limiter runs BEFORE the peak truth pass —
+            // the pass measures what the DEVICE will actually get
+            // (post-limiter), so its clip count is the re-anchored defect
+            // counter and the session peak is the post-M4 truth.
+            processOutputLimiter(outputChannelData, numOutputChannels, numSamples);
             // Milestone 1: the graph render above (before the synth tail)
             // covers the plugin path — tails drain, panic/flush CCs were fed
             // through instMidi[0] by the walks; the output node assigned the
@@ -2749,12 +2819,18 @@ public:
                                 sizeof(float) * static_cast<size_t>(muteCount));
                 peak = 0.0f;   // the pre-mute loose per-source bounds are discarded with the window
             }
+            // M4 output stage FIRST (post-graph, post-mute, pre-device — the
+            // D3 anchor): the truth pass below measures the POST-limiter
+            // buffer, so the session peak is the device truth and the clip
+            // count is the re-anchored defect counter.
+            processOutputLimiter(outputChannelData, numOutputChannels, numSamples);
             // Stage 3d-4: the session peak is measured on the SUMMED device
             // buffer (Σ instances + synth), NOT per-source — two 0.79 sources
             // are a 1.57 mix, and the receipt must say so. Single-source peaks
             // above are a loose lower bound only; this pass is the truth.
             // Milestone 2 output guard: the clip counter folds into the same
-            // pass (one compare per sample — no extra pass).
+            // pass (one compare per sample — no extra pass). Post-M4 this pass
+            // is POST-limiter: nonzero counts name a limiter defect.
             for (int s = 0; s < numSamples; ++s) {
                 float mx = 0.0f;
                 for (int ch = 0; ch < numOutputChannels; ++ch)
@@ -2887,6 +2963,48 @@ public:
 
     void audioDeviceStopped() override {}
 
+    // ── M4 output stage (D3): post-graph, pre-device, audio-thread-only. ──
+    // Gain computed from a stereo-LINKED envelope (max across channels);
+    // per-sample g guarantees |out| = g*|in| <= mapped(env) <= ceiling with
+    // zero lookahead (g is derived from the SAME sample's link). One exp()
+    // per BUFFER (rate-derived decay), one log10/pow10 per sample ONLY above
+    // the knee — healthy signals never pay. R-A: the envelope floor fires
+    // every sample (see the M4 block receipt).
+    void processOutputLimiter(float* const* chData, int numCh, int numSamples) {
+        if (g_limiterBypassed.load(std::memory_order_relaxed)) return;
+        const double rate = g_engine.sampleRate.load(std::memory_order_relaxed);
+        const float decay = rate > 0.0
+            ? static_cast<float>(std::exp(-1000.0 / (kLimiterReleaseMs * rate)))
+            : 0.99974f;
+        const float kneeStart = std::pow(10.0f, kLimiterKneeStartDb / 20.0f);
+        const float twoW = 2.0f * kLimiterKneeWidthDb;
+        float bufGrDb = 0.0f;
+        for (int s = 0; s < numSamples; ++s) {
+            float link = 0.0f;
+            for (int ch = 0; ch < numCh; ++ch)
+                link = std::max(link, std::fabs(chData[ch][s]));
+            limiterEnv = std::max(link, limiterEnv * decay);   // instant attack
+            // R-A: the explicit denormal floor — EVERY sample, before any use.
+            limiterEnv = std::max(limiterEnv, kLimiterEnvFloor);
+            if (limiterEnv <= kneeStart) continue;   // below the knee: gain EXACTLY 1.0
+            const float envDb = 20.0f * std::log10(limiterEnv);
+            float g;
+            if (envDb >= 0.5f * kLimiterKneeWidthDb) {
+                g = 1.0f / limiterEnv;               // full clamp: out = ceiling exactly
+            } else {
+                const float over = envDb - kLimiterKneeStartDb;   // in [0, W]
+                const float yDb = envDb - over * over / twoW;     // Zolzer soft knee
+                g = std::pow(10.0f, (yDb - envDb) / 20.0f);
+            }
+            const float grDb = -20.0f * std::log10(std::max(g, kLimiterEnvFloor));
+            if (grDb > bufGrDb) bufGrDb = grDb;
+            for (int ch = 0; ch < numCh; ++ch) chData[ch][s] *= g;
+        }
+        g_limiterGrDb.store(bufGrDb, std::memory_order_relaxed);
+        const float prevGr = g_limiterGrMaxDb.load(std::memory_order_relaxed);
+        if (bufGrDb > prevGr) g_limiterGrMaxDb.store(bufGrDb, std::memory_order_relaxed);
+    }
+
 private:
     std::vector<float> synthScratch;              // synth contribution per buffer
     juce::MidiBuffer midiBuf;                     // reusable per-buffer MIDI (clear() keeps capacity)
@@ -2897,6 +3015,10 @@ private:
     // shared MidiInOp path is retired; the selectors are the per-instance
     // MIDI path). Clear-per-buffer, capacity never grows.
     juce::MidiBuffer graphMidiIn;
+    // M4 output stage: the envelope state. Audio-thread-owned (written and
+    // read ONLY inside processOutputLimiter); initialized at the R-A floor so
+    // the first buffer's decay multiply cannot start in denormal territory.
+    float limiterEnv = kLimiterEnvFloor;
 
     // ── Milestone 1 silence diagnosis (the three instrumented sites) ──
     // One-shot [host-core] DIAG receipts; audio thread. Steady state (after
@@ -3386,6 +3508,9 @@ std::string ensureAudioReady() {
                       " | latency compensation " +
                           std::to_string(g_pluginLatencySamples.load(std::memory_order_relaxed)) +
                           " samples (max across live instances; plugin-reported)");
+                // M4 (D5): the one-shot armed receipt — named at every device
+                // open, ASCII-only (the D7 Windows grep lesson).
+                engineLog(limiterArmedReceipt());
             }
             return "";
         }
@@ -3439,6 +3564,9 @@ std::string ensureAudioReady() {
                       " | latency compensation " +
                       std::to_string(g_pluginLatencySamples.load(std::memory_order_relaxed)) +
                       " samples (max across live instances; plugin-reported)");
+            // M4 (D5): the one-shot armed receipt — named at every device
+            // open, ASCII-only (the D7 Windows grep lesson).
+            engineLog(limiterArmedReceipt());
         }
         return "";
     } catch (const std::exception& e) {
@@ -5913,6 +6041,7 @@ void handle_transport(const juce::var& json, ix::WebSocket& ws) {
         g_engine.playStartTick.store(startTick);
         g_engine.transportGen.fetch_add(1);  // invalidate pre-play buffer commits
         g_playPeakMax.store(0.0f, std::memory_order_relaxed);  // fresh session peak
+        g_limiterGrMaxDb.store(0.0f, std::memory_order_relaxed);  // fresh session GR ceiling
         g_engine.playing.store(true);
         if (preRoll > 0)
             engineLog("[transport] pre-roll " + std::to_string(preRoll) +
@@ -5963,12 +6092,18 @@ void handle_transport(const juce::var& json, ix::WebSocket& ws) {
         std::cout << "[engine] transport stop: musical release (voices releasing n=" << releasing
                   << ", plugin note-offs m=" << held
                   << ", tick=" << g_engine.lastTick.load() << ")" << std::endl;
+        char grMaxBuf[16];
+        std::snprintf(grMaxBuf, sizeof(grMaxBuf), "%.2f",
+                      static_cast<double>(g_limiterGrMaxDb.load(std::memory_order_relaxed)));
         engineLog("[stop] transport stop — musical release: voices releasing n=" +
                   std::to_string(releasing) + ", plugin note-offs m=" + std::to_string(held) +
                   ", lastTick " + std::to_string(g_engine.lastTick.load()) +
                   " | session peak " + peakBuf +
                   " | clipsTotal " + std::to_string(g_clipCount.load(std::memory_order_relaxed)) +
-                  " (M2 output guard: unity, no multiplication)");
+                  " (post-limiter; nonzero names a limiter defect)" +
+                  " | limiter grMax " + grMaxBuf + "dB" +
+                  (g_limiterBypassed.load(std::memory_order_relaxed)
+                       ? " (limiter off via SCORCH_LIMITER_OFF)" : " (M4 output stage armed)"));
     } else if (cmd == "seek") {
         int64_t tick = static_cast<int64_t>(static_cast<double>(obj->getProperty("tick")));
         if (tick < 0) tick = 0;
@@ -6578,6 +6713,9 @@ int main(int argc, char** argv) {
         // M2 output-guard janitor state (this thread only).
         uint64_t janitorLastClips = 0;
         std::chrono::steady_clock::time_point janitorLastClipEmit{}, janitorLastPeakEmit{};
+        // M4: the limiter gr-advance receipt's state (same 1 Hz discipline).
+        float janitorLastGr = 0.0f;
+        std::chrono::steady_clock::time_point janitorLastGrEmit{};
         while (!g_should_exit.load()) {
             // Stage 3c-polish (D2): retire aged publications FIRST — Stage 3h
             // replaced the fixed 250 ms grace with a PROOF: the audio
@@ -6689,7 +6827,7 @@ int main(int argc, char** argv) {
                     engineLog("[audio] clip counter +" + std::to_string(clips - janitorLastClips) +
                               " total=" + std::to_string(clips) +
                               " peak=" + std::to_string(nowPeak) +
-                              " (post-sum samples above unity — the output stage is the NEXT milestone)");
+                              " (post-LIMITER samples above unity: behind an armed limiter this names a DEFECT; the SCORCH_LIMITER_OFF CI run asserts the counter still advances)");
                     janitorLastClips = clips;
                     janitorLastClipEmit = now;
                 }
@@ -6704,12 +6842,39 @@ int main(int argc, char** argv) {
                             std::to_string(scorchhost::g_selectorEmitCount[sl].load(std::memory_order_relaxed)) +
                             "/" + std::to_string(scorchhost::g_selectorLastD1[sl].load(std::memory_order_relaxed)) +
                             "/" + std::to_string(scorchhost::g_selectorBlockCount[sl].load(std::memory_order_relaxed));
+                    char grb[16];
+                    std::snprintf(grb, sizeof(grb), "%.2f",
+                                  static_cast<double>(g_limiterGrDb.load(std::memory_order_relaxed)));
                     engineLog(std::string("[audio] render peak=") + pb +
                               " clipsTotal=" + std::to_string(clips) +
+                              " gr=" + grb + "dB" +
                               " instances=" + std::to_string(liveInstanceCount()) +
                               " selectorEmitted=[" + selCounts + "]" +
-                              " gain=unity(x1.0, M2 output guard — no multiplication)");
+                              (g_limiterBypassed.load(std::memory_order_relaxed)
+                                   ? " limiter=off (SCORCH_LIMITER_OFF)"
+                                   : " limiter=armed (M4 output stage, post-graph)"));
                     janitorLastPeakEmit = now;
+                }
+                // M4 (D5): the limiter gr-advance receipt — the same 1 Hz
+                // delta discipline as the clip counter, for the KNEE engaging.
+                // Engaging the knee is INTENDED behavior (R-C: gentle
+                // reduction between -6 dBFS and the ceiling), so this receipt
+                // is the observability half, not an alarm: CI's hot run
+                // asserts it appears, and every healthy-level run asserts
+                // it stays SILENT (the transparency proof's log side).
+                const float grNow = g_limiterGrMaxDb.load(std::memory_order_relaxed);
+                if (grNow > janitorLastGr + 0.05f &&
+                    std::chrono::duration_cast<std::chrono::milliseconds>(
+                        now - janitorLastGrEmit).count() >= 1000) {
+                    char gdb[16], gmb[16];
+                    std::snprintf(gdb, sizeof(gdb), "%.2f",
+                                  static_cast<double>(grNow - janitorLastGr));
+                    std::snprintf(gmb, sizeof(gmb), "%.2f", static_cast<double>(grNow));
+                    engineLog(std::string("[audio] limiter gr + ") + gdb +
+                              " sessionMax=" + gmb + "dB" +
+                              " (the knee engaging - intended M4 reduction below the ceiling)");
+                    janitorLastGr = grNow;
+                    janitorLastGrEmit = now;
                 }
             }
             // ── M3 PR1 — the unmapped-drop receipts (1 Hz, delta-emitted) ──

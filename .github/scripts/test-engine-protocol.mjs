@@ -363,6 +363,35 @@ const stMark = () => { stWindow.length = 0; };
 const stWindowMax = () => Math.max(...stWindow, 0);
 const stStop = () => ws.send(JSON.stringify({ type: "transport", command: "stop" }));
 
+// ── M4 limiter-mode state (the real output stage — see the header docs) ──
+const LIM_META = { bpm: 120, ppqn: 960, timeSignature: { numerator: 4, denominator: 4 }, endTick: 8448 };
+// ONE sustained part (the strips t1 shape MINUS the aux arm): CC7/CC11/CC21
+// priming at tick 0 (the fixture's per-channel CC7 defaults to SILENT — a
+// note-only part renders silence and every peak gate lies) + a note-60 sine
+// at vel 100 held to endTick. With SCORCH_TESTVST_HOT_AMP set (the workflow
+// sets 3.0736), its output peaks ~1.211 — R-B's real measured failure as the
+// regression vector, meaningfully above the 1.0 ceiling. The fixture
+// self-reports the over-ceiling truth ("[testvst] hot peak=" — desktop.yml's
+// half); the wire's state.peak IS the post-limiter device truth (the D3
+// anchor: the peak truth pass measures what the device will get).
+const limPart = [
+  { eventType: "CONTROL_CHANGE", channel: 1, data1: 7, data2: 127, timestampTicks: 0, trackId: "t1" },
+  { eventType: "CONTROL_CHANGE", channel: 1, data1: 11, data2: 127, timestampTicks: 0, trackId: "t1" },
+  { eventType: "CONTROL_CHANGE", channel: 1, data1: 21, data2: 127, timestampTicks: 0, trackId: "t1" },
+  { eventType: "NOTE_ON", channel: 1, data1: 60, data2: 100, timestampTicks: 480, trackId: "t1" },
+  { eventType: "NOTE_OFF", channel: 1, data1: 60, data2: 0, timestampTicks: 8448, trackId: "t1" },
+];
+const limEvents = limPart;
+let limPhase = 0, limScanPlugin = null, limPeak = 0;
+const limWindow = [];
+const limWindowMax = () => Math.max(...limWindow, 0);
+const limStop = () => ws.send(JSON.stringify({ type: "transport", command: "stop" }));
+// The variant switch: the workflow runs this SAME mode twice — armed (the
+// brickwall case) and with SCORCH_LIMITER_OFF=1 in the ENGINE's env (the
+// counter-advance case). The mjs reads its own inherited copy of the knob
+// and flips its assertion set to match the engine's actual stage state.
+const limiterOff = process.env.SCORCH_LIMITER_OFF != null;
+
 // Events chosen so a note IS sounding when the test stops (tick ~600): the
 // stop-panic kill count in the engine's stdout ("voices killed (n=…)") is then
 // ≥1 — real evidence, not an empty-path no-op. The first note (0→300) lies
@@ -502,6 +531,8 @@ const timeout = setTimeout(() => {
     console.error(`TIMEOUT at step ${step} phase=${rtPhase} (scan=${rtScanPlugin ? "ok" : "none"} appliedVs=[${rtAppliedVs.join(",")}] rejected=${rtRejected}@v${rtRejectV} reason="${rtRejectReason}" peak=${rtPeak.toFixed(3)} slice=${JSON.stringify(rtSlice)} stopped=${rtLastStop})`);
   } else if (mode === "strips") {
     console.error(`TIMEOUT at step ${step} phase=${stPhase} (scanA=${stScanA ? "ok" : "none"} scanM=${stScanM ? "ok" : "none"} loaded=${stLoadedCount} appliedVs=[${stAppliedVs.join(",")}] rejected=${stRejected}@v${stRejectV} reason="${stRejectReason}" windowMax=${stWindowMax().toFixed(3)} layouts=${JSON.stringify(stLayouts)} layoutPushes=${stLayoutPushCount} stripLayoutChanged=${JSON.stringify(stStripLayoutChanged)})`);
+  } else if (mode === "limiter") {
+    console.error(`TIMEOUT at step ${step} phase=${limPhase} (scan=${limScanPlugin ? "ok" : "none"} limiterOff=${limiterOff} peak=${limPeak.toFixed(3)} windowMax=${limWindowMax().toFixed(3)})`);
   } else if (mode === "slowload") {
     console.error(`TIMEOUT at step ${step} phase=${slPhase} (scan=${slScanPlugin ? "ok" : "none"} ack=${slAckOk} ackMs=${slAckMs} loaded=${slLoadedOk} loadedMs=${slLoadedMs} play=${slPlayOk} ticks=${slTicksOk} peak=${slPeak.toFixed(3)} stop=${slStopOk})`);
   } else if (mode === "terminal") {
@@ -517,7 +548,7 @@ const timeout = setTimeout(() => {
 // loaded-receipt bound is asserted EXPLICITLY per phase below — but the
 // wall-clock budget still covers them, plus the Stage 3h stall probe (a 2.5 s
 // audio freeze + its tail): 120 s.
-}, mode === "scan" ? 180000 : mode === "host" ? 150000 : mode === "multi" ? 120000 : mode === "latency" ? 90000 : mode === "slowload" ? 90000 : mode === "terminal" ? 150000 : mode === "routing" ? 120000 : mode === "strips" ? 150000 : 30000);
+}, mode === "scan" ? 180000 : mode === "host" ? 150000 : mode === "multi" ? 120000 : mode === "latency" ? 90000 : mode === "slowload" ? 90000 : mode === "terminal" ? 150000 : mode === "routing" ? 120000 : mode === "strips" ? 150000 : mode === "limiter" ? 90000 : 30000);
 
 // scan-mode flags
 let scanSent = false, scanResultOk = false, aliveAfterCrashOk = false, defaultScanOk = false;
@@ -996,9 +1027,9 @@ ws.addEventListener("message", (event) => {
     }
     if (msg.type === "hello" && multiPhase === 0) {
       if (msg.protocol !== 1) fail(`expected protocol 1, got ${msg.protocol}`);
-      if (msg.engineVersion !== "0.11.0") fail(`expected 0.10.0, got ${msg.engineVersion}`);
+      if (msg.engineVersion !== "0.12.0") fail(`expected 0.12.0, got ${msg.engineVersion}`);
       if (!fixtureDir) fail("multi mode requires a fixture dir argument");
-      console.log("[test] hello OK (0.11.0) — M2 multi-instance: scanning for BOTH fixture identities...");
+      console.log("[test] hello OK (0.12.0) — M2 multi-instance: scanning for BOTH fixture identities...");
       multiPhase = 1;
       ws.send(JSON.stringify({ type: "scan", dirs: [fixtureDir] }));
     } else if (msg.type === "scan_result" && multiPhase === 1) {
@@ -1158,9 +1189,9 @@ ws.addEventListener("message", (event) => {
     } else if (msg.type === "hello" && rtPhase === 0) {
       helloOk = true;
       if (msg.protocol !== 1) fail(`expected protocol 1, got ${msg.protocol}`);
-      if (msg.engineVersion !== "0.11.0") fail(`expected 0.11.0, got ${msg.engineVersion}`);
+      if (msg.engineVersion !== "0.12.0") fail(`expected 0.12.0, got ${msg.engineVersion}`);
       if (!fixtureDir) fail("routing mode requires a fixture dir argument");
-      console.log("[test] hello OK (0.11.0) — M3 PR1: scanning for the stand-in identity...");
+      console.log("[test] hello OK (0.12.0) — M3 PR1: scanning for the stand-in identity...");
       rtPhase = 1;
       ws.send(JSON.stringify({ type: "scan", dirs: [fixtureDir] }));
     } else if (msg.type === "scan_result" && rtPhase === 1) {
@@ -1311,9 +1342,9 @@ ws.addEventListener("message", (event) => {
     } else if (msg.type === "hello" && stPhase === 0) {
       helloOk = true;
       if (msg.protocol !== 1) fail(`expected protocol 1, got ${msg.protocol}`);
-      if (msg.engineVersion !== "0.11.0") fail(`expected 0.11.0, got ${msg.engineVersion}`);
+      if (msg.engineVersion !== "0.12.0") fail(`expected 0.12.0, got ${msg.engineVersion}`);
       if (!fixtureDir) fail("strips mode requires a fixture dir argument");
-      console.log("[test] hello OK (0.11.0) — M3 PR2: scanning for the fixture identities...");
+      console.log("[test] hello OK (0.12.0) — M3 PR2: scanning for the fixture identities...");
       stPhase = 1;
       ws.send(JSON.stringify({ type: "scan", dirs: [fixtureDir] }));
     } else if (msg.type === "scan_result" && stPhase === 1) {
@@ -1430,14 +1461,69 @@ ws.addEventListener("message", (event) => {
         sendStrips([{ strip: "sX", inst: "inst-nope", pair: [0, 1] }]);
       }
     }
+  } else if (mode === "limiter") {
+    // ── M4: the real output stage (see the state block + the header) ──
+    // The wire half: the D3 anchor means state.peak IS the post-limiter
+    // device truth. ARMED: the ~1.211 hot vector must land in the mapped
+    // knee window (0.85, 1.003] — ~0.914 expected, a bypass reads ~1.211,
+    // a hard clip ~1.000, a mis-wired stage anything else. BYPASS
+    // (SCORCH_LIMITER_OFF): the raw vector must EXCEED the ceiling — the
+    // re-anchored clip counter's advance must be real, not vacuous. The
+    // engine.log grammar (armed receipt, gr receipts, [stop] grMax,
+    // clipsTotal) is desktop.yml's half.
+    if (msg.type === "error") {
+      fail(`limiter: unexpected error: ${JSON.stringify(msg)}`);
+    } else if (msg.type === "hello" && limPhase === 0) {
+      helloOk = true;
+      if (msg.protocol !== 1) fail(`expected protocol 1, got ${msg.protocol}`);
+      if (msg.engineVersion !== "0.12.0") fail(`expected 0.12.0, got ${msg.engineVersion}`);
+      if (!fixtureDir) fail("limiter mode requires a fixture dir argument");
+      console.log(`[test] hello OK (0.12.0) — M4 output stage: limiter ${limiterOff ? "BYPASSED (SCORCH_LIMITER_OFF — the counter-advance case)" : "ARMED (the brickwall case)"} — scanning...`);
+      limPhase = 1;
+      ws.send(JSON.stringify({ type: "scan", dirs: [fixtureDir] }));
+    } else if (msg.type === "scan_result" && limPhase === 1) {
+      limScanPlugin = (msg.plugins ?? []).find((p) => p.name === "Scorch Test Synth");
+      if (!limScanPlugin) fail(`limiter mode: identity A ("Scorch Test Synth") required, got ${JSON.stringify(msg.plugins)}`);
+      console.log(`[test] identity A (${limScanPlugin.uid}) — loading inst-a with the hot vector (SCORCH_TESTVST_HOT_AMP)`);
+      limPhase = 2;
+      ws.send(JSON.stringify({
+        type: "load", seq: 1,
+        events: limEvents,
+        meta: LIM_META,
+        plugins: [{ instanceId: "inst-a", uid: limScanPlugin.uid, path: limScanPlugin.path, name: limScanPlugin.name }],
+        routing: { t1: { inst: "inst-a", ch: 1 } },
+      }));
+    } else if (msg.type === "plugin_state" && msg.state === "loaded" && limPhase === 2) {
+      console.log("[test] inst-a live (hot vector in its render path) — playing into the output stage");
+      limPhase = 3;
+      ws.send(JSON.stringify({ type: "transport", command: "play", tick: 0 }));
+    } else if (msg.type === "state") {
+      limPeak = Math.max(limPeak, msg.peak ?? 0);
+      if (limPhase >= 3) limWindow.push(msg.peak ?? 0);
+      if (limPhase === 3 && msg.playing && msg.tick >= 1500) {
+        const pk = limWindowMax();
+        if (limiterOff) {
+          if (!(pk > 1.05)) fail(`limiter OFF: peak ${pk.toFixed(3)} must EXCEED the ceiling meaningfully (the raw ~1.211 hot vector, un-limited — the re-anchored clip counter must have real work to advance on), got ${pk.toFixed(3)}`);
+          console.log(`[test] phase L-1 (BYPASS) ✓ the raw hot signal reached the output stage UN-limited (peak ${pk.toFixed(3)} > 1.0) — the clip counter's advance is real — stopping`);
+        } else {
+          if (!(pk > 0.85 && pk <= 1.003)) fail(`limiter ARMED: peak ${pk.toFixed(3)} must land in (0.85, 1.003] — the knee maps the ~1.211 (+1.663 dB) vector to ~0.914 (-0.784 dB); a bypass reads ~1.211, a hard clip ~1.000, a mis-wired stage anything else — window=${limWindow.map((p) => p.toFixed(2)).join(",")}`);
+          console.log(`[test] phase L-1 ✓ brickwall held (peak ${pk.toFixed(3)} <= 1.003, the in-knee mapping honest ~0.914) — stopping; the gr receipts are desktop.yml's half`);
+        }
+        limPhase = 4;
+        limStop();
+      } else if (limPhase === 4 && msg.playing === false) {
+        console.log("[test] stopped — M4 output-stage wire contract complete (engine.log grammar: desktop.yml)");
+        finishAndShutdown();
+      }
+    }
   } else if (mode === "slowload") {
     // ── M1-hotfix: the heavy-load death class (see the state block above) ──
     if (msg.type === "hello" && slPhase === 0) {
       if (msg.protocol !== 1) fail(`expected protocol 1, got ${msg.protocol}`);
-      if (msg.engineVersion !== "0.11.0") fail(`expected 0.11.0, got ${msg.engineVersion}`);
+      if (msg.engineVersion !== "0.12.0") fail(`expected 0.12.0, got ${msg.engineVersion}`);
       if (!fixtureDir) fail("slowload mode requires a fixture dir argument");
       helloOk = true;
-      console.log(`[test] hello OK (0.11.0) — slow-load knobs: create=${SLOW_CREATE_S}s prepareN=${process.env.SCORCH_TESTVST_SLOW_PREPARE_N ?? 0}(x${SLOW_PREPARE_S}s) — scanning...`);
+      console.log(`[test] hello OK (0.12.0) — slow-load knobs: create=${SLOW_CREATE_S}s prepareN=${process.env.SCORCH_TESTVST_SLOW_PREPARE_N ?? 0}(x${SLOW_PREPARE_S}s) — scanning...`);
       slPhase = 1;
       ws.send(JSON.stringify({ type: "scan", dirs: [fixtureDir] }));
     } else if (msg.type === "scan_result" && slPhase === 1) {
@@ -1489,10 +1575,10 @@ ws.addEventListener("message", (event) => {
     // ── 0.9.2: the init-queue terminal-receipt invariant (see the state block) ──
     if (msg.type === "hello" && trPhase === 0) {
       if (msg.protocol !== 1) fail(`expected protocol 1, got ${msg.protocol}`);
-      if (msg.engineVersion !== "0.11.0") fail(`expected 0.11.0, got ${msg.engineVersion}`);
+      if (msg.engineVersion !== "0.12.0") fail(`expected 0.12.0, got ${msg.engineVersion}`);
       if (!fixtureDir) fail("terminal mode requires a fixture dir argument");
       helloOk = true;
-      console.log(`[test] hello OK (0.11.0) — terminal-receipt knobs: jam=${TR_JAM_S}s timeout=${TR_TIMEOUT_S}s — scanning...`);
+      console.log(`[test] hello OK (0.12.0) — terminal-receipt knobs: jam=${TR_JAM_S}s timeout=${TR_TIMEOUT_S}s — scanning...`);
       trPhase = 1;
       ws.send(JSON.stringify({ type: "scan", dirs: [fixtureDir] }));
     } else if (msg.type === "scan_result" && trPhase === 1) {
@@ -2118,7 +2204,7 @@ ws.addEventListener("message", (event) => {
     if (msg.type === "hello" && !helloOk) {
       helloOk = true;
       if (msg.protocol !== 1) fail(`expected protocol 1, got ${msg.protocol}`);
-      if (msg.engineVersion !== "0.11.0") fail(`expected 0.11.0, got ${msg.engineVersion}`);
+      if (msg.engineVersion !== "0.12.0") fail(`expected 0.12.0, got ${msg.engineVersion}`);
       if (!fixtureDir) fail("scan mode requires a fixture dir argument");
       console.log("[test] hello OK — sending scan of fixture dir + nested dir (dedup proof):", fixtureDir);
       scanSent = true;
@@ -2278,11 +2364,11 @@ ws.addEventListener("message", (event) => {
     // ── Stage 3i: runtime latency tracking (detect, then mini-republish) ──
     if (msg.type === "hello" && latPhase === 0) {
       if (msg.protocol !== 1) fail(`expected protocol 1, got ${msg.protocol}`);
-      if (msg.engineVersion !== "0.11.0") fail(`expected 0.11.0, got ${msg.engineVersion}`);
+      if (msg.engineVersion !== "0.12.0") fail(`expected 0.12.0, got ${msg.engineVersion}`);
       if (!fixtureDir) fail("latency mode requires a fixture dir argument");
       helloOk = true;
       latPhase = 1;
-      console.log("[test] hello OK (0.11.0) — scanning for the stand-in host plugin...");
+      console.log("[test] hello OK (0.12.0) — scanning for the stand-in host plugin...");
       ws.send(JSON.stringify({ type: "dispatch_log", enable: true }));   // Phase 2: the pre-fire proof is ledger-based
       ws.send(JSON.stringify({ type: "scan", dirs: [fixtureDir] }));
     } else if (msg.type === "scan_result" && latPhase === 1) {
@@ -2338,7 +2424,7 @@ ws.addEventListener("message", (event) => {
     if (msg.type === "hello" && !helloOk) {
       helloOk = true;
       if (msg.protocol !== 1) fail(`expected protocol 1, got ${msg.protocol}`);
-      if (msg.engineVersion !== "0.11.0") fail(`expected 0.11.0, got ${msg.engineVersion}`);
+      if (msg.engineVersion !== "0.12.0") fail(`expected 0.12.0, got ${msg.engineVersion}`);
       // Stage 3c close-out: the dispatch ledger streams what the engine
       // ACTUALLY dispatched — the replay-burst and re-attack asserts read it.
       ws.send(JSON.stringify({ type: "dispatch_log", enable: true }));
@@ -2849,6 +2935,29 @@ ws.addEventListener("close", () => {
       process.exit(0);
     } else {
       console.error(`FAILED: hello=${helloOk} scanA=${stScanA ? "ok" : "none"} scanM=${stScanM ? "ok" : "none"} appliedVs=[${stAppliedVs}] rejected=${stRejected}@v${stRejectV} reason="${stRejectReason}" layouts=${JSON.stringify(stLayouts)} layoutPushes=${stLayoutPushCount} stripLayoutChanged=${JSON.stringify(stStripLayoutChanged)} phase=${stPhase}`);
+      process.exit(1);
+    }
+  } else if (mode === "limiter") {
+    allOk = helloOk && limScanPlugin != null && limPhase >= 4 &&
+      (limiterOff ? limPeak > 1.05 : (limPeak > 0.85 && limPeak <= 1.003));
+    if (allOk) {
+      console.log("");
+      console.log("========================================");
+      console.log(limiterOff
+        ? "ALL LIMITER-BYPASS TESTS PASSED (M4, SCORCH_LIMITER_OFF):"
+        : "ALL OUTPUT-STAGE TESTS PASSED (M4, the limiter armed):");
+      if (limiterOff) {
+        console.log(`  the raw hot vector reached the output stage UN-limited (peak ${limPeak.toFixed(3)} > 1.0) — the re-anchored clip counter's advance is real`);
+        console.log("  engine.log side: the BYPASS armed receipt + the [audio] clip counter + advance are desktop.yml's half");
+      } else {
+        console.log(`  brickwall held: fixture-side hot peak ~1.211 (self-reported, desktop.yml asserts) -> device-side ${limPeak.toFixed(3)} (the wire's post-limiter truth)`);
+        console.log("  the in-knee mapping is honest (~0.914 expected for +1.663 dB in) — no bypass, no hard-clip flat-top");
+        console.log("  engine.log side: armed receipt + [audio] limiter gr + + [stop] grMax asserted by desktop.yml");
+      }
+      console.log("========================================");
+      process.exit(0);
+    } else {
+      console.error(`FAILED: hello=${helloOk} scan=${limScanPlugin ? "ok" : "none"} limiterOff=${limiterOff} peak=${limPeak.toFixed(3)} phase=${limPhase}`);
       process.exit(1);
     }
   } else {
