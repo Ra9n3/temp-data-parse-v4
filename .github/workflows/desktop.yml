@@ -979,7 +979,12 @@ jobs:
             if (& $d7 "[strip] wired: strip=s1 instance=inst-a pair=[0,1]*" -lt 2) { throw "D7: s1 must wire twice (v1 + the R3 'restored on load' rewire)" }
             if (& $d7 "[strip] wired: strip=s2 instance=inst-a pair=[2,3]*" -ne 1) { throw "D7: s2 must wire exactly once (v1 — then the R3 guard unwires it)" }
             if (& $d7 "[strip] wired: strip=s3 instance=inst-b pair=[0,1]*" -lt 2) { throw "D7: s3 must wire twice (v1 + v2 restore)" }
-            if (& $d7 "*unwired — named, silent by design" -ne 4) { throw "D7: expected exactly 4 unwired-channel receipts (inst-b bus 1 at v1 + both bus-1 pairs at the v2 restore)" }
+            # ASCII-only patterns: the engine.log is BOM-less UTF-8 and
+            # Windows PowerShell's Get-Content decodes it as ANSI — any
+            # non-ASCII character inside a match pattern would never hit
+            # (the em-dash form of this assert failed exactly that way).
+            if (& $d7 "*channel 2 (bus 1) unwired*" -ne 2) { throw "D7: expected exactly 2 'channel 2 (bus 1) unwired' receipts (inst-b at v1 + inst-b at the v2 restore)" }
+            if (& $d7 "*channel 3 (bus 1) unwired*" -ne 2) { throw "D7: expected exactly 2 'channel 3 (bus 1) unwired' receipts (inst-b at v1 + inst-b at the v2 restore)" }
             if (& $d7 "[strip] teardown: strip=s1 instance=inst-a*" -ne 1) { throw "D7: expected exactly one s1 teardown receipt (the R2 source unload)" }
             if (& $d7 "[strip] teardown: strip=s2 instance=inst-a*" -ne 1) { throw "D7: expected exactly one s2 teardown receipt (the R2 source unload)" }
             $flush = @($d7Log | Where-Object { $_ -like "[strip] teardown flush: slot=0 instance=inst-a held=*" })
