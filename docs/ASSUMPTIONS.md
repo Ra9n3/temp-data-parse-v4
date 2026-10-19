@@ -2668,3 +2668,145 @@ counters + the topology DIAG receipts are the first two receipts to pull.
 - By-ear gate (user): load 3 different real plugins, assign patches, play the
   full 625-event score, three separate instruments audible on their own parts,
   ×10 cycles including partial unloads, clip counter zero.
+
+## Legacy hosting decommission — the sweep, the protocol check, and the host-module file map (post-M2 cleanup)
+
+The APAPH-based host core passed its manual gates (single-instance + the M2
+multi-instance gate), which made the legacy hand-rolled hosting remnants dead
+code. Per the standing discipline: INVENTORY FIRST (receipts before
+deletion), DELETE SECOND (one commit, deletions only). This section is the
+permanent record: what was deleted and why, what was searched for and found
+LIVE (the negative receipts), the protocol check (no silent drops), and the
+host-module file map — the "lift it into my next project" deliverable.
+
+### The deletion set (one commit; `engine/src/main.cpp` + `engine/testvst/ScorchTestSynth.h`, 109 lines, deletions only)
+
+1. **`initFingerprintOf`** (main.cpp) — the 0.9.2 coalescing-fingerprint
+   helper. M2's diff-based reuse builds the fingerprint inline in
+   `handle_load`; the helper had ZERO callers repo-wide (symbol census +
+   grep across engine/frontend/shell/harness/CI/docs).
+2. **The Stage 3h test-audio-stall hook bundle** (main.cpp) —
+   `SCORCH_TEST_AUDIO_STALL_FILE` (env read in `main()`),
+   `g_testAudioStallFile`, `kTestAudioStallMs`, the hook block at the top of
+   `audioDeviceIOCallbackWithContext`, its `testStallInited`/`testStallLastSeen`
+   state flags, and the adjacent stale 3f-6 capture-defer janitor comment.
+   The hook armed a controlled 2.5 s audio-thread stall to prove the OLD
+   plugin-retire deferral machinery (retire list + grace timer + audio-proof
+   janitor + 3f-6 armed records). That machinery the M1 host-core migration
+   DELETED (the vendored graph's `RenderSequenceExchange` is its
+   replacement); desktop.yml's deferral assertions (multi M-18..M-20) died
+   with it, and at HEAD no yml/harness/script sets the env. The LIVE
+   score-RCU janitor keeps `g_audioBufferSeq` (desktop.yml still asserts its
+   `seq >= swapSeq + 2` free math on normal swaps) — the counter is shared
+   infrastructure, the probe was the old path's exclusive tool.
+3. **The Stage 3f-6 slow-state fixture hook** (`ScorchTestSynth.h`) —
+   `SCORCH_TESTVST_SLOWSTATE_FILE` + the `preparedOnce` atomic it
+   exclusively used. Built to prove the OLD inline-retire path's
+   publish-safety (a slow `getStateInformation` on a retired instance
+   wedging the publish). Zero consumers repo-wide at HEAD; the current
+   class-covering tests (terminal mode's jam + watchdog; slowload) don't
+   use it, and the 0.9.2 state-capture phases + terminal watchdog are the
+   machinery that actually owns that failure class today.
+
+**Scope guards held:** `engine/src/host/AudioHostCore.h` (the vendored
+port) byte-untouched; the JUCE FetchContent pin byte-untouched; protocol
+version 1 untouched; every live receipt grammar untouched; frontend and
+shell byte-untouched.
+
+### Negative receipts — searched for, found LIVE, kept (the inventory's null results)
+
+- **Old render path remnants: NONE.** The audio callback's render is the
+  vendored graph (`g_host.graph()->processBlock`) + the built-in synth
+  fallback; both live. No pre-graph direct-plugin `processBlock` remnant
+  exists.
+- **Retire/janitor leftovers: NONE as code.** `g_retireMutex` +
+  `g_retiredScores` + the janitor loop = the LIVE score-RCU reclamation
+  (worker-freed, CI-asserted free math). `g_hostGraveyard` = the LIVE
+  M1-design retention (retired metas immortal to exit; the
+  `LatencyListener` safety argument). The old audio-proof janitor survives
+  only in design-history comments that NAME their replacement — kept as
+  documentation, not dead code.
+- **One-shot latency snapshot code: NONE.** The whole latency family
+  (`LatencyListener`, `g_slotLatencySamples`, `g_pluginLatencySamples`,
+  `latencyTryEnqueue`/`latencyDrain`, `LatencyWatchTimer`,
+  `latencyRepublishJob`, `preRollSamples`) has live call sites — M2/3j
+  machinery. The "one-shot" hits are the M2-revised DIAG probes
+  (topology-change receipts, 1/8/64 render-block receipts): live
+  forensics, kept.
+- **Dead load/reload handlers: NONE beyond #1.** All 15 inbound wire types
+  have dispatch entries and live handlers; `loadHostedPlugin` is the
+  worker's create path.
+- **Protocol fields only the old engine used: NONE dropped.** See the
+  protocol check below.
+- **Feature flags gating only the old path: the two deleted knobs, and
+  nothing else.** Every other `SCORCH_*` knob has a named live consumer:
+  `SCORCH_TESTVST_LOG` (10 desktop.yml refs), `SCORCH_TESTVST_INFTAIL` (2),
+  `SCORCH_TESTVST_SLOW_CREATE_S/_N` (7), `SCORCH_TESTVST_SLOW_PREPARE_N/_S`
+  (5), `SCORCH_TESTVST_JAM_TOKEN` (engine-set, main), `SCORCH_INIT_TERMINAL_TIMEOUT_MS`,
+  and the `SCORCH_SCAN_BEGIN/END` + `SCORCH_PROBE_BEGIN/END` worker markers
+  (emitted by the engine's own workers and parsed by the engine + harness).
+
+### Protocol check — every wire message, handled (zero silent drops)
+
+Inbound (client -> engine), all with live handlers at HEAD: `hello`-side
+handshake, `ping`, `shutdown`, `load` (multi `plugins:[...]` shape AND the
+legacy single-plugin `plugin:{...}` + `channels` shape — the legacy shape
+is a DELIBERATE byte-compat surface the harness itself uses at 5+ sites and
+the frontend keeps for pre-3d-4 callers; NOT dead), `transport`
+(play/stop/seek), `panic`, `scan`, `probe`, `probeAll`, `mix`,
+`dispatch_log`, `setHostWindow`, `openEditor` (+ `instanceId`),
+`closeEditor`, `captureState`. Unknown types answer
+`{"type":"error","code":"unknown"}` — unchanged.
+
+Outbound (engine -> client), all consumed: `hello`, `pong`, `error`,
+`state`, `loadAck`, `plugin_state` (incl. the per-entry `channels` echo),
+`plugin_capabilities`, `scan_result`, `scan_probe`, `engineDiagnostic`,
+`editorOpened`, `editorClosed`, `pluginSavedState`, `hostWindowSet` (the
+frontend's documented echo contract), `dispatch_log` (the ack), `dispatch`
+(the ledger stream) — the last two consumed by the CI harness (the
+downbeat pre-fire ledger proof). The frontend's listener set and the
+engine's emitter set are exact supersets of each other's needs; no wire
+message lost its consumer in the sweep.
+
+**Deprecated surface (the only retirement):** the two deleted TEST-ONLY env
+knobs — `SCORCH_TEST_AUDIO_STALL_FILE` and `SCORCH_TESTVST_SLOWSTATE_FILE`.
+Neither was ever a wire message; both were env-gated test probes whose
+subject machinery no longer exists. Setting either at HEAD is a no-op. This
+section is their deprecation note; the historical CI entries above (3h,
+3f-6) remain the record of what they proved in their era.
+
+### The host-module file map (the lift-into-my-next-project deliverable)
+
+The engine's hosting capability is a self-contained file set. To lift the
+host into another project, take these files and nothing else:
+
+| File | Role | Dependencies |
+| --- | --- | --- |
+| `engine/src/host/AudioHostCore.h` | THE HOST CORE — the vendored minimal port of JUCE 8's `extras/AudioPluginHost` (graph + output IO node + midi-input IO node + `addPluginNode`/`removeLiveNode`/`reconfigureForDevice` + the M2 `InstanceMidiSelector` per-instance MIDI bridge). Receipt-free by design; header-documented port provenance (PluginGraph.{h,cpp} + PluginWindow.h + `AudioProcessorGraph` itself). | JUCE: `juce_audio_processors` (brings `juce_gui_basics` transitively), `juce_audio_devices`, `juce_audio_basics`, `juce_core`. |
+| `engine/src/main.cpp` | THE THIN GLUE — WS protocol (IXWebSocket), the score/dispatch engine, the init worker (async-ack contract, terminal receipts, coalescing), the diff-based set machine, per-instance editors/state/latency, the audio callback (graph render + synth fallback + output guard), scan/probe workers, crash forensics. Every vendor-step receipt is emitted HERE, around the core's calls. | `AudioHostCore.h` + JUCE (as above) + IXWebSocket (loopback WS only). |
+| `engine/CMakeLists.txt` | The build: JUCE 8 FetchContent pin + IXWebSocket FetchContent + `JUCE_PLUGINHOST_VST3=1` + `JUCE_WEB_BROWSER=0` + `JUCE_USE_CURL=0` + MSVC /EHa + the headless runtime policy (lazy device init; `--null-audio` for CI). | CMake >= 3.22, C++20. |
+| `engine/testvst/` (CMakeLists + `ScorchTestSynth.{h,cpp}` + `crashvst.c` + `probedummy.c` + `fixtures/*.json`) | The free CI stand-in plugin + scan/probe crash/hang fixtures — how the suite proves hosting WITHOUT a commercial library. Optional for the lift (delete and drop `add_subdirectory(testvst)`), but it is the entire reason CI can assert hosting end-to-end. | JUCE (plugin targets). |
+
+Everything else in the repo (frontend `src/`, shell `src-tauri/`, harness
+`.github/scripts/`, docs) is the APP around the host, not the host. The
+lift contract: the core is receipt-free, the glue is receipt-culture, the
+two never mix — that boundary is what makes the file set portable.
+
+### Sweep validation receipts
+
+- Engine rebuild after the deletions: clean (gcc/Linux, the JUCE 8.0.4 pin).
+- ALL NINE protocol modes green at 0.10.0 post-sweep, engine exit 0 each:
+  null-audio, no-device (graceful `no_audio_device`), scale (13,824-event
+  negative set), scan (crash/hang isolation), host (plugin_state loaded,
+  multi-output routing peaks, setHostWindow echo), multi (per-instance
+  captures inst-a/inst-b/inst-d), latency (republish chain + pre-roll),
+  slowload (loaded 6024 ms behind a 6 s create; alive behind the heavy
+  load), terminal (coalescing fold + classic supersede + exactly-one
+  terminals). Local runs used the JUCE null device (this box has no ALSA
+  card this session — the M1-runner precedent); Windows CI proves the
+  real-device paths.
+- `tsc --noEmit` clean; `vite build` clean.
+- CI at the sweep commit: the seven core modes + multi + slowload (D4) +
+  terminal (D5) re-run green — the task's zero-source-change-outside-deleted-
+  files condition is verifiable from the commit itself (deletions only,
+  two files).
