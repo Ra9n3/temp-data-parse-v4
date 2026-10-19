@@ -27,10 +27,6 @@
 // "Aux Out"). The aux bus emits a DISTINCT CONSTANT 0.25 while armed
 // (CC#22 > 0 — score-driven, deterministic) AND a note is sounding; default
 // silent so every earlier CI peak is byte-identical. CC#22 = 0 disarms.
-// Stage 3f-6: SCORCH_TESTVST_SLOWSTATE_FILE (engine-process env) names a
-// marker file; while it exists, getStateInformation of any PREPARED instance
-// sleeps 10 s first (the publish-safe CI proof — a being-created instance is
-// never prepared yet, so JUCE's creation-time state handshake stays fast).
 
 // Stage 3f-7: SCORCH_TESTVST_INFTAIL=1 (engine-process env, inherited by
 // probe-worker children) makes getTailLengthSeconds return INFINITY — the
@@ -180,12 +176,6 @@ public:
 
     void prepareToPlay(double newSampleRate, int /*maxBlockSize*/) override {
         sampleRate = newSampleRate > 0 ? newSampleRate : 44100.0;
-        // Stage 3f-6: marks the instance as RETIRE-CAPTURE-eligible (see
-        // getStateInformation) — creation-time getStateInformation (JUCE's
-        // VST3 component→controller state handshake, which runs INSIDE
-        // createPluginInstance on the message thread) happens BEFORE this, so
-        // the slow-capture hook can never stall the instance's own creation.
-        preparedOnce.store(true);
         // M1-hotfix: the Nth prepareToPlay sleeps (see the header table
         // above). 1-based call counting; 0 = disabled.
         {
@@ -357,29 +347,6 @@ public:
         return 0.0;
     }
     void getStateInformation(juce::MemoryBlock& dest) override {
-        // Stage 3f-6: publish-safe CI hook. While the marker file named by the
-        // ENGINE's SCORCH_TESTVST_SLOWSTATE_FILE env var exists, state capture
-        // stalls 10 s BEFORE producing the (unchanged, valid) state — the
-        // stand-in for the real Falcon/BBCSO symptom (a slow/hung
-        // getStateInformation on a RETIRED instance wedged the init worker's
-        // publish section forever). GATED ON preparedOnce: JUCE's VST3
-        // creation path calls getStateInformation on the NEW instance too
-        // (the component→controller state handshake inside
-        // createPluginInstance), and that call must stay fast so the new set
-        // publishes immediately — only already-prepared (retireable)
-        // instances stall. The env var names the file, the TEST creates and
-        // removes it mid-session, so the same binary stays fast for every
-        // other phase and no second fixture is needed. The stall is logged
-        // (SCORCH_TESTVST_LOG=1) so CI proves the path was taken.
-        static const char* const slowStateFile = std::getenv("SCORCH_TESTVST_SLOWSTATE_FILE");
-        if (slowStateFile != nullptr && preparedOnce.load()) {
-            if (FILE* marker = std::fopen(slowStateFile, "rb")) {
-                std::fclose(marker);
-                std::fprintf(stdout, "[testvst] slow state capture: marker present — sleeping 10000 ms in getStateInformation\n");
-                std::fflush(stdout);
-                std::this_thread::sleep_for(std::chrono::milliseconds(10000));
-            }
-        }
         // Stage 3d-3: REAL state. The CI-observable master scale (multiplies
         // every voice), serialized as ONE raw little-endian float32 — a
         // format the CI can construct and assert byte-exactly (no XML
@@ -443,9 +410,6 @@ private:
         }
     };
     ConstructLogger constructLog{instOrdinal};
-    // Stage 3f-6: set by prepareToPlay — the slow-capture gate (see
-    // getStateInformation). A creation-time capture (pre-prepare) never stalls.
-    std::atomic<bool> preparedOnce{false};
     // M1-hotfix: the slow-prepare knobs (see the header table above). Env is
     // read ONCE here (constructors run on whatever thread instantiates the
     // fixture — getenv is safe to read concurrently), the sleep decision is

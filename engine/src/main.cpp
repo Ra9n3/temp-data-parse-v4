@@ -579,28 +579,6 @@ struct RetiredScoreRef {
 };
 std::vector<RetiredScoreRef> g_retiredScores;
 
-// Stage 3h TEST-ONLY stall hook (the null-audio regression probe): when this
-// env-named marker file EXISTS, the first audio buffer to observe the appear
-// transition sleeps kTestAudioStallMs INSIDE the callback before touching
-// anything — one long, deliberate freeze of the audio thread, so the buffer
-// cannot finish and g_audioBufferSeq cannot advance while a swap publishes.
-// This is the controllable "stalled audio thread" the old 250 ms grace
-// silently assumed away (driver DPC spike / antivirus / plugin I/O). Set by
-// desktop.yml for the D2 engine process and by local validation runs; a
-// production engine never has it set, and the steady-state cost when unset
-// is one predictable branch on an empty string. No lock, no allocation.
-std::string g_testAudioStallFile;   // written once in main(), read-only afterward
-constexpr int kTestAudioStallMs = 2500;
-
-// Stage 3f-6: a retire capture runs on the MESSAGE thread (callAsync) while
-// the init worker only WAITS up to 3000 ms for it — so when the budget
-// expires the capture job can still be queued or mid-sleep inside a slow
-// plugin's getStateInformation. The janitor must not free a HostedPlugin
-// whose capture job has not finished dereferencing it: each armed record
-// pairs the instance with the job's done flag and the janitor defers the
-// free until the flag lands (a bounded leak if the message thread never
-// runs the job — process exit reclaims, the standing 3c teardown policy).
-
 // Voice kill requests: stop/seek/panic/play set the flag; the NEXT audio
 // buffer performs the kill itself (voices are audio-thread-owned). The
 // active-voice count is recomputed by the callback each buffer so handlers
@@ -1869,22 +1847,6 @@ uint64_t g_pluginInitGen = 0;            // guarded; bumped per queued request
 // the generation counter alone cannot answer "which seq superseded me".
 long long g_pluginInitNewestSeq = 0;     // guarded by g_pluginInitMutex
 
-// 0.9.2: the coalescing fingerprint for a parsed request (entries already
-// resolved: instanceId + uid + path). Empty for unload requests. Two requests
-// with the same fingerprint describe the SAME plugin set — the newer one
-// folds into the older's init instead of queueing a duplicate heavyweight
-// instantiate (or answering "reused" while the older init is still out).
-static std::string initFingerprintOf(const std::vector<PluginInitEntry>& entries) {
-    std::string fp;
-    for (const auto& e : entries) {
-        juce::DynamicObject* po = e.pluginVar.getDynamicObject();
-        const std::string uid = po ? po->getProperty("uid").toString().toStdString() : "";
-        const std::string path = po ? po->getProperty("path").toString().toStdString() : "";
-        if (!fp.empty()) fp += ";";
-        fp += e.instanceId + "|" + uid + "|" + path;
-    }
-    return fp;
-}
 // Real device config, captured in audioDeviceAboutToStart. A hot-swapped
 // instance is prepared with THESE numbers before it becomes visible to the
 // audio callback (create-time prepare uses nominal 44100/512 — preparing a
@@ -1976,27 +1938,6 @@ public:
                                           int numOutputChannels,
                                           int numSamples,
                                           const juce::AudioIODeviceCallbackContext& /*context*/) override {
-        // ── Stage 3h TEST-ONLY stall hook (see g_testAudioStallFile) ──
-        // The FIRST buffer to observe the marker's appear transition freezes
-        // HERE for kTestAudioStallMs — before the loads and the seq tick, so
-        // a frozen buffer holds NO published pointers and g_audioBufferSeq
-        // stops advancing for the whole sleep. This is the controllable
-        // stalled-audio-thread regression probe; production engines never
-        // see the env var set (the empty-string branch below is the entire
-        // steady-state cost).
-        if (!g_testAudioStallFile.empty()) {
-            bool exists = false;
-            if (FILE* f = std::fopen(g_testAudioStallFile.c_str(), "rb")) {
-                std::fclose(f);
-                exists = true;
-            }
-            if (!testStallInited) {
-                testStallInited = true;          // never stall on the very first buffer
-            } else if (exists && !testStallLastSeen) {
-                std::this_thread::sleep_for(std::chrono::milliseconds(kTestAudioStallMs));
-            }
-            testStallLastSeen = exists;
-        }
         // Zero the output buffer
         for (int ch = 0; ch < numOutputChannels; ++ch)
             std::memset(outputChannelData[ch], 0, sizeof(float) * numSamples);
@@ -2596,13 +2537,6 @@ private:
     // shared MidiInOp path is retired; the selectors are the per-instance
     // MIDI path). Clear-per-buffer, capacity never grows.
     juce::MidiBuffer graphMidiIn;
-
-    // Stage 3h test-only stall state (audio-thread-owned; see the hook at the
-    // top of audioDeviceIOCallbackWithContext). The first buffer only
-    // INITIALIZES the seen-flag so a stale marker at device start cannot
-    // freeze the very first buffer.
-    bool testStallInited = false;
-    bool testStallLastSeen = false;
 
     // ── Milestone 1 silence diagnosis (the three instrumented sites) ──
     // One-shot [host-core] DIAG receipts; audio thread. Steady state (after
@@ -5236,13 +5170,6 @@ int main(int argc, char** argv) {
             }
         }
     }
-
-    // Stage 3h TEST-ONLY: the null-audio regression probe arms its controlled
-    // audio-thread stall through this env-named marker file (desktop.yml sets
-    // it for the D2 engine process). Read ONCE here, before any thread exists,
-    // so the audio thread's per-buffer check is a plain string compare.
-    if (const char* stallFile = std::getenv("SCORCH_TEST_AUDIO_STALL_FILE"))
-        g_testAudioStallFile = stallFile;
 
     // 0.9.2: the fixture's create-jam latch token — a per-session value the
     // fixture (and any probe child, which inherits the env) uses to key its
