@@ -1001,11 +1001,16 @@ jobs:
             if ($cnt4286 -ne 1) { Write-Host ("D7 count miss: count=" + $cnt4286); throw "D7: expected exactly one s1 teardown receipt (the R2 source unload)" }
             $cnt4050 = & $d7 "[strip] teardown: strip=s2 instance=inst-a"
             if ($cnt4050 -ne 1) { Write-Host ("D7 count miss: count=" + $cnt4050); throw "D7: expected exactly one s2 teardown receipt (the R2 source unload)" }
-            $flush = @($d7Log | Where-Object { $_ -like "[strip] teardown flush: slot=0 instance=inst-a held=*" })
-            if ($flush.Count -ne 1) { throw "D7: expected exactly ONE teardown-flush receipt (the R4 slot wipe), got $($flush.Count)" }
-            if ($flush[0] -notmatch "held=(\d+)") { throw "D7: the teardown-flush receipt must carry the held count" }
-            if ([int]$flush[0] -match "held=(\d+)" -and [int]$Matches[1] -lt 1) { throw "D7: R4 flush held count must be >= 1 (note 60 was sounding when inst-a unloaded)" }
-            Write-Host "D7 R4 flush: $($flush[0])"
+            # (literal -match counting — the -like form here suffered the same
+            # wildcard-class mangling as the asserts above; the receipt IS in
+            # the slice, the diagnostic dumps have shown it every run)
+            $flushCnt = & $d7 "[strip] teardown flush: slot=0 instance=inst-a held="
+            if ($flushCnt -ne 1) { Write-Host ("D7 count miss: count=" + $flushCnt); throw "D7: expected exactly ONE teardown-flush receipt (the R4 slot wipe), got $flushCnt" }
+            $flushLine = @($d7Log | Where-Object { $_ -match [regex]::Escape("[strip] teardown flush: slot=0 instance=inst-a held=") })[0]
+            if ($null -eq $flushLine) { throw "D7: the teardown-flush receipt vanished between count and extraction" }
+            if ($flushLine -notmatch "held=(\d+)") { throw "D7: the teardown-flush receipt must carry the held count" }
+            if ([int]$Matches[1] -lt 1) { throw "D7: R4 flush held count must be >= 1 (note 60 was sounding when inst-a unloaded)" }
+            Write-Host "D7 R4 flush: $flushLine"
             $cnt1679 = & $d7 "[strip] mix: solos=[] mutes=[s1]"
             if ($cnt1679 -ne 1) { Write-Host ("D7 count miss: count=" + $cnt1679); throw "D7: expected exactly one strip-mix receipt naming mutes=[s1]" }
             $cnt9285 = & $d7 "[strip] mix: solos=[s1]"
