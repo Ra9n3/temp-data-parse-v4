@@ -280,6 +280,43 @@ const multiEditorPhase = (headless) => {
   ws.send(JSON.stringify({ type: "openEditor", instanceId: "inst-a" }));
 };
 
+// ── M3 PR1 routing-mode state (the runtime routing table — see the header) ──
+const ROUTE_META = { bpm: 120, ppqn: 960, timeSignature: { numerator: 4, denominator: 4 }, endTick: 8448 };
+// Four parts × four notes (ticks 480/1440/2400/3360, off +240): the table
+// swaps land BETWEEN note groups, so every table version has deterministic
+// post-swap notes to assert. t4 is UNMAPPED in every table — its notes must
+// NEVER reach the plugin and never the ledger (the drop receipts are the
+// engine.log half, desktop.yml's).
+const ROUTE_PITCH = { t1: 60, t2: 67, t3: 72, t4: 79 };
+const routePart = (trackId) => [
+  // CC7/CC11 fader priming at tick 0 — the multiPart discipline: the
+  // fixture's per-channel CC7 defaults to SILENT (0 until received), so a
+  // note-only part renders silence and every peak gate lies.
+  { eventType: "CONTROL_CHANGE", channel: 1, data1: 7, data2: 127, timestampTicks: 0, trackId },
+  { eventType: "CONTROL_CHANGE", channel: 1, data1: 11, data2: 127, timestampTicks: 0, trackId },
+].concat([480, 1440, 2400, 3360, 4320, 5280].flatMap((on) => [
+  { eventType: "NOTE_ON", channel: 1, data1: ROUTE_PITCH[trackId], data2: 100, timestampTicks: on, trackId },
+  { eventType: "NOTE_OFF", channel: 1, data1: ROUTE_PITCH[trackId], data2: 0, timestampTicks: on + 240, trackId },
+]));
+const routeEvents = ["t1", "t2", "t3", "t4"].flatMap(routePart);
+// The tables: v1 initial (t4 unmapped from the first note), v2 mid-play
+// rebind (t1 crosses instances; t2/t3 re-channel), the R1-bad one, v3 = the
+// v1 restore. inst-a leases slot 0, inst-b slot 1 (plugins[] lease order) —
+// wide = slot*16 + ch: A ch1 = 1, A ch2 = 2, B ch1 = 17.
+const ROUTE_V1 = { t1: { inst: "inst-a", ch: 1 }, t2: { inst: "inst-a", ch: 2 }, t3: { inst: "inst-b", ch: 1 } };
+const ROUTE_V2 = { t1: { inst: "inst-b", ch: 1 }, t2: { inst: "inst-a", ch: 1 }, t3: { inst: "inst-a", ch: 2 } };
+const ROUTE_V3 = ROUTE_V1;
+let rtPhase = 0, rtScanPlugin = null, rtLoadedCount = 0;
+const rtAppliedVs = [];       // routing_result applied:true versions, in order
+let rtRejected = 0, rtRejectReason = "", rtRejectV = -1;
+let rtPeak = 0, rtLedger = [];
+const rtSlice = {};           // NOTE_ON counts "pitch:wide" since the last mark
+let rtLastStop = false;
+const rtMark = () => { for (const k of Object.keys(rtSlice)) delete rtSlice[k]; };
+const rtBump = (e) => { if (e.k === 1) { const key = `${e.a}:${e.c}`; rtSlice[key] = (rtSlice[key] ?? 0) + 1; } };
+const rtCount = (key) => rtSlice[key] ?? 0;
+const rtSendTable = (routes) => ws.send(JSON.stringify({ type: "routing", routes }));
+
 // Events chosen so a note IS sounding when the test stops (tick ~600): the
 // stop-panic kill count in the engine's stdout ("voices killed (n=…)") is then
 // ≥1 — real evidence, not an empty-path no-op. The first note (0→300) lies
@@ -415,6 +452,8 @@ const timeout = setTimeout(() => {
     console.error(`TIMEOUT at step ${step} phase=${hostPhase} (scan=${hostScanSent} hostHwnd=${hostHwndSetOk} pluginState=${hostPluginStateOk} editorNeg=${hostEditorNegOk} editorOpen=${hostEditorOpenOk} editorFocus=${hostEditorFocusOk} editorClose=${hostEditorCloseOk} stateCap=${hostStateCaptureOk} stateRestore=${hostStateRestoreOk} stateRT=${hostStateRoundtripOk} reloadAck=${hostReloadAckOk} reject=${hostRejectOk} stillPlaying=${hostPlayingAfterReject} stops=${hostStopTick1}/${hostStopTick2} peaks A/B/C=${hostPeakA.toFixed(3)}/${hostPeakB.toFixed(3)}/${hostPeakC.toFixed(3)} entries=${hostEntries.length})`);
   } else if (mode === "multi") {
     console.error(`TIMEOUT at step ${step} phase=${multiPhase} (scanA=${multiScanPlugin ? "ok" : "none"} scanB=${multiScanPluginB ? "ok" : "none"} loaded=${JSON.stringify(multiLoadedCount)} acks=${[...multiAckSeqs].join(",")} peak=${multiPeak.toFixed(3)} wide=${JSON.stringify(multiWide)} editors=${multiEdOpenA}/${multiEdOpenB}/${multiEdFocus}/${multiEdCloseA}/${multiEdCloseB} headlessSkip=${multiHeadlessSkip} captures=${[...multiCapIds].join(",")} entries=${multiLedger.length})`);
+  } else if (mode === "routing") {
+    console.error(`TIMEOUT at step ${step} phase=${rtPhase} (scan=${rtScanPlugin ? "ok" : "none"} appliedVs=[${rtAppliedVs.join(",")}] rejected=${rtRejected}@v${rtRejectV} reason="${rtRejectReason}" peak=${rtPeak.toFixed(3)} slice=${JSON.stringify(rtSlice)} stopped=${rtLastStop})`);
   } else if (mode === "slowload") {
     console.error(`TIMEOUT at step ${step} phase=${slPhase} (scan=${slScanPlugin ? "ok" : "none"} ack=${slAckOk} ackMs=${slAckMs} loaded=${slLoadedOk} loadedMs=${slLoadedMs} play=${slPlayOk} ticks=${slTicksOk} peak=${slPeak.toFixed(3)} stop=${slStopOk})`);
   } else if (mode === "terminal") {
@@ -430,7 +469,7 @@ const timeout = setTimeout(() => {
 // loaded-receipt bound is asserted EXPLICITLY per phase below — but the
 // wall-clock budget still covers them, plus the Stage 3h stall probe (a 2.5 s
 // audio freeze + its tail): 120 s.
-}, mode === "scan" ? 180000 : mode === "host" ? 150000 : mode === "multi" ? 120000 : mode === "latency" ? 90000 : mode === "slowload" ? 90000 : mode === "terminal" ? 150000 : 30000);
+}, mode === "scan" ? 180000 : mode === "host" ? 150000 : mode === "multi" ? 120000 : mode === "latency" ? 90000 : mode === "slowload" ? 90000 : mode === "terminal" ? 150000 : mode === "routing" ? 120000 : 30000);
 
 // scan-mode flags
 let scanSent = false, scanResultOk = false, aliveAfterCrashOk = false, defaultScanOk = false;
@@ -909,7 +948,7 @@ ws.addEventListener("message", (event) => {
     }
     if (msg.type === "hello" && multiPhase === 0) {
       if (msg.protocol !== 1) fail(`expected protocol 1, got ${msg.protocol}`);
-      if (msg.engineVersion !== "0.10.0") fail(`expected 0.10.0, got ${msg.engineVersion}`);
+      if (msg.engineVersion !== "0.11.0-a") fail(`expected 0.10.0, got ${msg.engineVersion}`);
       if (!fixtureDir) fail("multi mode requires a fixture dir argument");
       console.log("[test] hello OK (0.10.0) — M2 multi-instance: scanning for BOTH fixture identities...");
       multiPhase = 1;
@@ -1029,11 +1068,131 @@ ws.addEventListener("message", (event) => {
         finishAndShutdown();
       }
     }
+  } else if (mode === "routing") {
+    // ── M3 PR1: the runtime routing table (see the header + the state block) ──
+    if (msg.type === "routing_result") {
+      if (msg.applied === true) {
+        rtAppliedVs.push(msg.v);
+        console.log(`[test] routing_result applied v=${msg.v} tracks=${msg.tracks}`);
+        if (rtPhase === 2) {
+          if (msg.v !== 1) fail(`routing: first apply must be v=1, got ${msg.v}`);
+          rtPhase = 3;
+          rtMark();
+          ws.send(JSON.stringify({ type: "transport", command: "play", tick: 0 }));
+        } else if (rtPhase === 4) {
+          if (msg.v !== 2) fail(`routing: mid-play apply must be v=2, got ${msg.v}`);
+          console.log("[test] R2 ✓ table v2 applied MID-PLAY — asserting the rebound paths next");
+          rtPhase = 5;
+        } else if (rtPhase === 8) {
+          if (msg.v !== 3) fail(`routing: restore apply must be v=3, got ${msg.v}`);
+          console.log("[test] ✓ restore applied (v=3) — asserting the original paths are back");
+          rtPhase = 9;
+        }
+      } else {
+        rtRejected++;
+        rtRejectReason = msg.reason ?? "";
+        rtRejectV = msg.v ?? -1;
+        console.log(`[test] routing_result REJECTED v=${rtRejectV} (unchanged): "${rtRejectReason}"`);
+        if (rtPhase === 6) {
+          if (rtRejectV !== 2) fail(`routing: a rejection must echo the UNCHANGED v=2, got ${rtRejectV}`);
+          if (!rtRejectReason.includes("unknown instanceId")) fail(`routing: the reject reason must name the unknown instance, got "${rtRejectReason}"`);
+          rtPhase = 7;
+        }
+      }
+      return;
+    }
+    if (msg.type === "dispatch" && rtPhase >= 3) {
+      for (const e of msg.entries ?? []) { rtLedger.push(e); rtBump(e); }
+      return;
+    }
+    if (msg.type === "error") {
+      fail(`routing: unexpected error: ${JSON.stringify(msg)}`);
+    } else if (msg.type === "hello" && rtPhase === 0) {
+      helloOk = true;
+      if (msg.protocol !== 1) fail(`expected protocol 1, got ${msg.protocol}`);
+      if (msg.engineVersion !== "0.11.0-a") fail(`expected 0.11.0-a, got ${msg.engineVersion}`);
+      if (!fixtureDir) fail("routing mode requires a fixture dir argument");
+      console.log("[test] hello OK (0.11.0-a) — M3 PR1: scanning for the stand-in identity...");
+      rtPhase = 1;
+      ws.send(JSON.stringify({ type: "scan", dirs: [fixtureDir] }));
+    } else if (msg.type === "scan_result" && rtPhase === 1) {
+      rtScanPlugin = (msg.plugins ?? []).find((p) => p.name === "Scorch Test Synth");
+      if (!rtScanPlugin) fail(`routing mode: identity A ("Scorch Test Synth") required, got ${JSON.stringify(msg.plugins)}`);
+      console.log(`[test] identity A uid=${rtScanPlugin.uid} — loading inst-a (multiTimbral) + inst-b (single-timbral); t4 UNMAPPED from the first note`);
+      rtPhase = 2;
+      ws.send(JSON.stringify({ type: "dispatch_log", enable: true }));
+      ws.send(JSON.stringify({
+        type: "load", seq: 1,
+        events: routeEvents,
+        meta: ROUTE_META,
+        plugins: [
+          { instanceId: "inst-a", uid: rtScanPlugin.uid, path: rtScanPlugin.path, name: rtScanPlugin.name, multiTimbral: true },
+          { instanceId: "inst-b", uid: rtScanPlugin.uid, path: rtScanPlugin.path, name: rtScanPlugin.name },
+        ],
+        routing: ROUTE_V1,
+      }));
+    } else if (msg.type === "plugin_state" && msg.state === "loaded" && rtPhase === 2) {
+      rtLoadedCount++;
+      if (rtLoadedCount === 2) {
+        console.log("[test] both instances live — applying table v1 PRE-PLAY (t4 unmapped from the first note)");
+        rtSendTable(ROUTE_V1);
+      }
+    } else if (msg.type === "state") {
+      rtPeak = Math.max(rtPeak, msg.peak ?? 0);
+      if (rtPhase === 3 && msg.playing && msg.tick >= 1600) {
+        // v1 paths: t1 → A ch1 (wide 1), t2 → A ch2 (wide 2), t3 → B ch1 (wide 17);
+        // notes at 480/1440 have dispatched by 1600, two of them still sounding.
+        if (rtCount("60:1") < 2 || rtCount("67:2") < 2 || rtCount("72:17") < 2)
+          fail(`routing v1 paths broken: slice=${JSON.stringify(rtSlice)} (need 60:1, 67:2, 72:17)`);
+        if (Object.keys(rtSlice).some((k) => k.startsWith("79:")))
+          fail(`routing: unmapped t4 (pitch 79) REACHED THE ENGINE: ${JSON.stringify(rtSlice)} — the drop path failed`);
+        if (rtPeak <= 0) fail(`routing: zero peak with three sounding notes (${rtPeak.toFixed(3)})`);
+        console.log(`[test] phase R-1 ✓ v1 paths + t4 dropped from the first note (peak ${rtPeak.toFixed(3)}) — MID-PLAY swap to v2`);
+        rtMark();
+        rtPhase = 4;
+        rtSendTable(ROUTE_V2);
+      } else if (rtPhase === 5 && msg.playing && msg.tick >= 2800) {
+        // v2 paths: t1 → B ch1 (17), t2 → A ch1 (1), t3 → A ch2 (2); the
+        // tick-2400 notes dispatched AFTER the swap prove the transport rolled
+        // through it (the no-gap witness) and landed on the NEW channels.
+        if (rtCount("60:17") < 1 || rtCount("67:1") < 1 || rtCount("72:2") < 1)
+          fail(`routing v2 paths broken: slice=${JSON.stringify(rtSlice)} (need 60:17, 67:1, 72:2 post-swap)`);
+        if (rtCount("60:1") > 0 || rtCount("67:2") > 0 || rtCount("72:17") > 0)
+          fail(`routing v2 LEAK: old-path notes after the swap: ${JSON.stringify(rtSlice)}`);
+        console.log("[test] phase R-2 ✓ v2 paths live mid-play (transport rolled through the swap, zero leaks) — sending the R1-BAD table (unknown instance)");
+        rtMark();
+        rtPhase = 6;
+        rtSendTable({ t1: { inst: "inst-nope", ch: 1 } });
+      } else if (rtPhase === 7 && msg.playing && msg.tick >= 3500) {
+        // The rejection held: t1's tick-3360 note still rides v2's wide 17.
+        if (rtCount("60:17") < 1)
+          fail(`routing: the rejection did not hold the old table: slice=${JSON.stringify(rtSlice)} (need 60:17 for the tick-3360 note)`);
+        console.log("[test] phase R-3 ✓ R1 atomic-or-nothing held (v stayed 2, notes unchanged) — restoring v1");
+        rtMark();
+        rtPhase = 8;
+        rtSendTable(ROUTE_V3);
+      } else if (rtPhase === 9 && msg.playing && msg.tick >= 5500) {
+        // v3 = v1: the 4320 + 5280 notes ride the ORIGINAL paths again.
+        if (rtCount("60:1") < 1 || rtCount("67:2") < 1 || rtCount("72:17") < 1)
+          fail(`routing restore broken: slice=${JSON.stringify(rtSlice)} (need 60:1, 67:2, 72:17 again)`);
+        console.log("[test] phase R-4 ✓ v1 restored (v=3) — clean stop");
+        rtPhase = 10;
+        ws.send(JSON.stringify({ type: "transport", command: "stop" }));
+      } else if (rtPhase === 10 && msg.playing === false) {
+        rtPhase = 11;
+        rtLastStop = true;
+        if (rtAppliedVs.join(",") !== "1,2,3") fail(`routing: applied versions must be [1,2,3], got [${rtAppliedVs}]`);
+        if (rtRejected !== 1) fail(`routing: exactly ONE rejection expected, got ${rtRejected}`);
+        if (rtLedger.some((e) => e.k === 1 && e.a === 79)) fail("routing: pitch 79 dispatched at ANY phase — the unmapped drop failed");
+        console.log("[test] M3 PR1 ✓ atomic table lifecycle: v1 → v2 (mid-play) → REJECTED (nothing changed) → v3 restore; t4 dropped end-to-end");
+        finishAndShutdown();
+      }
+    }
   } else if (mode === "slowload") {
     // ── M1-hotfix: the heavy-load death class (see the state block above) ──
     if (msg.type === "hello" && slPhase === 0) {
       if (msg.protocol !== 1) fail(`expected protocol 1, got ${msg.protocol}`);
-      if (msg.engineVersion !== "0.10.0") fail(`expected 0.9.2, got ${msg.engineVersion}`);
+      if (msg.engineVersion !== "0.11.0-a") fail(`expected 0.11.0-a, got ${msg.engineVersion}`);
       if (!fixtureDir) fail("slowload mode requires a fixture dir argument");
       helloOk = true;
       console.log(`[test] hello OK (0.10.0) — slow-load knobs: create=${SLOW_CREATE_S}s prepareN=${process.env.SCORCH_TESTVST_SLOW_PREPARE_N ?? 0}(x${SLOW_PREPARE_S}s) — scanning...`);
@@ -1088,7 +1247,7 @@ ws.addEventListener("message", (event) => {
     // ── 0.9.2: the init-queue terminal-receipt invariant (see the state block) ──
     if (msg.type === "hello" && trPhase === 0) {
       if (msg.protocol !== 1) fail(`expected protocol 1, got ${msg.protocol}`);
-      if (msg.engineVersion !== "0.10.0") fail(`expected 0.9.2, got ${msg.engineVersion}`);
+      if (msg.engineVersion !== "0.11.0-a") fail(`expected 0.11.0-a, got ${msg.engineVersion}`);
       if (!fixtureDir) fail("terminal mode requires a fixture dir argument");
       helloOk = true;
       console.log(`[test] hello OK (0.10.0) — terminal-receipt knobs: jam=${TR_JAM_S}s timeout=${TR_TIMEOUT_S}s — scanning...`);
@@ -1717,7 +1876,7 @@ ws.addEventListener("message", (event) => {
     if (msg.type === "hello" && !helloOk) {
       helloOk = true;
       if (msg.protocol !== 1) fail(`expected protocol 1, got ${msg.protocol}`);
-      if (msg.engineVersion !== "0.10.0") fail(`expected 0.9.2, got ${msg.engineVersion}`);
+      if (msg.engineVersion !== "0.11.0-a") fail(`expected 0.11.0-a, got ${msg.engineVersion}`);
       if (!fixtureDir) fail("scan mode requires a fixture dir argument");
       console.log("[test] hello OK — sending scan of fixture dir + nested dir (dedup proof):", fixtureDir);
       scanSent = true;
@@ -1877,7 +2036,7 @@ ws.addEventListener("message", (event) => {
     // ── Stage 3i: runtime latency tracking (detect, then mini-republish) ──
     if (msg.type === "hello" && latPhase === 0) {
       if (msg.protocol !== 1) fail(`expected protocol 1, got ${msg.protocol}`);
-      if (msg.engineVersion !== "0.10.0") fail(`expected 0.9.2, got ${msg.engineVersion}`);
+      if (msg.engineVersion !== "0.11.0-a") fail(`expected 0.11.0-a, got ${msg.engineVersion}`);
       if (!fixtureDir) fail("latency mode requires a fixture dir argument");
       helloOk = true;
       latPhase = 1;
@@ -1937,7 +2096,7 @@ ws.addEventListener("message", (event) => {
     if (msg.type === "hello" && !helloOk) {
       helloOk = true;
       if (msg.protocol !== 1) fail(`expected protocol 1, got ${msg.protocol}`);
-      if (msg.engineVersion !== "0.10.0") fail(`expected 0.9.2, got ${msg.engineVersion}`);
+      if (msg.engineVersion !== "0.11.0-a") fail(`expected 0.11.0-a, got ${msg.engineVersion}`);
       // Stage 3c close-out: the dispatch ledger streams what the engine
       // ACTUALLY dispatched — the replay-burst and re-attack asserts read it.
       ws.send(JSON.stringify({ type: "dispatch_log", enable: true }));
@@ -2408,6 +2567,26 @@ ws.addEventListener("close", () => {
       process.exit(0);
     } else {
       console.error(`FAILED: hello=${helloOk} scan=${trScanPlugin ? "ok" : "none"} jamAck=${trJamAckFast}@${trJamAckMs}ms jamErr=${trJamErr} queuedErr=${trQueuedErr} clean=${trCleanLoaded} ticks=${trPlayTicks} reuse=${trReuseCount}/2 supp=${trSuppLoaded} bogus2=${trBogus2Err} edOpen=${trEditorOpenOk} headless=${trHeadlessSkip} phase=${trPhase}`);
+      process.exit(1);
+    }
+  } else if (mode === "routing") {
+    allOk = helloOk && rtScanPlugin != null && rtAppliedVs.join(",") === "1,2,3" &&
+        rtRejected === 1 && rtRejectV === 2 && rtLastStop &&
+        !rtLedger.some((e) => e.k === 1 && e.a === 79);
+    if (allOk) {
+      console.log("");
+      console.log("========================================");
+      console.log("ALL ROUTING-TABLE TESTS PASSED (M3 PR1):");
+      console.log("  table v1 applied PRE-PLAY: t1→inst-a ch1, t2→inst-a ch2 (multi-timbral), t3→inst-b ch1; t4 UNMAPPED");
+      console.log("  unmapped t4: zero dispatches end-to-end (the drop path; engine.log receipts are desktop.yml's half)");
+      console.log("  v2 applied MID-PLAY: t1 crossed to inst-b ch1, t2/t3 re-channelled — transport rolled through, zero old-path leaks");
+      console.log("  R1 atomic-or-nothing: the unknown-instance table REJECTED — v stayed 2, the notes still rode v2");
+      console.log("  v3 restore: the original mapping back, notes verified on the original paths (v=3)");
+      console.log("  engine.log side: desktop.yml asserts the receipt grammar (route applied/rejected/track N unmapped) + the version arithmetic");
+      console.log("========================================");
+      process.exit(0);
+    } else {
+      console.error(`FAILED: hello=${helloOk} scan=${rtScanPlugin ? "ok" : "none"} appliedVs=[${rtAppliedVs}] rejected=${rtRejected}@v${rtRejectV} reason="${rtRejectReason}" stopped=${rtLastStop} ledger79=${rtLedger.some((e) => e.k === 1 && e.a === 79)} phase=${rtPhase}`);
       process.exit(1);
     }
   } else {

@@ -80,6 +80,32 @@
 //         "latencyMs"|"detail"} — hosting outcome; on error ALL tracks fall
 //         back to the built-in test synth (app never dead-ends).
 //
+// M3 PR1 protocol additions (additive; protocol stays 1):
+//   load plugins[] entries gain optional "multiTimbral":true — the instance
+//         accepts multiple tracks on distinct MIDI channels (the routing
+//         validator's per-instance channel-collision guard becomes
+//         conditional on it; absent = false = the M2 single-timbral rule).
+//   {"type":"routing","routes":{"<trackId>":{"inst":"<instanceId>","ch":1..16},…}}
+//         — the RUNTIME routing table (frontend-owned; the engine executes it
+//         statelessly and applies it ATOMICALLY). R1 ATOMIC-OR-NOTHING: the
+//         whole table validates against the loaded score's track table and
+//         the PUBLISHED instance set before ANYTHING applies; one failure →
+//         ONE receipt "route rejected: reason=…" and zero mutation. A valid
+//         table REPLACES the whole mapping (full-table semantics: tracks
+//         absent from it become unmapped; under the now-EXPLICIT table their
+//         events DROP with the named receipt "track N unmapped, M notes
+//         dropped" — never the synth fallback). Applies mid-play with no gap:
+//         score snapshot (events re-channelled) + RoutingTable publish
+//         back-to-back, abandoned wide channels CC120-flushed (no stuck
+//         notes). Multi-timbral instances receive their tracks' channels;
+//         single-timbral instances are refused >1 distinct channel. The
+//         engine never sets programs — patch assignment stays in the UI.
+//   server -> client: {"type":"routing_result","applied":bool,"v":<mapping
+//         version>,"tracks":<K>|"reason":"…"} — v advances by EXACTLY ONE
+//         per applied table and is UNCHANGED by a rejection (CI's atomicity
+//         witness). Receipts: "route applied: track=N -> instance=X ch=Y",
+//         "route applied: mapping v=N tracks=K".
+//
 // Stage 3d-1 protocol additions (additive):
 //   {"type":"openEditor","instanceId"?:string} — request the hosted plugin's
 //         editor window (engine-OWNED popup: a JUCE DocumentWindow created on
@@ -454,7 +480,7 @@ namespace {
 // "openEditor":true); the lazy-device window is receipted (nominal fallback +
 // device-ready race re-prepare); matching requests coalesce into an in-flight
 // init instead of answering "reused" while it is still outstanding.
-constexpr const char* kEngineVersion = "0.10.0";
+constexpr const char* kEngineVersion = "0.11.0-a";   // M3 PR1: the runtime routing table
 constexpr int kProtocolVersion = 1;
 constexpr int kDefaultPort = 9377;
 constexpr int kMaxVoices = 64;
@@ -591,6 +617,17 @@ std::atomic<int> g_activeVoices{0};
 // the flags. Dedupes by channel naturally; no mutex, no vector, no alloc.
 // Stage 3d-4: indexed by WIDE channel (slot*16 + ch) — see below.
 std::atomic<bool> g_muteFlushPending[kWideChannels] = {};
+
+// ─── M3 PR1 — the runtime routing table (the standalone "routing" message) ──
+// The mapping VERSION advances by EXACTLY ONE per APPLIED table; a rejected
+// table (R1 atomic-or-nothing) never touches it — so CI asserts atomic swaps
+// from the receipts alone ("route applied: mapping v=N tracks=K"; rejects
+// echo the UNCHANGED v). The unmapped-drop counters are audio-thread-owned
+// (relaxed increments inside the dispatch walk); the worker loop drains the
+// DELTAS once per second into named receipts — the audio thread never logs.
+constexpr size_t kMaxDropTrackSlots = 256;   // 1-based track slots counted for drops
+std::atomic<uint64_t> g_routingVersion{0};
+std::array<std::atomic<uint32_t>, kMaxDropTrackSlots> g_unmappedDrops{};
 
 // ─── Stage 3c close-out — transport transitions are musical ─────────────────
 // Musical-release request: stop / seek / end-of-score set this; the NEXT
@@ -797,6 +834,16 @@ struct RoutingTable {
     std::unordered_map<std::string, int> channelOfTrack; // trackId → engine channel (plugin-routed only)
     std::unordered_set<int> pluginChannels;           // hosted plugin channels
     std::vector<int> slotChannel;                     // slot → channel (0 = NOT plugin-routed)
+    // M3 PR1: TRUE only for tables installed by the standalone "routing"
+    // message (the frontend-owned full table). Under an EXPLICIT table an
+    // unmapped track's events are DROPPED with a named, counted receipt
+    // ("track N unmapped, M notes dropped") — never the synth fallback
+    // (falling back would SOUND a track the frontend deliberately unmapped).
+    // Load-built tables (the M2 routing map, the legacy flat "channels" map,
+    // or no map) keep FALSE: byte-stable synth-fallback behavior for every
+    // pre-M3 shape. The field rides the same atomic snapshot swap as the
+    // rest of the table — the audio thread reads it lock-free.
+    bool explicitRouting = false;
 };
 
 // MixState (immutable snapshot, atomic shared_ptr swap): per-track mute/solo,
@@ -932,6 +979,14 @@ struct HostedPlugin {
     // The legacy single-plugin field maps to the reserved id "hosted".
     std::string instanceId;
     int slot = 0;   // wide-channel namespace owner (0..kMaxInstances-1)
+    // M3 PR1: the instance accepts MULTIPLE tracks on distinct MIDI channels
+    // (multi-timbral libraries — patch assignment stays in the plugin UI, the
+    // engine never sets programs). Default FALSE = single-timbral: the
+    // routing-table validator refuses >1 distinct channel on this instance
+    // (the M2 per-instance channel-collision guard, now per-instance-
+    // conditional). Carried from the load's additive "multiTimbral":true;
+    // immutable after publish like the rest of the identity block.
+    bool multiTimbral = false;
     // Stage 3e-1 — capability handshake: the full VST3 class identifier
     // string (PluginDescription::createIdentifierString()) and the
     // PRE-SERIALIZED capability fields captured at load time (before any
@@ -1822,6 +1877,9 @@ struct PluginInitEntry {
     // Stage 3e-3: the entry's optional outputRouting (immutable on the
     // instance after instantiate).
     std::vector<BusRouting> routing;
+    // M3 PR1: the entry's additive "multiTimbral":true — the routing-table
+    // validator's per-instance channel-collision rule is conditional on it.
+    bool multiTimbral = false;
 };
 struct PluginInitRequest {
     // Stage 3d-4: the load's FULL desired instance set (replace-all semantics:
@@ -2303,6 +2361,20 @@ public:
             while (eventIdx < eventCount) {
                 const EngineEvent& ev = events[eventIdx];
                 const bool toPlugin = isPluginRouted(ev);
+                // M3 PR1: under an EXPLICIT routing table an unmapped track is
+                // DROPPED, counted and NAMED (the 1 Hz janitor pass speaks the
+                // deltas: "track N unmapped, M notes dropped") — never the
+                // synth fallback, never silence without a receipt. Legacy
+                // tables (explicitRouting=false) keep the byte-stable
+                // fallback; trackRef-0 events (no trackId) always keep it.
+                if (!toPlugin && routing != nullptr && routing->explicitRouting &&
+                    ev.trackRef != 0 && ev.trackRef <= kMaxDropTrackSlots &&
+                    (ev.trackRef > routing->slotChannel.size() ||
+                     routing->slotChannel[ev.trackRef] == 0)) {
+                    g_unmappedDrops[ev.trackRef - 1].fetch_add(1, std::memory_order_relaxed);
+                    ++eventIdx;
+                    continue;
+                }
                 // Same clamp rule as the skip walk above (Phase 2 floor: the
                 // muted pre-roll window, -preRoll — start-tick events
                 // pre-fire into it; past events never reach here, the skip
@@ -3651,7 +3723,8 @@ std::string buildCapabilityFields(juce::AudioPluginInstance& inst,
 std::string loadHostedPlugin(const juce::var& pluginVar, const std::string& instanceId,
                              int slot,
                              std::unique_ptr<HostedPlugin>& out,
-                             std::vector<BusRouting> routing = {}) {
+                             std::vector<BusRouting> routing = {},
+                             bool multiTimbral = false) {
     juce::DynamicObject* pobj = pluginVar.getDynamicObject();
     if (pobj == nullptr) return "plugin field must be an object";
     const std::string path = pobj->getProperty("path").toString().toStdString();
@@ -3753,6 +3826,7 @@ std::string loadHostedPlugin(const juce::var& pluginVar, const std::string& inst
         hosted->path = path;
         hosted->instanceId = instanceId;
         hosted->slot = slot;   // Milestone 2: the LEASED slot (wide-channel owner)
+        hosted->multiTimbral = multiTimbral;   // M3 PR1: routing-validator flag
         hosted->classId = chosen->createIdentifierString().toStdString();
         hosted->capabilitiesFields = capsFields;
         // Stage 3f-7 — PROBE-ON-LOAD: a plugin that gets loaded is probed
@@ -3911,7 +3985,8 @@ void handle_load(const juce::var& json, ix::WebSocket& ws, size_t byteSize) {
     // (ONE instance, reserved id "hosted", slot 0 — wide channels == 1..16),
     // channels = {trackId: ch}.
     struct ReqInstance { std::string instanceId; int slot = 0; juce::var pluginVar; std::string stateB64;
-                         std::vector<BusRouting> routing; };   // 3e-3: optional outputRouting
+                         std::vector<BusRouting> routing;   // 3e-3: optional outputRouting
+                         bool multiTimbral = false; };   // M3 PR1: additive load flag
     std::vector<ReqInstance> reqInstances;
     std::unordered_map<std::string, std::string> instanceOfTrack;   // trackId → instanceId
     if (const auto* pluginsArr = obj->getProperty("plugins").getArray()) {
@@ -3959,6 +4034,9 @@ void handle_load(const juce::var& json, ix::WebSocket& ws, size_t byteSize) {
             r.pluginVar = pv;
             r.stateB64 = po->getProperty("state").toString().toStdString();
             parseOutputRouting(po->getProperty("outputRouting"), r.routing);
+            // M3 PR1: additive "multiTimbral":true (default false = the M2
+            // single-timbral semantics, byte-stable). Absent = false.
+            r.multiTimbral = static_cast<bool>(static_cast<double>(po->getProperty("multiTimbral")));
             reqInstances.push_back(std::move(r));
         }
     }
@@ -4481,6 +4559,7 @@ void handle_load(const juce::var& json, ix::WebSocket& ws, size_t byteSize) {
                 e.pluginVar = r.pluginVar;
                 e.stateB64 = r.stateB64;
                 e.routing = r.routing;
+                e.multiTimbral = r.multiTimbral;   // M3 PR1: the validator flag rides the entry
                 auto cit = chansJsonPerInst.find(r.instanceId);
                 if (cit != chansJsonPerInst.end()) e.channelsJson = cit->second;
                 entries.push_back(std::move(e));
@@ -4626,6 +4705,146 @@ void handle_dispatch_log(const juce::var& json, ix::WebSocket& ws) {
 void resetArticulations() {
     for (int i = 0; i < kWideChannels; ++i)
         g_articulation[i].store(kArticulationUnknown, std::memory_order_relaxed);
+}
+
+// ─── M3 PR1 — the runtime routing table ("routing" message; see the header) ──
+void handle_routing(const juce::var& json, ix::WebSocket& ws) {
+    juce::DynamicObject* obj = json.getDynamicObject();
+    const auto reject = [&ws](const std::string& reason) {
+        engineLog("[routing] route rejected: reason=" + reason);
+        ws.send(std::string("{\"type\":\"routing_result\",\"applied\":false,\"reason\":\"") +
+                escape_json(reason) + "\",\"v\":" + std::to_string(g_routingVersion.load()) + "}");
+    };
+    if (obj == nullptr) { reject("message is not an object"); return; }
+    juce::DynamicObject* routes = obj->getProperty("routes").getDynamicObject();
+    if (routes == nullptr) { reject("routes must be an object of trackId -> {inst, ch}"); return; }
+    ScoreSnapshot* cur = g_score.load(std::memory_order_acquire);
+    if (cur == nullptr) { reject("no score loaded (the routing table binds the loaded score's tracks)"); return; }
+    const auto table = g_routing.load(std::memory_order_acquire);
+    if (table == nullptr) { reject("no routing table published (internal)"); return; }
+    const auto liveSet = g_liveSet.load(std::memory_order_acquire);
+
+    // ── R1 validation pass: NOTHING mutates until every entry has passed. ──
+    std::map<std::string, int> newChannelOfTrack;         // trackId → WIDE channel
+    std::map<std::string, std::string> newInstanceOfTrack;
+    std::map<std::pair<std::string, int>, std::string> seenInstCh;   // (iid, ch) → first trackId
+    std::map<std::string, std::vector<int>> channelsPerInst;
+    const auto& rprops = routes->getProperties();
+    for (int i = 0; i < rprops.size(); ++i) {
+        const std::string trackId = rprops.getName(i).toString().toStdString();
+        juce::DynamicObject* ro = rprops.getValueAt(i).getDynamicObject();
+        if (trackId.empty() || ro == nullptr) { reject("routing entries must be {inst, ch} objects"); return; }
+        if (table->slotOf.find(trackId) == table->slotOf.end()) {
+            reject("unknown trackId \"" + trackId + "\" (not in the loaded score's track table)");
+            return;
+        }
+        const std::string inst = ro->getProperty("inst").toString().toStdString();
+        const int ch = static_cast<int>(static_cast<double>(ro->getProperty("ch")));
+        if (ch < 1 || ch > 16) {
+            reject("channel must be an integer 1-16 (track " + trackId + ")");
+            return;
+        }
+        int slot = -1;
+        bool instMulti = false;
+        if (liveSet != nullptr) {
+            for (const auto* m : liveSet->bySlot) {
+                if (m != nullptr && m->instanceId == inst) { slot = m->slot; instMulti = m->multiTimbral; break; }
+            }
+        }
+        if (slot < 0) {
+            reject("routing references unknown instanceId \"" + inst +
+                   "\" (not in the published set) (track " + trackId + ")");
+            return;
+        }
+        const auto collision = seenInstCh.find({inst, ch});
+        if (collision != seenInstCh.end()) {
+            reject("instance \"" + inst + "\" channel " + std::to_string(ch) +
+                   " assigned to both \"" + collision->second + "\" and \"" + trackId + "\"");
+            return;
+        }
+        auto& chans = channelsPerInst[inst];
+        if (std::find(chans.begin(), chans.end(), ch) == chans.end()) chans.push_back(ch);
+        if (!instMulti && chans.size() > 1) {
+            reject("instance \"" + inst + "\" is single-timbral (no multiTimbral flag) but the table assigns " +
+                   std::to_string(chans.size()) + " distinct channels (track \"" + trackId +
+                   "\" would ride channel " + std::to_string(ch) + ")");
+            return;
+        }
+        seenInstCh[{inst, ch}] = trackId;
+        newChannelOfTrack[trackId] = wideChannelOf(slot, ch);
+        newInstanceOfTrack[trackId] = inst;
+    }
+
+    // ── Apply: build the new table (slots/trackNames PRESERVED — mix slots
+    // are stable; only the channel binding changes), re-channel the score's
+    // events, publish BOTH back-to-back (the load path's two-store order). ──
+    RoutingTable rebuilt = *table;
+    rebuilt.channelOfTrack.clear();
+    rebuilt.pluginChannels.clear();
+    rebuilt.slotChannel.assign(rebuilt.trackNames.size() + 1, 0);
+    for (const auto& [trackId, wide] : newChannelOfTrack) {
+        rebuilt.channelOfTrack[trackId] = wide;
+        const uint32_t slot = rebuilt.slotOf[trackId];
+        rebuilt.slotChannel[slot] = wide;
+        rebuilt.pluginChannels.insert(wide);
+    }
+    rebuilt.explicitRouting = true;
+
+    // Rebind flush: every track ABANDONING a plugin-routed wide channel (or
+    // losing its mapping outright) gets the OLD channel CC120-flushed next
+    // buffer — a mid-play rebind cannot leave stuck notes on the abandoned
+    // channel (the mute-flush machinery, the "mute must be HEARD" precedent).
+    int rebinds = 0;
+    for (const auto& [trackId, oldWide] : table->channelOfTrack) {
+        if (table->pluginChannels.count(oldWide) == 0) continue;
+        const auto nit = newChannelOfTrack.find(trackId);
+        if (nit == newChannelOfTrack.end() || nit->second != oldWide) {
+            g_muteFlushPending[oldWide - 1].store(true, std::memory_order_relaxed);
+            ++rebinds;
+        }
+    }
+
+    ScoreSnapshot* snap = new ScoreSnapshot();
+    snap->events = cur->events;
+    for (auto& ev : snap->events) {
+        if (ev.trackRef == 0 || ev.trackRef > rebuilt.trackNames.size()) continue;
+        const auto it = newChannelOfTrack.find(rebuilt.trackNames[ev.trackRef - 1]);
+        if (it != newChannelOfTrack.end()) ev.channel = static_cast<uint8_t>(it->second);
+    }
+    snap->bpm = cur->bpm;
+    snap->ppqn = cur->ppqn;
+    snap->endTick = cur->endTick;
+    snap->tsNumerator = cur->tsNumerator;
+    snap->tsDenominator = cur->tsDenominator;
+    ScoreSnapshot* old = g_score.exchange(snap, std::memory_order_acq_rel);
+    if (old) {
+        // Stage 3h: proof value captured AFTER the store (retirement-queue block).
+        const uint64_t swapSeq = g_audioBufferSeq.load(std::memory_order_relaxed);
+        std::lock_guard<std::mutex> rlock(g_retireMutex);
+        g_retiredScores.push_back({old, swapSeq, false});
+    }
+    g_routing.store(std::make_shared<const RoutingTable>(std::move(rebuilt)), std::memory_order_release);
+    // A new binding context resets the per-channel articulation knowledge —
+    // the first CC#32 re-sends (the load precedent).
+    resetArticulations();
+
+    const uint64_t v = g_routingVersion.fetch_add(1, std::memory_order_acq_rel) + 1;
+    std::vector<std::pair<int, std::string>> lines;   // (slot, receipt) — sorted by slot
+    for (const auto& [trackId, wide] : newChannelOfTrack) {
+        const auto sit = table->slotOf.find(trackId);
+        const int slot = sit != table->slotOf.end() ? static_cast<int>(sit->second) : 0;
+        lines.emplace_back(slot,
+            "[routing] route applied: track=" + std::to_string(slot) +
+            " -> instance=" + newInstanceOfTrack[trackId] +
+            " ch=" + std::to_string(realChOfWide(wide)) + " (" + trackId + ")");
+    }
+    std::sort(lines.begin(), lines.end());
+    for (const auto& [slot, line] : lines) engineLog(line);
+    engineLog("[routing] route applied: mapping v=" + std::to_string(v) +
+              " tracks=" + std::to_string(lines.size()) +
+              " (rebinds=" + std::to_string(rebinds) + " flushed)");
+    ws.send(std::string("{\"type\":\"routing_result\",\"applied\":true,\"v\":") +
+            std::to_string(v) + ",\"tracks\":" + std::to_string(lines.size()) + "}");
 }
 
 // Seed the per-channel articulation knowledge from the score's PAST: the
@@ -5356,6 +5575,8 @@ int main(int argc, char** argv) {
                     // diagnostics). A client sending it is ignored silently.
                 } else if (type == "mix") {
                     handle_mix(parsed);
+                } else if (type == "routing") {
+                    handle_routing(parsed, ws);
                 } else if (type == "dispatch_log") {
                     handle_dispatch_log(parsed, ws);
                 } else if (type == "setHostWindow") {
@@ -5572,6 +5793,33 @@ int main(int argc, char** argv) {
                               " selectorEmitted=[" + selCounts + "]" +
                               " gain=unity(x1.0, M2 output guard — no multiplication)");
                     janitorLastPeakEmit = now;
+                }
+            }
+            // ── M3 PR1 — the unmapped-drop receipts (1 Hz, delta-emitted) ──
+            // The audio thread counts dropped events per track slot under an
+            // explicit routing table; this pass speaks the DELTAS so a drop is
+            // always named within a second, never silent, never logged from
+            // the audio thread. Not gated on playback: the final drops that
+            // straddle a stop are still spoken.
+            {
+                static std::array<uint32_t, kMaxDropTrackSlots> dropLastSeen{};
+                static std::chrono::steady_clock::time_point dropLastEmit{};
+                const auto dropNow = std::chrono::steady_clock::now();
+                if (std::chrono::duration_cast<std::chrono::milliseconds>(
+                        dropNow - dropLastEmit).count() >= 1000) {
+                    const auto rt = g_routing.load(std::memory_order_acquire);
+                    for (size_t ds = 1; ds <= kMaxDropTrackSlots; ++ds) {
+                        const uint32_t nowCount = g_unmappedDrops[ds - 1].load(std::memory_order_relaxed);
+                        const uint32_t delta = nowCount - dropLastSeen[ds - 1];
+                        if (delta == 0) continue;
+                        dropLastSeen[ds - 1] = nowCount;
+                        std::string name;
+                        if (rt != nullptr && ds <= rt->trackNames.size())
+                            name = " (" + rt->trackNames[ds - 1] + ")";
+                        engineLog("[routing] track " + std::to_string(ds) + " unmapped, " +
+                                  std::to_string(delta) + " notes dropped" + name);
+                    }
+                    dropLastEmit = dropNow;
                 }
             }
             PluginInitRequest req;
@@ -5927,7 +6175,7 @@ int main(int argc, char** argv) {
                 std::string hostErr;
                 {
                     InitPhaseGuard pg("instantiate", e.instanceId, req.seq);
-                    hostErr = loadHostedPlugin(e.pluginVar, e.instanceId, e.slot, h, e.routing);
+                    hostErr = loadHostedPlugin(e.pluginVar, e.instanceId, e.slot, h, e.routing, e.multiTimbral);
                 }
                 outcomes[i].initMs = std::chrono::duration_cast<std::chrono::milliseconds>(
                     std::chrono::steady_clock::now() - te0).count();
@@ -6816,6 +7064,21 @@ int main(int argc, char** argv) {
     // the pump is still running). A hard kill needs nothing: the OS reaps
     // the process's windows, so orphans are impossible either way.
     closeAllEditorsAtShutdown();
+    // M3 PR1: the FINAL unmapped-drop drain — the 1 Hz sampler's last pass
+    // can miss drops that landed inside its final second (the CI stop + the
+    // shutdown race); no silent drops at exit, ever. Full cumulative counts.
+    {
+        const auto rt = g_routing.load(std::memory_order_acquire);
+        for (size_t ds = 1; ds <= kMaxDropTrackSlots; ++ds) {
+            const uint32_t total = g_unmappedDrops[ds - 1].load(std::memory_order_relaxed);
+            if (total == 0) continue;
+            std::string name;
+            if (rt != nullptr && ds <= rt->trackNames.size())
+                name = " (" + rt->trackNames[ds - 1] + ")";
+            engineLog("[routing] track " + std::to_string(ds) + " unmapped, " +
+                      std::to_string(total) + " notes dropped" + name + " [final at shutdown]");
+        }
+    }
     // Wake the MM pump (join would otherwise block forever) and let it die.
     juce::MessageManager::getInstance()->stopDispatchLoop();
     mm_pump_thread.join();

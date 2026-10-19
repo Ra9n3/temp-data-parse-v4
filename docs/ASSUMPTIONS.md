@@ -2810,3 +2810,102 @@ two never mix — that boundary is what makes the file set portable.
   terminal (D5) re-run green — the task's zero-source-change-outside-deleted-
   files condition is verifiable from the commit itself (deletions only,
   two files).
+
+## M3 PR1 — the runtime routing table (engine 0.11.0-a)
+
+The brief's Stage A. The D1/D2 answers that gate it were reviewed and approved
+(D1: per-strip `StripMixerProcessor` — PR2; D2: protocol-only routing, the
+frontend owns the table — this PR).
+
+### Ownership and atomicity
+
+- The FRONTEND owns the routing table; the engine executes it statelessly.
+  The engine holds only the runtime copy, rebuilt per apply — the same
+  lifecycle as the InstanceSet. Persistence = the project JSON (the frontend's
+  existing owner-of-record); the engine never persists config.
+- R1 ATOMIC-OR-NOTHING: validation covers every entry (trackId ∈ the loaded
+  score's track table; instanceId ∈ the PUBLISHED live set; ch ∈ 1..16; one
+  track per (inst,ch); a single-timbral instance takes ≤1 distinct channel)
+  BEFORE anything mutates. A rejection emits exactly one
+  `[routing] route rejected: reason=` and the mapping version is unchanged.
+- An apply publishes TWO immutable snapshots back-to-back (score first, then
+  table — the load path's order): the score's events are re-channelled (each
+  track's events carry its new WIDE channel; unmapped tracks keep their parse
+  channel and are dropped at dispatch), and the new RoutingTable carries
+  `explicitRouting=true`. The one-buffer window between the two stores is the
+  pre-existing load-path semantics (the same two-atomic read the callback has
+  always made); a mid-window buffer can transiently check the old table
+  against new events — bounded to one 512-sample buffer, no crash (the synth
+  path is wide-channel safe, proven by the mid-play loads since 3d-4), and
+  the CI assertions run on settled state.
+
+### Explicit tables and the drop path
+
+- `explicitRouting` is TRUE only for tables installed by the `routing`
+  message. Load-built tables (the M2 `routing` map, the legacy flat
+  `channels` map, no map) keep FALSE — byte-stable synth-fallback behavior
+  for every pre-M3 shape; the frontend's existing loads are unaffected.
+- Under an explicit table, an unmapped track's events (trackRef ≥ 1) are
+  DROPPED at dispatch: counted per slot (audio thread, relaxed) and spoken by
+  the worker loop's 1 Hz sampler as `[routing] track N unmapped, M notes
+  dropped (trackId)` — DELTAS per pass — plus ONE cumulative line at engine
+  shutdown: `... notes dropped (trackId) [final at shutdown]` (the sampler's
+  last pass can miss a final second; no silent drops at exit). trackRef-0
+  events (no trackId) always keep the legacy fallback.
+- KNOWN COSMETIC ARTIFACT (receipted, bounded): the drop counter can
+  overcount by a few — an event whose F4-shifted (mapped-neighbor) and
+  unshifted sample positions straddle a buffer boundary can be RE-VISITED
+  once by the next buffer's dispatch walk (the skip walk re-derives from
+  scratch per buffer; the transport never re-dispatches audible events, and
+  the plugin never hears an unmapped event twice — the harness's
+  zero-dispatch ledger proof is the exactness gate). CI bounds the final
+  total at [14, 24] for the 14 authored t4 events; the audit trail
+  (`[M3DROP]`-class instrumentation, removed before commit) showed 16 = 14 +
+  2 re-visits of the last two note-ons at consecutive buffer starts.
+
+### The rebind flush and the articulation context
+
+- Every track ABANDONING a plugin-routed wide channel (rebind or unmap) gets
+  its OLD channel CC120-flushed next buffer (the mute-flush machinery — a
+  mid-play rebind cannot leave stuck notes on the abandoned channel); the
+  mapping receipt names the count (`rebinds=N flushed`).
+- Each apply resets the per-channel articulation knowledge (the load
+  precedent: a new binding context re-sends the first CC#32).
+
+### The version counter and the wire echo
+
+- `g_routingVersion` advances by EXACTLY ONE per applied table; rejections
+  never touch it. The echo `{"type":"routing_result","applied":true,"v":N,
+  "tracks":K}` / `{"type":"routing_result","applied":false,"reason":"…",
+  "v":<unchanged>}` is CI's atomicity witness (v must advance 1→2→3 with
+  exactly one rejection holding v=2).
+
+### CI (Test D6 + the `routing` harness mode)
+
+- The harness mode drives the full lifecycle on the wire: v1 pre-play (t4
+  unmapped from the first note), v2 mid-play (t1 crosses instances; t2/t3
+  re-channel; the transport rolls through — the tick-2400 notes dispatch
+  post-swap as the no-gap witness; zero old-path leaks), the R1-bad table
+  (unknown instanceId) rejected with v unchanged and the notes still riding
+  v2, v3 restore (the original paths verified again). Pitch 79 never
+  dispatches at ANY phase.
+- Test D6 asserts the engine.log grammar (mapping v=1/2/3 exactly-once;
+  per-track receipts with t1 rebound inst-a→inst-b→inst-a; exactly one
+  rejection naming the unknown instance; the drop deltas + the
+  `[final at shutdown]` total bounded [14,24]) and the plugin-side
+  per-(ordinal,channel) isolation (every mapped pitch under ≥2 combos across
+  the swaps; pitch 79 never received).
+- Local validation: ALL TEN protocol modes green at 0.11.0-a (the nine prior
+  + routing), engine exit 0 each, JUCE null device locally per the
+  M1-runner precedent; Windows CI proves the real-device paths.
+
+### Rider ledger (receipt-level, from the approval)
+
+- R1 ATOMIC-OR-NOTHING: implemented here (the validation pass + the
+  single-rejection receipt + the unchanged-v echo).
+- R2 SOLO/UNLOAD: PR2 scope (strips + solo exist there); recorded in the
+  worklog so it cannot be dropped.
+- R3 LAYOUT-CHANGE GUARD: PR2 scope (the layout probe is Stage B.1); the
+  vendor-boundary rule stands — extending `InstanceMidiSelector` would touch
+  the vendored file, which this PR did NOT need (channel tagging/filtering is
+  callback-side in main.cpp; the selector passes what it is given).

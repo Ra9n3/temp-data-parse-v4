@@ -817,6 +817,106 @@ jobs:
             Remove-Item Env:\SCORCH_INIT_TIMEOUT_S -ErrorAction SilentlyContinue
           }
 
+          # Test D6 — M3 PR1: the RUNTIME ROUTING TABLE (multi-timbral MIDI
+          # routing). Two instances (inst-a = Synth A with "multiTimbral":true,
+          # inst-b = Synth A single-timbral by default); the standalone
+          # "routing" message applies the frontend-owned table ATOMICALLY:
+          # v1 pre-play (t1→inst-a ch1, t2→inst-a ch2, t3→inst-b ch1; t4
+          # UNMAPPED — its notes must never reach the plugin), v2 MID-PLAY
+          # (t1 crosses to inst-b ch1; t2/t3 re-channelled; the transport
+          # rolls through with no gap), the R1-BAD table (unknown instanceId —
+          # REJECTED, nothing changes), v3 (the v1 restore). The harness
+          # proves the wire side (routing_result v arithmetic 1→2→3 + the
+          # unchanged-v reject, the dispatch-ledger per-pitch-per-wide paths,
+          # zero pitch-79 anywhere); the engine.log grammar + the plugin-side
+          # channel/ordinal proof are asserted here.
+          Write-Host "=== Test D6: M3 routing table (atomic apply, mid-play swap, R1 rejection, unmapped drops) ==="
+          $env:SCORCH_TESTVST_LOG = "1"
+          $engineLogD6 = Join-Path $env:APPDATA "scorch\engine.log"
+          $logLinesBeforeD6 = 0
+          if (Test-Path $engineLogD6) { $logLinesBeforeD6 = (Get-Content $engineLogD6 | Measure-Object -Line).Lines }
+          $procD6 = Start-Process -FilePath "engine/build/scorch-engine.exe" -ArgumentList "--port","9387","--null-audio" -PassThru -NoNewWindow -RedirectStandardOutput "engine-d6-stdout.txt" -RedirectStandardError "engine-d6-stderr.txt"
+          Start-Sleep -Seconds 3
+          try {
+            if ($procD6.HasExited) {
+              Write-Host "Engine D6 exited early (code=$($procD6.ExitCode)). stdout:"
+              if (Test-Path engine-d6-stdout.txt) { Get-Content engine-d6-stdout.txt }
+              throw "Engine D6 process exited before test could connect"
+            }
+            node .github/scripts/test-engine-protocol.mjs 9387 routing "$env:SCAN_FIXTURES"
+            if ($LASTEXITCODE -ne 0) {
+              Write-Host "Engine D6 stdout:"
+              if (Test-Path engine-d6-stdout.txt) { Get-Content engine-d6-stdout.txt }
+              Write-Host "Engine D6 stderr:"
+              if (Test-Path engine-d6-stderr.txt) { Get-Content engine-d6-stderr.txt }
+              if (Test-Path $engineLogD6) {
+                Write-Host "Engine D6 engine.log slice (last 120 lines):"
+                Get-Content $engineLogD6 | Select-Object -Last 120
+              }
+              throw "Engine D6 routing-table test failed"
+            }
+            # Fixture-side proof: each pitch arrived per (instance ordinal,
+            # channel) — the three tables give every mapped pitch >=2 distinct
+            # combos across the swaps, while pitch 79 (t4, unmapped) NEVER
+            # appears.
+            $fxNotes = Get-Content "engine-d6-stdout.txt" | Select-String -Pattern "\[testvst\] s=\d+ ts=\d+ ch=(\d+) k=NOTE_ON d1=(\d+) d2=\d+ ms=[\d.]+ i=(\d+)"
+            if (-not $fxNotes) { throw "D6 fixture-side proof missing: no NOTE_ON lines in engine-d6-stdout.txt" }
+            $pitchChans = @{}
+            foreach ($m in $fxNotes) {
+              $ch = [int]$m.Matches[0].Groups[1].Value
+              $pitch = [int]$m.Matches[0].Groups[2].Value
+              $ord = [int]$m.Matches[0].Groups[3].Value
+              if (-not $pitchChans.ContainsKey("$pitch")) { $pitchChans["$pitch"] = New-Object System.Collections.Generic.HashSet[string] }
+              [void]$pitchChans["$pitch"].Add("${ord}:ch${ch}")
+            }
+            if ($pitchChans.ContainsKey("79")) { throw "D6 PLUGIN-SIDE DROP FAILURE: pitch 79 (unmapped t4) REACHED the fixture: $(($pitchChans['79'] | ForEach-Object { $_ }) -join ',')" }
+            foreach ($p in @(60, 67, 72)) {
+              if (-not $pitchChans.ContainsKey("$p")) { throw "D6: pitch $p never received by the fixture" }
+              if ($pitchChans["$p"].Count -lt 2) { throw "D6: pitch $p must appear under >=2 (ordinal,channel) combos across the three tables, got: $(($pitchChans["$p"] | ForEach-Object { $_ }) -join ',')" }
+            }
+            Write-Host "D6 fixture-side proof: pitch 79 never received (drop path); pitches 60/67/72 each under >=2 (ordinal,channel) combos across the swaps"
+            Start-Sleep -Seconds 2   # the 1 Hz drop receipts land before the log read
+            $d6Lines = Get-Content $engineLogD6 | Select-Object -Skip $logLinesBeforeD6
+            # The receipt grammar: the mapping-version line, EXACTLY ONE per
+            # applied table, v strictly +1: v=1, v=2, v=3.
+            foreach ($v in 1,2,3) {
+              $maps = @($d6Lines | Select-String -Pattern "\[routing\] route applied: mapping v=$v tracks=3 ")
+              if (($maps | Measure-Object).Count -ne 1) { throw "D6: exactly one 'route applied: mapping v=$v tracks=3' expected, got $(($maps | Measure-Object).Count)" }
+            }
+            # Per-track receipts: t1 (track=1) bound to BOTH instances across
+            # the run (v1/v3 → inst-a ch1; v2 → inst-b ch1).
+            $t1a = (@($d6Lines | Select-String -Pattern "\[routing\] route applied: track=1 -> instance=inst-a ch=1") | Measure-Object).Count
+            $t1b = (@($d6Lines | Select-String -Pattern "\[routing\] route applied: track=1 -> instance=inst-b ch=1") | Measure-Object).Count
+            if ($t1a -lt 2 -or $t1b -lt 1) { throw "D6: track=1 receipts wrong (inst-a=$t1a need >=2 across v1+v3, inst-b=$t1b need >=1 for v2)" }
+            # R1: exactly ONE rejection, naming the unknown instance.
+            $rejects = @($d6Lines | Select-String -Pattern "\[routing\] route rejected: reason=.*unknown instanceId")
+            if (($rejects | Measure-Object).Count -ne 1) { throw "D6: exactly one 'route rejected: reason=... unknown instanceId' expected, got $(($rejects | Measure-Object).Count)" }
+            # The unmapped-drop receipts: t4 is track slot 4; 6 NOTE_ON +
+            # 6 NOTE_OFF = 12 dropped events. Two shapes: the 1 Hz DELTA
+            # lines (timing-dependent split) and the FINAL cumulative line
+            # at shutdown (exactly 12 — no silent drops at exit).
+            $dropDeltas = @($d6Lines | Select-String -Pattern "\[routing\] track 4 unmapped, (\d+) notes dropped \(t4\)$")
+            if (($dropDeltas | Measure-Object).Count -lt 1) { throw "D6: no 'track 4 unmapped, N notes dropped' delta receipt — the 1 Hz drop sampler is silent" }
+            $dropFinal = @($d6Lines | Select-String -Pattern "\[routing\] track 4 unmapped, (\d+) notes dropped \(t4\) \[final at shutdown\]")
+            if (($dropFinal | Measure-Object).Count -ne 1) { throw "D6: exactly one 'track 4 unmapped ... [final at shutdown]' receipt expected, got $(($dropFinal | Measure-Object).Count)" }
+            $dropTotal = [int]$dropFinal[0].Matches[0].Groups[1].Value
+            # Floor = t4's 14 authored events (2 CC + 6 ON + 6 OFF). The count
+            # may exceed the floor by a small bounded number: an event whose
+            # F4-shifted and unshifted sample positions straddle a buffer
+            # boundary can be RE-VISITED once by the next buffer's dispatch
+            # walk (the drop counter overcounts; the plugin never hears the
+            # event twice — the harness's zero-dispatch ledger proof is the
+            # exactness gate). Bounded at +10.
+            if ($dropTotal -lt 14 -or $dropTotal -gt 24) { throw "D6: final drop total $dropTotal outside [14,24] (authored floor 14 + the bounded re-visit artifact)" }
+            Write-Host "D6 engine.log receipts: mapping v=1/2/3 exactly-once, track=1 rebound inst-a->inst-b->inst-a, one R1 rejection (unknown instanceId), track 4 unmapped drops total $dropTotal"
+            $procD6.WaitForExit(20000) | Out-Null
+            if (-not $procD6.HasExited -or $procD6.ExitCode -ne 0) { throw "Engine D6 did not exit cleanly (code=$($procD6.ExitCode))" }
+            Write-Host "Engine D6 clean exit 0 (routing-table atomicity verified: no silent drops, ever)"
+          } finally {
+            Stop-Process -Id $procD6.Id -Force -ErrorAction SilentlyContinue
+            Remove-Item Env:\SCORCH_TESTVST_LOG -ErrorAction SilentlyContinue
+          }
+
           # Test E — Stage 3c-hotfix: REAL-PROJECT-SIZED load. The CI gap was
           # scale; this closes it: a deterministic 13,824-event (~1.1 MB)
           # fixture is sent as ONE load message and the loadAck receipt must
