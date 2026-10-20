@@ -312,6 +312,7 @@ let rtRejected = 0, rtRejectReason = "", rtRejectV = -1;
 let rtPeak = 0, rtLedger = [];
 const rtSlice = {};           // NOTE_ON counts "pitch:wide" since the last mark
 let rtLastStop = false;
+let rtCh17Rejected = false, rtLoadRefusedOk = false;   // 0.12.3 boundary regressions (R-5 live table, R-6 load path)
 const rtMark = () => { for (const k of Object.keys(rtSlice)) delete rtSlice[k]; };
 const rtBump = (e) => { if (e.k === 1) { const key = `${e.a}:${e.c}`; rtSlice[key] = (rtSlice[key] ?? 0) + 1; } };
 const rtCount = (key) => rtSlice[key] ?? 0;
@@ -1046,9 +1047,9 @@ ws.addEventListener("message", (event) => {
     }
     if (msg.type === "hello" && multiPhase === 0) {
       if (msg.protocol !== 1) fail(`expected protocol 1, got ${msg.protocol}`);
-      if (msg.engineVersion !== "0.12.2") fail(`expected 0.12.2, got ${msg.engineVersion}`);
+      if (msg.engineVersion !== "0.12.3") fail(`expected 0.12.3, got ${msg.engineVersion}`);
       if (!fixtureDir) fail("multi mode requires a fixture dir argument");
-      console.log("[test] hello OK (0.12.2) — M2 multi-instance: scanning for BOTH fixture identities...");
+      console.log("[test] hello OK (0.12.3) — M2 multi-instance: scanning for BOTH fixture identities...");
       multiPhase = 1;
       ws.send(JSON.stringify({ type: "scan", dirs: [fixtureDir] }));
     } else if (msg.type === "scan_result" && multiPhase === 1) {
@@ -1170,6 +1171,7 @@ ws.addEventListener("message", (event) => {
     // ── M3 PR1: the runtime routing table (see the header + the state block) ──
     if (msg.type === "routing_result") {
       if (msg.applied === true) {
+        if (rtPhase >= 12) fail(`routing: a table sent at phase ${rtPhase} (the ch17 probes) must NEVER apply, got applied v=${msg.v}`);
         rtAppliedVs.push(msg.v);
         console.log(`[test] routing_result applied v=${msg.v} tracks=${msg.tracks}`);
         if (rtPhase === 2) {
@@ -1195,6 +1197,20 @@ ws.addEventListener("message", (event) => {
           if (rtRejectV !== 2) fail(`routing: a rejection must echo the UNCHANGED v=2, got ${rtRejectV}`);
           if (!rtRejectReason.includes("unknown instanceId")) fail(`routing: the reject reason must name the unknown instance, got "${rtRejectReason}"`);
           rtPhase = 7;
+        } else if (rtPhase === 12) {
+          // R-5 (0.12.3): the ordered ch17 boundary regression — the live
+          // table MUST refuse a channel outside 1..16, atomically (the v
+          // echo unchanged), with the reason naming the bound + the track.
+          if (rtRejectV !== 3) fail(`routing: the ch17 rejection must echo the UNCHANGED v=3, got ${rtRejectV}`);
+          if (!rtRejectReason.includes("channel must be an integer 1-16 (track t1)")) fail(`routing: the ch17 reject reason must name the 1-16 bound + the track, got "${rtRejectReason}"`);
+          rtCh17Rejected = true;
+          console.log("[test] phase R-5 ✓ ch17 REJECTED at the live routing boundary (v stayed 3, bound named) — load-path refusal next");
+          rtPhase = 13;
+          ws.send(JSON.stringify({
+            type: "load", seq: 90, events: [], meta: ROUTE_META,
+            plugins: [{ instanceId: "inst-a", uid: rtScanPlugin.uid, path: rtScanPlugin.path, name: rtScanPlugin.name }],
+            routing: { t9: { inst: "inst-a", ch: 17 } },
+          }));
         }
       }
       return;
@@ -1208,9 +1224,9 @@ ws.addEventListener("message", (event) => {
     } else if (msg.type === "hello" && rtPhase === 0) {
       helloOk = true;
       if (msg.protocol !== 1) fail(`expected protocol 1, got ${msg.protocol}`);
-      if (msg.engineVersion !== "0.12.2") fail(`expected 0.12.2, got ${msg.engineVersion}`);
+      if (msg.engineVersion !== "0.12.3") fail(`expected 0.12.3, got ${msg.engineVersion}`);
       if (!fixtureDir) fail("routing mode requires a fixture dir argument");
-      console.log("[test] hello OK (0.12.2) — M3 PR1: scanning for the stand-in identity...");
+      console.log("[test] hello OK (0.12.3) — M3 PR1: scanning for the stand-in identity...");
       rtPhase = 1;
       ws.send(JSON.stringify({ type: "scan", dirs: [fixtureDir] }));
     } else if (msg.type === "scan_result" && rtPhase === 1) {
@@ -1235,6 +1251,16 @@ ws.addEventListener("message", (event) => {
         console.log("[test] both instances live — applying table v1 PRE-PLAY (t4 unmapped from the first note)");
         rtSendTable(ROUTE_V1);
       }
+    } else if (msg.type === "plugin_state" && rtPhase === 13 && msg.state === "error") {
+      // R-6 (0.12.3): the LOAD-path routing boundary — a load whose routing
+      // map carries ch17 refuses the WHOLE plugin set (named, test-synth
+      // fallback) — the same grammar as any parse failure. The engine.log
+      // "[load] plugin set REFUSED" receipt is desktop.yml's half.
+      if (!(msg.detail ?? "").includes("engine channel must be an integer 1")) fail(`routing: the load-path ch17 refusal must name the 1-16 bound, got: ${msg.detail}`);
+      if (!(msg.detail ?? "").includes("(track t9)")) fail(`routing: the load-path refusal must name the offending track (t9), got: ${msg.detail}`);
+      rtLoadRefusedOk = true;
+      console.log("[test] phase R-6 ✓ load-path ch17 refused (whole plugin set, test-synth fallback named) — shutting down");
+      finishAndShutdown();
     } else if (msg.type === "state") {
       rtPeak = Math.max(rtPeak, msg.peak ?? 0);
       if (rtPhase === 3 && msg.playing && msg.tick >= 1600) {
@@ -1283,7 +1309,11 @@ ws.addEventListener("message", (event) => {
         if (rtRejected !== 1) fail(`routing: exactly ONE rejection expected, got ${rtRejected}`);
         if (rtLedger.some((e) => e.k === 1 && e.a === 79)) fail("routing: pitch 79 dispatched at ANY phase — the unmapped drop failed");
         console.log("[test] M3 PR1 ✓ atomic table lifecycle: v1 → v2 (mid-play) → REJECTED (nothing changed) → v3 restore; t4 dropped end-to-end");
-        finishAndShutdown();
+        // 0.12.3 — the ordered ch17 boundary regressions ride the SAME
+        // machine: R-5 the live table (routing_result, phase 12), R-6 the
+        // load-path routing map (plugin_state error, phase 13).
+        rtPhase = 12;
+        rtSendTable({ t1: { inst: "inst-a", ch: 17 } });
       }
     }
   } else if (mode === "strips") {
@@ -1361,9 +1391,9 @@ ws.addEventListener("message", (event) => {
     } else if (msg.type === "hello" && stPhase === 0) {
       helloOk = true;
       if (msg.protocol !== 1) fail(`expected protocol 1, got ${msg.protocol}`);
-      if (msg.engineVersion !== "0.12.2") fail(`expected 0.12.2, got ${msg.engineVersion}`);
+      if (msg.engineVersion !== "0.12.3") fail(`expected 0.12.3, got ${msg.engineVersion}`);
       if (!fixtureDir) fail("strips mode requires a fixture dir argument");
-      console.log("[test] hello OK (0.12.2) — M3 PR2: scanning for the fixture identities...");
+      console.log("[test] hello OK (0.12.3) — M3 PR2: scanning for the fixture identities...");
       stPhase = 1;
       ws.send(JSON.stringify({ type: "scan", dirs: [fixtureDir] }));
     } else if (msg.type === "scan_result" && stPhase === 1) {
@@ -1495,9 +1525,9 @@ ws.addEventListener("message", (event) => {
     } else if (msg.type === "hello" && limPhase === 0) {
       helloOk = true;
       if (msg.protocol !== 1) fail(`expected protocol 1, got ${msg.protocol}`);
-      if (msg.engineVersion !== "0.12.2") fail(`expected 0.12.2, got ${msg.engineVersion}`);
+      if (msg.engineVersion !== "0.12.3") fail(`expected 0.12.3, got ${msg.engineVersion}`);
       if (!fixtureDir) fail("limiter mode requires a fixture dir argument");
-      console.log(`[test] hello OK (0.12.2) — M4 output stage: limiter ${limiterOff ? "BYPASSED (SCORCH_LIMITER_OFF — the counter-advance case)" : "ARMED (the brickwall case)"} — scanning...`);
+      console.log(`[test] hello OK (0.12.3) — M4 output stage: limiter ${limiterOff ? "BYPASSED (SCORCH_LIMITER_OFF — the counter-advance case)" : "ARMED (the brickwall case)"} — scanning...`);
       limPhase = 1;
       ws.send(JSON.stringify({ type: "scan", dirs: [fixtureDir] }));
     } else if (msg.type === "scan_result" && limPhase === 1) {
@@ -1563,9 +1593,9 @@ ws.addEventListener("message", (event) => {
     } else if (msg.type === "hello" && edPhase === 0) {
       helloOk = true;
       if (msg.protocol !== 1) fail(`expected protocol 1, got ${msg.protocol}`);
-      if (msg.engineVersion !== "0.12.2") fail(`expected 0.12.2, got ${msg.engineVersion}`);
+      if (msg.engineVersion !== "0.12.3") fail(`expected 0.12.3, got ${msg.engineVersion}`);
       if (!fixtureDir) fail("editor mode requires a fixture dir argument");
-      console.log(`[test] hello OK (0.12.2) — field-gate B: editor-queue coalescing + MM occupancy — scanning...`);
+      console.log(`[test] hello OK (0.12.3) — field-gate B: editor-queue coalescing + MM occupancy — scanning...`);
       edPhase = 1;
       ws.send(JSON.stringify({ type: "scan", dirs: [fixtureDir] }));
     } else if (msg.type === "scan_result" && edPhase === 1) {
@@ -1611,10 +1641,10 @@ ws.addEventListener("message", (event) => {
     // ── M1-hotfix: the heavy-load death class (see the state block above) ──
     if (msg.type === "hello" && slPhase === 0) {
       if (msg.protocol !== 1) fail(`expected protocol 1, got ${msg.protocol}`);
-      if (msg.engineVersion !== "0.12.2") fail(`expected 0.12.2, got ${msg.engineVersion}`);
+      if (msg.engineVersion !== "0.12.3") fail(`expected 0.12.3, got ${msg.engineVersion}`);
       if (!fixtureDir) fail("slowload mode requires a fixture dir argument");
       helloOk = true;
-      console.log(`[test] hello OK (0.12.2) — slow-load knobs: create=${SLOW_CREATE_S}s prepareN=${process.env.SCORCH_TESTVST_SLOW_PREPARE_N ?? 0}(x${SLOW_PREPARE_S}s) — scanning...`);
+      console.log(`[test] hello OK (0.12.3) — slow-load knobs: create=${SLOW_CREATE_S}s prepareN=${process.env.SCORCH_TESTVST_SLOW_PREPARE_N ?? 0}(x${SLOW_PREPARE_S}s) — scanning...`);
       slPhase = 1;
       ws.send(JSON.stringify({ type: "scan", dirs: [fixtureDir] }));
     } else if (msg.type === "scan_result" && slPhase === 1) {
@@ -1666,10 +1696,10 @@ ws.addEventListener("message", (event) => {
     // ── 0.9.2: the init-queue terminal-receipt invariant (see the state block) ──
     if (msg.type === "hello" && trPhase === 0) {
       if (msg.protocol !== 1) fail(`expected protocol 1, got ${msg.protocol}`);
-      if (msg.engineVersion !== "0.12.2") fail(`expected 0.12.2, got ${msg.engineVersion}`);
+      if (msg.engineVersion !== "0.12.3") fail(`expected 0.12.3, got ${msg.engineVersion}`);
       if (!fixtureDir) fail("terminal mode requires a fixture dir argument");
       helloOk = true;
-      console.log(`[test] hello OK (0.12.2) — terminal-receipt knobs: jam=${TR_JAM_S}s timeout=${TR_TIMEOUT_S}s — scanning...`);
+      console.log(`[test] hello OK (0.12.3) — terminal-receipt knobs: jam=${TR_JAM_S}s timeout=${TR_TIMEOUT_S}s — scanning...`);
       trPhase = 1;
       ws.send(JSON.stringify({ type: "scan", dirs: [fixtureDir] }));
     } else if (msg.type === "scan_result" && trPhase === 1) {
@@ -2295,7 +2325,7 @@ ws.addEventListener("message", (event) => {
     if (msg.type === "hello" && !helloOk) {
       helloOk = true;
       if (msg.protocol !== 1) fail(`expected protocol 1, got ${msg.protocol}`);
-      if (msg.engineVersion !== "0.12.2") fail(`expected 0.12.2, got ${msg.engineVersion}`);
+      if (msg.engineVersion !== "0.12.3") fail(`expected 0.12.3, got ${msg.engineVersion}`);
       if (!fixtureDir) fail("scan mode requires a fixture dir argument");
       console.log("[test] hello OK — sending scan of fixture dir + nested dir (dedup proof):", fixtureDir);
       scanSent = true;
@@ -2455,11 +2485,11 @@ ws.addEventListener("message", (event) => {
     // ── Stage 3i: runtime latency tracking (detect, then mini-republish) ──
     if (msg.type === "hello" && latPhase === 0) {
       if (msg.protocol !== 1) fail(`expected protocol 1, got ${msg.protocol}`);
-      if (msg.engineVersion !== "0.12.2") fail(`expected 0.12.2, got ${msg.engineVersion}`);
+      if (msg.engineVersion !== "0.12.3") fail(`expected 0.12.3, got ${msg.engineVersion}`);
       if (!fixtureDir) fail("latency mode requires a fixture dir argument");
       helloOk = true;
       latPhase = 1;
-      console.log("[test] hello OK (0.12.2) — scanning for the stand-in host plugin...");
+      console.log("[test] hello OK (0.12.3) — scanning for the stand-in host plugin...");
       ws.send(JSON.stringify({ type: "dispatch_log", enable: true }));   // Phase 2: the pre-fire proof is ledger-based
       ws.send(JSON.stringify({ type: "scan", dirs: [fixtureDir] }));
     } else if (msg.type === "scan_result" && latPhase === 1) {
@@ -2515,7 +2545,7 @@ ws.addEventListener("message", (event) => {
     if (msg.type === "hello" && !helloOk) {
       helloOk = true;
       if (msg.protocol !== 1) fail(`expected protocol 1, got ${msg.protocol}`);
-      if (msg.engineVersion !== "0.12.2") fail(`expected 0.12.2, got ${msg.engineVersion}`);
+      if (msg.engineVersion !== "0.12.3") fail(`expected 0.12.3, got ${msg.engineVersion}`);
       // Stage 3c close-out: the dispatch ledger streams what the engine
       // ACTUALLY dispatched — the replay-burst and re-attack asserts read it.
       ws.send(JSON.stringify({ type: "dispatch_log", enable: true }));
@@ -2990,7 +3020,7 @@ ws.addEventListener("close", () => {
     }
   } else if (mode === "routing") {
     allOk = helloOk && rtScanPlugin != null && rtAppliedVs.join(",") === "1,2,3" &&
-        rtRejected === 1 && rtRejectV === 2 && rtLastStop &&
+        rtRejected === 2 && rtRejectV === 3 && rtCh17Rejected && rtLoadRefusedOk && rtLastStop &&
         !rtLedger.some((e) => e.k === 1 && e.a === 79);
     if (allOk) {
       console.log("");
@@ -3001,11 +3031,12 @@ ws.addEventListener("close", () => {
       console.log("  v2 applied MID-PLAY: t1 crossed to inst-b ch1, t2/t3 re-channelled — transport rolled through, zero old-path leaks");
       console.log("  R1 atomic-or-nothing: the unknown-instance table REJECTED — v stayed 2, the notes still rode v2");
       console.log("  v3 restore: the original mapping back, notes verified on the original paths (v=3)");
+      console.log("  0.12.3 boundary regressions: the live ch17 table REJECTED (v stayed 3, bound named) + the load-path ch17 map REFUSED the whole plugin set (test-synth fallback)");
       console.log("  engine.log side: desktop.yml asserts the receipt grammar (route applied/rejected/track N unmapped) + the version arithmetic");
       console.log("========================================");
       process.exit(0);
     } else {
-      console.error(`FAILED: hello=${helloOk} scan=${rtScanPlugin ? "ok" : "none"} appliedVs=[${rtAppliedVs}] rejected=${rtRejected}@v${rtRejectV} reason="${rtRejectReason}" stopped=${rtLastStop} ledger79=${rtLedger.some((e) => e.k === 1 && e.a === 79)} phase=${rtPhase}`);
+      console.error(`FAILED: hello=${helloOk} scan=${rtScanPlugin ? "ok" : "none"} appliedVs=[${rtAppliedVs}] rejected=${rtRejected}@v${rtRejectV} ch17=${rtCh17Rejected} loadRefused=${rtLoadRefusedOk} reason="${rtRejectReason}" stopped=${rtLastStop} ledger79=${rtLedger.some((e) => e.k === 1 && e.a === 79)} phase=${rtPhase}`);
       process.exit(1);
     }
   } else if (mode === "strips") {

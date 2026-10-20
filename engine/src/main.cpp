@@ -524,7 +524,7 @@ namespace {
 // "openEditor":true); the lazy-device window is receipted (nominal fallback +
 // device-ready race re-prepare); matching requests coalesce into an in-flight
 // init instead of answering "reused" while it is still outstanding.
-constexpr const char* kEngineVersion = "0.12.2";   // field-gate-2: [stripmix] 1 Hz per-strip in/out dB receipt (shared-instance loudness probe)
+constexpr const char* kEngineVersion = "0.12.3";   // field receipt-grammar fix: perTrack prints wire ch + slot + wide ([ch17] misread), perChannel -> ownChannel, the silent event-channel clamp is NAMED
 constexpr int kProtocolVersion = 1;
 constexpr int kDefaultPort = 9377;
 constexpr int kMaxVoices = 64;
@@ -4700,6 +4700,7 @@ void handle_load(const juce::var& json, ix::WebSocket& ws, size_t byteSize) {
     // EMPTIED the score while the transport kept "playing" bar after bar).
     int receivedCount = 0;
     int skipped = 0;
+    int ownChClamped = 0;   // events whose own channel fell outside 1..16 and was substituted with 1 — NAMED in the [load] receipt, never silent
     int firstErrorIndex = -1;
     std::string firstErrorReason;
     std::string loadFail;   // non-empty = hard failure (score NOT replaced)
@@ -4754,7 +4755,15 @@ void handle_load(const juce::var& json, ix::WebSocket& ws, size_t byteSize) {
             else if (et == "PROGRAM_CHANGE") ee.kind = kEvPC;
             else ee.kind = kEvNoteOff;
             int ch = static_cast<int>(dCh);
-            if (ch < 1 || ch > 16) ch = 1;
+            if (ch < 1 || ch > 16) {
+                // The own channel is inert for a ROUTED track (the routing
+                // override replaces it at dispatch), but for an UNROUTED track
+                // it IS the test-synth wire channel — so the substitution is
+                // counted and NAMED in the [load] receipt (the same doctrine
+                // as the skip counters above: substitutions are never silent).
+                ++ownChClamped;
+                ch = 1;
+            }
             ee.channel = static_cast<uint8_t>(ch);
             ee.data1 = static_cast<uint8_t>(static_cast<int>(d1) & 0x7f);
             ee.data2 = static_cast<uint8_t>(static_cast<int>(d2) & 0x7f);
@@ -4953,8 +4962,20 @@ void handle_load(const juce::var& json, ix::WebSocket& ws, size_t byteSize) {
         // its project midiChannel numerically matches a hosted channel.
         std::string disp = "[synth]";
         auto cit = channelOfTrack.find(id);
-        if (cit != channelOfTrack.end())
-            disp = "[ch" + std::to_string(cit->second) + "]";
+        if (cit != channelOfTrack.end()) {
+            // Field-proven grammar fix (0.12.3): the raw WIDE channel printed
+            // here ("[ch17]") read as an ILLEGAL wire MIDI channel and sent
+            // the field analysis chasing a fold that never happened. The
+            // receipt now names all three spaces explicitly: the wire channel
+            // the plugin hears, the instance slot owning the namespace, and
+            // the wide encoding (slot*16+ch). "[ch1 s0 w1]" == legacy (wide
+            // == wire); "[ch1 s1 w17]" == the SECOND instance's ch1.
+            const int wide = cit->second;
+            const int slot = slotOfWide(wide);
+            disp = "[ch" + std::to_string(wide - slot * 16) +
+                   " s" + std::to_string(slot) +
+                   " w" + std::to_string(wide) + "]";
+        }
         trStr += id + "=" + std::to_string(count) + disp;
     }
     char bpmBuf[32];
@@ -4969,7 +4990,9 @@ void handle_load(const juce::var& json, ix::WebSocket& ws, size_t byteSize) {
               std::to_string(skipped) + ")" +
               (firstErrorIndex >= 0 ? " | firstError " + std::to_string(firstErrorIndex) +
                 " (" + firstErrorReason + ")" : "") +
-              " | perChannel" + (chStr.empty() ? " none" : chStr) +
+              " | ownChannel" + (chStr.empty() ? " none" : chStr) +
+              (ownChClamped > 0 ? " | ownChannelClamped=" + std::to_string(ownChClamped) +
+                " (own channel outside 1..16 substituted with 1; routed tracks unaffected — the override replaces the own channel)" : "") +
               " | perTrack" + (trStr.empty() ? " none" : " " + trStr) +
               " | bpm=" + bpmBuf + " ppqn=" + std::to_string(ppqn) +
               " endTick=" + std::to_string(endTick) + " | seq " + std::to_string(seq) +

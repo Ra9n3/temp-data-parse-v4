@@ -859,6 +859,11 @@ jobs:
           # unchanged-v reject, the dispatch-ledger per-pitch-per-wide paths,
           # zero pitch-79 anywhere); the engine.log grammar + the plugin-side
           # channel/ordinal proof are asserted here.
+          # 0.12.3: the ordered ch17 boundary regressions ride the same
+          # machine — R-5 the LIVE table with ch17 (REJECTED, v stays 3,
+          # bound named) and R-6 a LOAD whose routing map carries ch17 (the
+          # whole plugin set REFUSED with the named 1–16 bound + track t9,
+          # test-synth fallback). Both receipts asserted below.
           Write-Host "=== Test D6: M3 routing table (atomic apply, mid-play swap, R1 rejection, unmapped drops) ==="
           $env:SCORCH_TESTVST_LOG = "1"
           $engineLogD6 = Join-Path $env:APPDATA "scorch\engine.log"
@@ -920,6 +925,15 @@ jobs:
             # R1: exactly ONE rejection, naming the unknown instance.
             $rejects = @($d6Lines | Select-String -Pattern "\[routing\] route rejected: reason=.*unknown instanceId")
             if (($rejects | Measure-Object).Count -ne 1) { throw "D6: exactly one 'route rejected: reason=... unknown instanceId' expected, got $(($rejects | Measure-Object).Count)" }
+            # 0.12.3 R-5: exactly ONE ch17 rejection at the live boundary,
+            # naming the 1-16 bound + the track (the '.' spans the dash so
+            # the pattern is encoding-proof against the en-dash).
+            $rtCh17 = @($d6Lines | Select-String -Pattern "\[routing\] route rejected: reason=channel must be an integer 1.16 \(track t1\)")
+            if (($rtCh17 | Measure-Object).Count -ne 1) { throw "D6: exactly one ch17 live-table rejection expected, got $(($rtCh17 | Measure-Object).Count)" }
+            # 0.12.3 R-6: the load-path refusal — a load whose routing map
+            # carries ch17 REFUSES the whole plugin set (named bound + track).
+            $loadRef = @($d6Lines | Select-String -Pattern "\[load\] plugin set REFUSED: engine channel must be an integer 1.16 \(track t9\)")
+            if (($loadRef | Measure-Object).Count -ne 1) { throw "D6: exactly one load-path ch17 refusal expected, got $(($loadRef | Measure-Object).Count)" }
             # The unmapped-drop receipts: t4 is track slot 4; 6 NOTE_ON +
             # 6 NOTE_OFF = 12 dropped events. Two shapes: the 1 Hz DELTA
             # lines (timing-dependent split) and the FINAL cumulative line
@@ -937,7 +951,7 @@ jobs:
             # event twice — the harness's zero-dispatch ledger proof is the
             # exactness gate). Bounded at +10.
             if ($dropTotal -lt 14 -or $dropTotal -gt 24) { throw "D6: final drop total $dropTotal outside [14,24] (authored floor 14 + the bounded re-visit artifact)" }
-            Write-Host "D6 engine.log receipts: mapping v=1/2/3 exactly-once, track=1 rebound inst-a->inst-b->inst-a, one R1 rejection (unknown instanceId), track 4 unmapped drops total $dropTotal"
+            Write-Host "D6 engine.log receipts: mapping v=1/2/3 exactly-once, track=1 rebound inst-a->inst-b->inst-a, one R1 rejection (unknown instanceId), one ch17 live-table rejection (v=3 held), one load-path ch17 refusal (plugin set REFUSED, track t9), track 4 unmapped drops total $dropTotal"
             $procD6.WaitForExit(20000) | Out-Null
             if (-not $procD6.HasExited -or $procD6.ExitCode -ne 0) { throw "Engine D6 did not exit cleanly (code=$($procD6.ExitCode))" }
             Write-Host "Engine D6 clean exit 0 (routing-table atomicity verified: no silent drops, ever)"

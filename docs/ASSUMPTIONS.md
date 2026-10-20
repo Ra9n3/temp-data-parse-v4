@@ -436,7 +436,7 @@ Regression: the user's real 27-bar project rendered a silently EMPTY engine scor
 ### What the engine now does (engine.log)
 
 - The shell spawns the engine with stdout/stderr piped to null, so `std::cout` lines are invisible in production — the black box. The engine now appends receipts DIRECTLY to `%APPDATA%\scorch\engine.log` (Windows; `~/.config/scorch/engine.log` on Linux — the same JUCE `userApplicationDataDirectory` call maps to XDG config there, verified empirically). Mutex-guarded, best-effort: a logging failure can never break the protocol or the audio thread.
-- Load receipt: `[load] received <bytes> bytes | loaded <N> events (array had <M>, skipped <S>) | firstError <i> (<reason>) | perChannel ch1=.. … | perTrack <trackId>=.. … | bpm=.. ppqn=.. endTick=.. | seq <n>` — per-channel AND per-track counts (3c's events carry `trackId`), the engine's honest view of what it holds.
+- Load receipt: `[load] received <bytes> bytes | loaded <N> events (array had <M>, skipped <S>) | firstError <i> (<reason>) | ownChannel ch1=.. … | perTrack <trackId>=..[ch<wire> s<slot> w<wide>]|[synth] … | bpm=.. ppqn=.. endTick=.. | seq <n>` — per-channel AND per-track counts (3c's events carry `trackId`), the engine's honest view of what it holds. `ownChannel` = the events' own pre-override channels; the perTrack disposition names wire ch + instance slot + wide encoding (0.12.3 — the raw wide print `[ch17]` was field-misread as an illegal MIDI channel; see the 0.12.3 section below).
 - Play receipt: `[play] rendering from tick <X>, <N> voices scheduled (of <E> events) (explicit tick|resume)` — N counts NOTE_ONs from the start tick: the engine's honest answer to "will this play make sound?". A play against an unloaded score now reads 0 scheduled. Plus terse `[stop]`/`[seek]`/`[ws-error]`/start/exit timeline lines.
 - Parse hardening (the silent-empty paths, closed):
   - `events` not an array → HARD fail: `bad_load` error reply + `[load-fail]` receipt, previous score RETAINED (was: silently replaced the score with an EMPTY one and replied `state` as if fine — the exact reported bug class).
@@ -3197,3 +3197,54 @@ janitor peak receipt and the wire's state.peak. Purpose: the shared-
 instance loudness question (two strips carrying the same instance output
 sum at the output node) is answerable from receipts — strip in_db/out_db
 per config + the master peak — instead of from guesses.
+
+## Field receipt-grammar fix — the [ch17] misread (0.12.3)
+
+The 0.12.1 field log printed `perTrack trk_cellos=278[ch17]` next to
+`perChannel ch1=319`, and the field analysis read `[ch17]` as an illegal
+MIDI channel folded into ch1 ("violins_i + cellos silently stacked on
+Falcon ch1"). That fold NEVER happened: `perTrack`'s disposition prints
+the WIDE channel (slot*16+ch) raw, so `[ch17]` = (slot 1, wire ch 1) —
+the SECOND hosted instance's channel 1 — while `perChannel` counted the
+events' own PRE-override channels. The arithmetic (41+278=319) had the
+boring answer: both tracks' events were SENT with own channel 1 (each
+track resolved to ch 1 of its OWN group), violins_i routed to the first
+instance (BBCSO, slot 0, wide 1), cellos to the second (Falcon, slot 1,
+wide 17). Two instances, two private namespaces, zero stacking — the
+per-instance collision guard and the load-path 1–16 boundary (present
+since the initial commit) had nothing to refuse. 0.12.3 fixes the
+grammar that invited the misread and adds the ordered regressions:
+
+- `[load]` perTrack disposition now names all three spaces:
+  `[ch<wire> s<slot> w<wide>]` (e.g. `[ch1 s0 w1]` legacy/first slot,
+  `[ch1 s1 w17]` second instance's ch1). `[synth]` unchanged.
+- The `perChannel` segment is renamed `ownChannel` — it counts the
+  events' own (pre-override) channels; routed tracks' own channel is
+  inert, and comparing it against perTrack wide values is the exact
+  misread this receipt must prevent.
+- The event-path channel clamp (`if (ch < 1 || ch > 16) ch = 1`) is no
+  longer silent: `ownChannelClamped=<N> (own channel outside 1..16
+  substituted with 1; routed tracks unaffected — the override replaces
+  the own channel)` appears in the `[load]` receipt when N > 0. Clamp
+  semantics unchanged (frontend compat); the substitution is NAMED, per
+  the never-silent doctrine.
+- The ordered ch17 boundary regressions ride the routing mode (D6):
+  R-5 the LIVE table with `ch:17` is REJECTED atomically (v echo
+  unchanged, `channel must be an integer 1-16 (track t1)` named) and
+  R-6 a LOAD whose routing map carries `ch:17` refuses the WHOLE plugin
+  set (`engine channel must be an integer 1–16 (track t9)` +
+  test-synth fallback). Both engine.log receipts asserted by desktop.yml;
+  the wire side by the harness (gate: exactly 2 rejections total, both
+  named, v arithmetic 1→2→3 preserved).
+
+Field follow-ups recorded 2026-10-21 (NO work ordered): the shared-
+instance "plays loud" question is now measurable with 0.12.2's
+[stripmix] receipts (repro A solo vs B shared, +6.0 dB correlated sum
+vs ~+3 dB uncorrelated); the crash-window amplifier D-question ("hold
+transport play until init terminal state?") is PARKED for the user —
+play-during-state-restore on a live Falcon preceded the 0xC0000005 but
+is NOT a verdict (the corruption is Falcon-internal); restart should
+prefer the previous device endpoint/rate (pre-crash Realtek@48000
+became Primary Sound Driver@44100 DirectSound — assess-and-queue); the
+frontend probeAll re-probe of all 78 plugins every start is a
+probe-cache candidate.
