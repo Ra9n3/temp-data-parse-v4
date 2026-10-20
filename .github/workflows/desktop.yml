@@ -157,6 +157,30 @@ jobs:
           if (-not $expected) { throw "Could not read kEngineVersion from engine/src/main.cpp" }
           if ($versionOut -notmatch [regex]::Escape("scorch-engine $expected")) { throw "Version check failed: $versionOut (expected scorch-engine $expected)" }
           if ($versionOut -notmatch "audio: built-in") { throw "Audio compile gate still present — engine reports no audio support" }
+          # 0.12.3 TASK D hardening: shared evidence machinery for EVERY
+          # node-failure branch and engine.log receipt assert in this step
+          # (before this the coverage was D6-only — D5's attempt-3 failure
+          # threw bare, naming no receipt and no process state). On ANY
+          # failure: drain the engine up to 5 s so the dumped log is final
+          # (engineLog appends flush per line via juce File::appendText — a
+          # line missing at read time means "not written YET", never
+          # "buffered"), then print the process state + the last 40
+          # engine.log lines to the step console BEFORE anything throws.
+          function Show-StepLogTail {
+            param([string]$Path, [object]$Proc, [string]$Label, [int]$N = 40)
+            $exited = $false; $code = "-"
+            if ($null -ne $Proc) {
+              if (-not $Proc.HasExited) { $Proc.WaitForExit(5000) | Out-Null }
+              if ($Proc.HasExited) { $exited = $true; $code = $Proc.ExitCode }
+            }
+            Write-Host ("{0} evidence: engineHasExited={1} exitCode={2}" -f $Label, $exited, $code)
+            if (Test-Path $Path) {
+              Write-Host ("{0} evidence: last {1} lines of engine.log:" -f $Label, $N)
+              Get-Content $Path -Tail $N | ForEach-Object { Write-Host "  $_" }
+            } else {
+              Write-Host ("{0} evidence: engine.log NOT FOUND at {1}" -f $Label, $Path)
+            }
+          }
 
           # Stage 3c-hotfix: start the protocol-test step with a CLEAN
           # engine.log so the receipt assertions in Test E prove THIS run
@@ -180,6 +204,7 @@ jobs:
             }
             node .github/scripts/test-engine-protocol.mjs 9378 null-audio
             if ($LASTEXITCODE -ne 0) {
+              Show-StepLogTail -Path (Join-Path $env:APPDATA "scorch\engine.log") -Proc $procA -Label "Engine A"
               Write-Host "Engine A stdout:"
               if (Test-Path engine-a-stdout.txt) { Get-Content engine-a-stdout.txt }
               Write-Host "Engine A stderr:"
@@ -225,6 +250,7 @@ jobs:
             }
             node .github/scripts/test-engine-protocol.mjs 9379 no-device
             if ($LASTEXITCODE -ne 0) {
+              Show-StepLogTail -Path (Join-Path $env:APPDATA "scorch\engine.log") -Proc $procB -Label "Engine B"
               Write-Host "Engine B stdout:"
               if (Test-Path engine-b-stdout.txt) { Get-Content engine-b-stdout.txt }
               Write-Host "Engine B stderr:"
@@ -257,6 +283,7 @@ jobs:
             }
             node .github/scripts/test-engine-protocol.mjs 9380 scan "$env:SCAN_FIXTURES"
             if ($LASTEXITCODE -ne 0) {
+              Show-StepLogTail -Path (Join-Path $env:APPDATA "scorch\engine.log") -Proc $procC -Label "Engine C"
               Write-Host "Engine C stdout:"
               if (Test-Path engine-c-stdout.txt) { Get-Content engine-c-stdout.txt }
               Write-Host "Engine C stderr:"
@@ -267,6 +294,13 @@ jobs:
             $scanProof = Select-String -Path "engine-c-stdout.txt" -Pattern "\[engine\] scan: "
             if (-not $scanProof) { throw "scan proof missing: no '[engine] scan:' lines in engine stdout" }
             foreach ($l in $scanProof.Line) { Write-Host "Scan proof: $l" }
+            # 0.12.3 TASK D: the engine has exited BEFORE the log is read —
+            # every receipt below is final (the brief's option (a): wait
+            # BEFORE asserting instead of racing the shutdown writer).
+            $procC.WaitForExit(10000) | Out-Null
+            if (-not $procC.HasExited) { Show-StepLogTail -Path (Join-Path $env:APPDATA "scorch\engine.log") -Proc $procC -Label "Engine C"; throw "Engine C still running 10s after the harness exit (dump above names the last phase)" }
+            if ($procC.ExitCode -ne 0) { Show-StepLogTail -Path (Join-Path $env:APPDATA "scorch\engine.log") -Proc $procC -Label "Engine C"; throw "Engine C exited code=$($procC.ExitCode) before the receipt asserts (dump above)" }
+            Write-Host "Engine C exit verified BEFORE the log read (file final: exit 0)"
             # Stage 3f-2 receipt assertions (engine.log — cleaned at step start):
             # one [scan] line PER SCANNED plugin (path/outcome/elapsedMs), a
             # summary naming the probed-row count, and one [probe] line per
@@ -283,8 +317,6 @@ jobs:
               if (-not $probeLine) { throw "3f-2 receipt missing: no '[probe] ... $required' line in engine.log" }
               Write-Host "Probe proof: $($probeLine.Line.Substring(0, [Math]::Min(120, $probeLine.Line.Length)))"
             }
-            $procC.WaitForExit(10000) | Out-Null
-            if (-not $procC.HasExited -or $procC.ExitCode -ne 0) { throw "Engine C did not exit cleanly (code=$($procC.ExitCode))" }
             Write-Host "Engine C clean exit 0 (scan + crash isolation verified)"
           } finally {
             Stop-Process -Id $procC.Id -Force -ErrorAction SilentlyContinue
@@ -317,6 +349,7 @@ jobs:
             }
             node .github/scripts/test-engine-protocol.mjs 9381 host "$env:SCAN_FIXTURES"
             if ($LASTEXITCODE -ne 0) {
+              Show-StepLogTail -Path (Join-Path $env:APPDATA "scorch\engine.log") -Proc $procD -Label "Engine D"
               Write-Host "Engine D stdout:"
               if (Test-Path engine-d-stdout.txt) { Get-Content engine-d-stdout.txt }
               Write-Host "Engine D stderr:"
@@ -394,6 +427,7 @@ jobs:
             }
             node .github/scripts/test-engine-protocol.mjs 9383 multi "$env:SCAN_FIXTURES"
             if ($LASTEXITCODE -ne 0) {
+              Show-StepLogTail -Path $engineLogD2 -Proc $procD2 -Label "Engine D2"
               Write-Host "Engine D2 stdout:"
               if (Test-Path engine-d2-stdout.txt) { Get-Content engine-d2-stdout.txt }
               Write-Host "Engine D2 stderr:"
@@ -429,6 +463,14 @@ jobs:
             foreach ($v in $pitchOrdinals.Values) { foreach ($o in $v) { [void]$allOrdinals.Add($o) } }
             if ($allOrdinals.Count -ne 4) { throw "plugin-side proof: expected EXACTLY 4 distinct instance ordinals receiving events (original a/b/c + the ADDed d), got $($allOrdinals.Count)" }
             Write-Host "Plugin-side routing isolation: pitches 60/67/72/79 each on exactly ONE instance ordinal; 4 distinct ordinals (3 initial + 1 added); zero cross-instance leaks"
+            # 0.12.3 TASK D: the engine has exited BEFORE the log is read —
+            # every receipt this block asserts is final (the brief's option
+            # (a): wait BEFORE asserting instead of racing the shutdown
+            # writer; engineLog flushes per line, so exit = file final).
+            $procD2.WaitForExit(20000) | Out-Null
+            if (-not $procD2.HasExited) { Show-StepLogTail -Path $engineLogD2 -Proc $procD2 -Label "Engine D2"; throw "Engine D2 still running 20s after the harness exit — shutdown hung (dump above names the last phase)" }
+            if ($procD2.ExitCode -ne 0) { Show-StepLogTail -Path $engineLogD2 -Proc $procD2 -Label "Engine D2"; throw "Engine D2 exited code=$($procD2.ExitCode) before the receipt asserts (dump above)" }
+            Write-Host "Engine D2 exit verified BEFORE the log read (file final: exit 0)"
             # The D2 log slice: every engine receipt D2 produced.
             $d2Log = Get-Content $engineLogD2 | Select-Object -Skip $logLinesBeforeD2
             if (-not $d2Log) { throw "engine.log D2 slice is empty — D2 wrote no receipts" }
@@ -475,8 +517,6 @@ jobs:
             # (The 3f-6 slow-state-capture marker probe is GONE with the M2
             # rewrite: its machinery is fully covered by Test D5's jam/
             # terminal-timeout assertions and Test D's x10 retire captures.)
-            $procD2.WaitForExit(20000) | Out-Null
-            if (-not $procD2.HasExited -or $procD2.ExitCode -ne 0) { throw "Engine D2 did not exit cleanly (code=$($procD2.ExitCode))" }
             Write-Host "Engine D2 clean exit 0 (M2 multi-instance + diff reuse + routing isolation verified)"
           } finally {
             Stop-Process -Id $procD2.Id -Force -ErrorAction SilentlyContinue
@@ -503,6 +543,7 @@ jobs:
             }
             node .github/scripts/test-engine-protocol.mjs 9384 latency "$env:SCAN_FIXTURES"
             if ($LASTEXITCODE -ne 0) {
+              Show-StepLogTail -Path (Join-Path $env:APPDATA "scorch\engine.log") -Proc $procD3 -Label "Engine D3"
               Write-Host "Engine D3 stdout:"
               if (Test-Path engine-d3-stdout.txt) { Get-Content engine-d3-stdout.txt }
               Write-Host "Engine D3 stderr:"
@@ -516,6 +557,14 @@ jobs:
             $modes = $fx.Matches | ForEach-Object { $_.Groups[3].Value }
             if (-not ($modes -contains "cc") -or -not ($modes -contains "silent") -or -not ($modes -contains "settle")) { throw "3i fixture-side proof incomplete: cc/silent/settle modes must all appear ($($modes -join ','))" }
             Write-Host "3i fixture-side proof: $(($fx | Measure-Object).Count) latency command(s) taken (cc/silent/flicker/settle)"
+            # 0.12.3 TASK D: the engine has exited BEFORE the log is read —
+            # every receipt this block asserts is final (the brief's option
+            # (a): wait BEFORE asserting instead of racing the shutdown
+            # writer; engineLog flushes per line, so exit = file final).
+            $procD3.WaitForExit(20000) | Out-Null
+            if (-not $procD3.HasExited) { Show-StepLogTail -Path (Join-Path $env:APPDATA "scorch\engine.log") -Proc $procD3 -Label "Engine D3"; throw "Engine D3 still running 20s after the harness exit — shutdown hung (dump above names the last phase)" }
+            if ($procD3.ExitCode -ne 0) { Show-StepLogTail -Path (Join-Path $env:APPDATA "scorch\engine.log") -Proc $procD3 -Label "Engine D3"; throw "Engine D3 exited code=$($procD3.ExitCode) before the receipt asserts (dump above)" }
+            Write-Host "Engine D3 exit verified BEFORE the log read (file final: exit 0)"
             # Engine.log receipts: the republish discipline itself. inst-lat is
             # unique to D3, so these counts are isolated from the other tests.
             $engineLog = Join-Path $env:APPDATA "scorch\engine.log"
@@ -576,8 +625,6 @@ jobs:
             # the correction path must never touch editors (the D3 engine opens
             # none; any [editor] receipt would name an unexpected path).
             Write-Host "3i engine.log receipts: $latRepub republish(es) (all pairs present), $latDeferred deferred, $loadedLat load-path publish, $reuseLat reuse, $pubSummaries publish summaries"
-            $procD3.WaitForExit(20000) | Out-Null
-            if (-not $procD3.HasExited -or $procD3.ExitCode -ne 0) { throw "Engine D3 did not exit cleanly (code=$($procD3.ExitCode))" }
             Write-Host "Engine D3 clean exit 0 (runtime-latency tracking verified)"
           } finally {
             Stop-Process -Id $procD3.Id -Force -ErrorAction SilentlyContinue
@@ -621,6 +668,7 @@ jobs:
             }
             node .github/scripts/test-engine-protocol.mjs 9385 slowload "$env:SCAN_FIXTURES"
             if ($LASTEXITCODE -ne 0) {
+              Show-StepLogTail -Path $engineLogD4 -Proc $procD4 -Label "Engine D4"
               Write-Host "Engine D4 stdout:"
               if (Test-Path engine-d4-stdout.txt) { Get-Content engine-d4-stdout.txt }
               Write-Host "Engine D4 stderr:"
@@ -648,6 +696,14 @@ jobs:
             #     receipts after "[plugin] prepared (worker)" (the commit's
             #     re-prepare early-outs at identical settings, the retire
             #     capture is worker-side, publish is receipt-only).
+            # 0.12.3 TASK D: the engine has exited BEFORE the log is read —
+            # every receipt this block asserts is final (the brief's option
+            # (a): wait BEFORE asserting instead of racing the shutdown
+            # writer; engineLog flushes per line, so exit = file final).
+            $procD4.WaitForExit(20000) | Out-Null
+            if (-not $procD4.HasExited) { Show-StepLogTail -Path $engineLogD4 -Proc $procD4 -Label "Engine D4"; throw "Engine D4 still running 20s after the harness exit — shutdown hung (dump above names the last phase)" }
+            if ($procD4.ExitCode -ne 0) { Show-StepLogTail -Path $engineLogD4 -Proc $procD4 -Label "Engine D4"; throw "Engine D4 exited code=$($procD4.ExitCode) before the receipt asserts (dump above)" }
+            Write-Host "Engine D4 exit verified BEFORE the log read (file final: exit 0)"
             $d4Lines = Get-Content $engineLogD4 | Select-Object -Skip $logLinesBeforeD4
             $mmUnresp = @($d4Lines | Select-String -Pattern "\[mm\] message thread unresponsive")
             $mmRecov  = @($d4Lines | Select-String -Pattern "\[mm\] message thread recovered")
@@ -685,8 +741,6 @@ jobs:
             $commitFail = @($d4Lines | Select-String -Pattern "\[plugin\] commit FAILED")
             if (($commitFail | Measure-Object).Count -ne 0) { throw "M1-hotfix: '[plugin] commit FAILED' receipt in the D4 session" }
             Write-Host "M1-hotfix engine.log receipts: $(($mmUnresp | Measure-Object).Count) structural [mm] window(s), all recovered; 0 new windows after the worker prepare; 0 commit FAILED"
-            $procD4.WaitForExit(20000) | Out-Null
-            if (-not $procD4.HasExited -or $procD4.ExitCode -ne 0) { throw "Engine D4 did not exit cleanly (code=$($procD4.ExitCode))" }
             Write-Host "Engine D4 clean exit 0 (heavy-load class verified: async ack, no MM wedge, engine alive)"
           } finally {
             Stop-Process -Id $procD4.Id -Force -ErrorAction SilentlyContinue
@@ -734,6 +788,7 @@ jobs:
             }
             node .github/scripts/test-engine-protocol.mjs 9386 terminal "$env:SCAN_FIXTURES"
             if ($LASTEXITCODE -ne 0) {
+              Show-StepLogTail -Path $engineLogD5 -Proc $procD5 -Label "Engine D5"
               Write-Host "Engine D5 stdout:"
               if (Test-Path engine-d5-stdout.txt) { Get-Content engine-d5-stdout.txt }
               Write-Host "Engine D5 stderr:"
@@ -744,7 +799,7 @@ jobs:
                 Write-Host "Engine D5 engine.log slice (last 120 lines):"
                 Get-Content $engineLogD5 | Select-Object -Last 120
               }
-              throw "Engine D5 terminal-receipt test failed"
+              throw "Engine D5 terminal-receipt test failed (mjs exit $LASTEXITCODE — its own failure line and the engine state/log-tail dumps above name the phase; if none do, the mjs stalled to its 150s watchdog)"
             }
             # Fixture-side proof: the jam actually ran (create call=1 slept
             # 20 s; no other create slept — SLOW_CREATE_N=1).
@@ -754,15 +809,23 @@ jobs:
             $fxOthers = @($fxAllCreates | Where-Object { $_.Line -notmatch "call=1 sleeping" })
             if (($fxOthers | Measure-Object).Count -ne 0) { throw "D5: a NON-first create slept (SLOW_CREATE_N=1 violated): $($fxOthers | ForEach-Object { $_.Line })" }
             Write-Host "D5 fixture-side proof: create call=1 jammed 20 s, later creates instant"
-            Start-Sleep -Seconds 2   # the shutdown sweep's engine-shutdown receipts land before the log read
+            # 0.12.3 TASK D: wait for ENGINE EXIT before reading the log —
+            # the D6-class timing race (read vs the shutdown chain's last
+            # writes) applies to every slice read in this step. The brief's
+            # option (a): WaitForExit BEFORE asserting; the file is final
+            # once the process is gone (engineLog flushes per line).
+            $procD5.WaitForExit(20000) | Out-Null
+            if (-not $procD5.HasExited) { Show-StepLogTail -Path $engineLogD5 -Proc $procD5 -Label "Engine D5"; throw "Engine D5 still running 20s after the harness exit — shutdown hung (dump above names the last phase)" }
+            if ($procD5.ExitCode -ne 0) { Show-StepLogTail -Path $engineLogD5 -Proc $procD5 -Label "Engine D5"; throw "Engine D5 exited code=$($procD5.ExitCode) before the receipt asserts (dump above)" }
+            Write-Host "Engine D5 exit verified BEFORE the log read (file final: exit 0)"
             $d5Lines = Get-Content $engineLogD5 | Select-Object -Skip $logLinesBeforeD5
             # The four scenario receipts (the harness proved the wire side).
             $termTimeout = @($d5Lines | Select-String -Pattern "\[plugin\] init failed: seq=10 reason=terminal-timeout")
-            if (($termTimeout | Measure-Object).Count -ne 1) { throw "D5: exactly one 'init failed: seq=10 reason=terminal-timeout' expected, got $(($termTimeout | Measure-Object).Count)" }
+            if (($termTimeout | Measure-Object).Count -ne 1) { Show-StepLogTail -Path $engineLogD5 -Proc $procD5 -Label "D5"; throw "D5: exactly one 'init failed: seq=10 reason=terminal-timeout' expected, got $(($termTimeout | Measure-Object).Count)" }
             $queuedBehind = @($d5Lines | Select-String -Pattern "\[plugin\] init failed: seq=11 reason=queued-behind-jammed-init")
-            if (($queuedBehind | Measure-Object).Count -ne 1) { throw "D5: exactly one 'init failed: seq=11 reason=queued-behind-jammed-init' expected, got $(($queuedBehind | Measure-Object).Count)" }
+            if (($queuedBehind | Measure-Object).Count -ne 1) { Show-StepLogTail -Path $engineLogD5 -Proc $procD5 -Label "D5"; throw "D5: exactly one 'init failed: seq=11 reason=queued-behind-jammed-init' expected, got $(($queuedBehind | Measure-Object).Count)" }
             $fold = @($d5Lines | Select-String -Pattern "\[plugin\] init superseded: seq=21 by=20 \(coalesced")
-            if (($fold | Measure-Object).Count -ne 1) { throw "D5: exactly one 'init superseded: seq=21 by=20 (coalesced' expected, got $(($fold | Measure-Object).Count)" }
+            if (($fold | Measure-Object).Count -ne 1) { Show-StepLogTail -Path $engineLogD5 -Proc $procD5 -Label "D5"; throw "D5: exactly one 'init superseded: seq=21 by=20 (coalesced' expected, got $(($fold | Measure-Object).Count)" }
             # The classic pair (40 fixture, 41 bogus) is sent back-to-back by
             # the harness: WHICH way the ~2 ms race resolves is TIMING, not
             # contract — the contract is the terminal invariant below. The
@@ -797,25 +860,26 @@ jobs:
             if ($termTotal -eq 1) {
               Write-Host "D5 classic pair: seq 40 resolved to EXACTLY ONE terminal (superseded=$supN loaded=$loadN kept=$keptN instanceKept=$instKeptN failed=$fail40N) — 41 failed fast on the bogus path; the invariant held"
             } else {
+              Show-StepLogTail -Path $engineLogD5 -Proc $procD5 -Label "D5"
               Write-Host "D5 seq-40 terminal evidence (every line mentioning seq 40 or seq=40 in the slice):"
               @($d5Lines | Select-String -Pattern "seq 40|seq=40") | ForEach-Object { Write-Host "   $($_.Line)" }
               throw "D5: classic pair 40/41 must give seq 40 EXACTLY ONE terminal (superseded XOR loaded XOR kept XOR instanceKept XOR failed), got superseded=$supN loaded=$loadN kept=$keptN instanceKept=$instKeptN failed=$fail40N"
             }
             $fail41 = @($d5Lines | Select-String -Pattern "\[plugin\] init failed: seq=41\D")
-            if (($fail41 | Measure-Object).Count -ne 1) { throw "D5: exactly one 'init failed: seq=41' expected, got $(($fail41 | Measure-Object).Count)" }
+            if (($fail41 | Measure-Object).Count -ne 1) { Show-StepLogTail -Path $engineLogD5 -Proc $procD5 -Label "D5"; throw "D5: exactly one 'init failed: seq=41' expected, got $(($fail41 | Measure-Object).Count)" }
             # Heartbeat: the pending and queued >10s warnings fired during the jam.
             $pendWarn = @($d5Lines | Select-String -Pattern "\[plugin\] init pending >10s seq 10")
-            if (($pendWarn | Measure-Object).Count -lt 1) { throw "D5: no 'init pending >10s seq 10' warning — the heartbeat did not fire during the jam" }
+            if (($pendWarn | Measure-Object).Count -lt 1) { Show-StepLogTail -Path $engineLogD5 -Proc $procD5 -Label "D5"; throw "D5: no 'init pending >10s seq 10' warning — the heartbeat did not fire during the jam" }
             # Field-gate B-2: the init >10s warnings carry the occupancy suffix too.
-            if (-not ($pendWarn[0].Line -match "mmJob=")) { throw "D5: the init >10s warning does not carry the B-2 occupancy suffix (mmJob=/editorJobs=)" }
+            if (-not ($pendWarn[0].Line -match "mmJob=")) { Show-StepLogTail -Path $engineLogD5 -Proc $procD5 -Label "D5"; throw "D5: the init >10s warning does not carry the B-2 occupancy suffix (mmJob=/editorJobs=)" }
             $queuedWarn = @($d5Lines | Select-String -Pattern "\[plugin\] init queued >10s seq 11")
-            if (($queuedWarn | Measure-Object).Count -lt 1) { throw "D5: no 'init queued >10s seq 11' warning — the queued heartbeat did not fire" }
+            if (($queuedWarn | Measure-Object).Count -lt 1) { Show-StepLogTail -Path $engineLogD5 -Proc $procD5 -Label "D5"; throw "D5: no 'init queued >10s seq 11' warning — the queued heartbeat did not fire" }
             # Stage receipts: the worker named its stages (instantiate/prepare/commit/publish at minimum).
             $stageCount = (@($d5Lines | Select-String -Pattern "\[plugin\] init stage=") | Measure-Object).Count
-            if ($stageCount -lt 8) { throw "D5: only $stageCount 'init stage=' receipts — the stage heartbeat did not fire per phase" }
+            if ($stageCount -lt 8) { Show-StepLogTail -Path $engineLogD5 -Proc $procD5 -Label "D5"; throw "D5: only $stageCount 'init stage=' receipts — the stage heartbeat did not fire per phase" }
             # Lazy-device audit receipts: the pre-prepare path named per request.
             $devNotStarted = (@($d5Lines | Select-String -Pattern "\[plugin\] init device=not-started") | Measure-Object).Count
-            if ($devNotStarted -lt 1) { throw "D5: no 'init device=not-started' receipt — the lazy-device audit did not log the fallback path" }
+            if ($devNotStarted -lt 1) { Show-StepLogTail -Path $engineLogD5 -Proc $procD5 -Label "D5"; throw "D5: no 'init device=not-started' receipt — the lazy-device audit did not log the fallback path" }
             # EXACTLY-ONE terminal receipt per queued-init seq of this session.
             # A terminal for seq N is a line matching one of: "plugin loaded
             # ..." or "plugin kept ..." (M2 diff: an identical-set reload's
@@ -829,12 +893,11 @@ jobs:
               $count = (($loaded | Measure-Object).Count) + (($failed | Measure-Object).Count) + (($supers | Measure-Object).Count)
               if ($count -ne 1) {
                 Write-Host "seq $n -> loaded=$(($loaded | Measure-Object).Count) failed=$(($failed | Measure-Object).Count) superseded=$(($supers | Measure-Object).Count)"
+                Show-StepLogTail -Path $engineLogD5 -Proc $procD5 -Label "D5"
                 throw "D5 TERMINAL INVARIANT VIOLATION: seq $n has $count terminal receipt(s), exactly 1 required"
               }
             }
             Write-Host "D5 engine.log receipts: terminal-timeout + queued-behind declared, coalesced fold (21 by 20), classic pair resolved to exactly-one seq-40 terminal (superseded XOR loaded XOR kept; race timing is not contract), seq 41 failed; pending/queued >10s warnings fired; $stageCount stage receipts; device=not-started audit present; EXACTLY-ONE terminal receipt per seq for 10,11,12,20,21,40,41"
-            $procD5.WaitForExit(20000) | Out-Null
-            if (-not $procD5.HasExited -or $procD5.ExitCode -ne 0) { throw "Engine D5 did not exit cleanly (code=$($procD5.ExitCode))" }
             Write-Host "Engine D5 clean exit 0 (terminal-receipt invariant verified: no silent drops, ever)"
           } finally {
             Stop-Process -Id $procD5.Id -Force -ErrorAction SilentlyContinue
@@ -894,6 +957,7 @@ jobs:
             }
             node .github/scripts/test-engine-protocol.mjs 9387 routing "$env:SCAN_FIXTURES"
             if ($LASTEXITCODE -ne 0) {
+              Show-StepLogTail -Path $engineLogD6 -Proc $procD6 -Label "Engine D6"
               Write-Host "Engine D6 stdout:"
               if (Test-Path engine-d6-stdout.txt) { Get-Content engine-d6-stdout.txt }
               Write-Host "Engine D6 stderr:"
@@ -1039,6 +1103,7 @@ jobs:
             }
             node .github/scripts/test-engine-protocol.mjs 9388 strips "$env:SCAN_FIXTURES"
             if ($LASTEXITCODE -ne 0) {
+              Show-StepLogTail -Path $engineLogD7 -Proc $procD7 -Label "Engine D7"
               Write-Host "Engine D7 stdout:"
               if (Test-Path engine-d7-stdout.txt) { Get-Content engine-d7-stdout.txt }
               Write-Host "Engine D7 stderr:"
@@ -1050,7 +1115,13 @@ jobs:
               throw "Engine D7 strips test failed"
             }
             # ── engine.log grammar (the receipt half the harness cannot see) ──
-            Start-Sleep -Seconds 2
+            # 0.12.3 TASK D: wait for ENGINE EXIT before reading the log (the
+            # brief's option (a)) — the file is final once the process is
+            # gone; engineLog flushes per line, so exit = file final.
+            $procD7.WaitForExit(20000) | Out-Null
+            if (-not $procD7.HasExited) { Show-StepLogTail -Path $engineLogD7 -Proc $procD7 -Label "Engine D7"; throw "Engine D7 still running 20s after the harness exit — shutdown hung (dump above names the last phase)" }
+            if ($procD7.ExitCode -ne 0) { Show-StepLogTail -Path $engineLogD7 -Proc $procD7 -Label "Engine D7"; throw "Engine D7 exited code=$($procD7.ExitCode) before the receipt asserts (dump above)" }
+            Write-Host "Engine D7 exit verified BEFORE the log read (file final: exit 0)"
             $d7Log = @(Get-Content $engineLogD7 | Select-Object -Skip $logLinesBeforeD7)
             # LITERAL receipt counting via -match + [regex]::Escape: the dump
             # filter (-match) provably sees every receipt, so the counter uses
@@ -1119,6 +1190,7 @@ jobs:
             $cnt1649 = & $d7 "[strip] wired FAILED"
             if ($cnt1649 -ne 0) { Write-Host ("D7 count miss: count=" + $cnt1649); throw "D7: unexpected strip wiring failures" }
             } catch {
+              Show-StepLogTail -Path $engineLogD7 -Proc $procD7 -Label "Engine D7"
               # DIAGNOSTIC (any grammar failure): dump the slice's strip/layout
               # lines so the actual receipt shapes are visible in the run log.
               Write-Host "D7 GRAMMAR FAILURE — the slice's [strip]/[layout] lines:"
@@ -1126,8 +1198,6 @@ jobs:
               throw
             }
             Write-Host "D7 engine.log receipts: v=1/2 exactly-once, teardown x2 + R4 flush (held>=1), R3 guard + push, layout receipts 4ch->2ch, R1 rejection, stats drains"
-            $procD7.WaitForExit(20000) | Out-Null
-            if (-not $procD7.HasExited -or $procD7.ExitCode -ne 0) { throw "Engine D7 did not exit cleanly (code=$($procD7.ExitCode))" }
             Write-Host "Engine D7 clean exit 0 (strip atomicity + riders verified: no silent dead wires, ever)"
           } finally {
             Stop-Process -Id $procD7.Id -Force -ErrorAction SilentlyContinue
@@ -1169,6 +1239,7 @@ jobs:
             }
             node .github/scripts/test-engine-protocol.mjs 9389 limiter "$env:SCAN_FIXTURES"
             if ($LASTEXITCODE -ne 0) {
+              Show-StepLogTail -Path $engineLogD8 -Proc $procD8 -Label "Engine D8"
               Write-Host "Engine D8 stdout:"
               if (Test-Path engine-d8-stdout.txt) { Get-Content engine-d8-stdout.txt }
               Write-Host "Engine D8 stderr:"
@@ -1188,7 +1259,13 @@ jobs:
             if ($hotPeakVal -lt 1.15 -or $hotPeakVal -gt 1.27) { throw "D8: fixture hot peak $hotPeakVal outside [1.15, 1.27] (expected ~1.211, R-B's real measured failure — meaningfully over the ceiling)" }
             Write-Host "D8 fixture-side proof: hot peak $hotPeakVal (meaningfully over the 1.0 ceiling)"
             # -- engine.log grammar (the receipt half) --
-            Start-Sleep -Seconds 2
+            # 0.12.3 TASK D: wait for ENGINE EXIT before reading the log (the
+            # brief's option (a)) — the file is final once the process is
+            # gone; engineLog flushes per line, so exit = file final.
+            $procD8.WaitForExit(20000) | Out-Null
+            if (-not $procD8.HasExited) { Show-StepLogTail -Path $engineLogD8 -Proc $procD8 -Label "Engine D8"; throw "Engine D8 still running 20s after the harness exit — shutdown hung (dump above names the last phase)" }
+            if ($procD8.ExitCode -ne 0) { Show-StepLogTail -Path $engineLogD8 -Proc $procD8 -Label "Engine D8"; throw "Engine D8 exited code=$($procD8.ExitCode) before the receipt asserts (dump above)" }
+            Write-Host "Engine D8 exit verified BEFORE the log read (file final: exit 0)"
             $d8Log = @(Get-Content $engineLogD8 | Select-Object -Skip $logLinesBeforeD8)
             $d8 = { param($needle) @($d8Log | Where-Object { $_ -match [regex]::Escape($needle) }).Count }
             try {
@@ -1207,14 +1284,13 @@ jobs:
             if ($grMaxVal -lt 1.0 -or $grMaxVal -gt 4.0) { throw "D8: session grMax $grMaxVal outside [1.0, 4.0] dB (the ~1.211 vector maps to ~2.45 dB of knee reduction)" }
             Write-Host "D8 engine.log receipts: armed x1, gr advance x$cntGr, peak receipts name the armed stage, ZERO clip advances (post-limiter zero), [stop] grMax $grMaxVal dB"
             } catch {
+              Show-StepLogTail -Path $engineLogD8 -Proc $procD8 -Label "Engine D8"
               # DIAGNOSTIC (any grammar failure): dump the slice's audio/stop
               # lines so the actual receipt shapes are visible in the run log.
               Write-Host "D8 GRAMMAR FAILURE — the slice's [audio]/[stop] lines:"
               $d8Log | Where-Object { $_ -match "\[audio\]|\[stop\]" } | ForEach-Object { Write-Host $_ }
               throw
             }
-            $procD8.WaitForExit(20000) | Out-Null
-            if (-not $procD8.HasExited -or $procD8.ExitCode -ne 0) { throw "Engine D8 did not exit cleanly (code=$($procD8.ExitCode))" }
             Write-Host "Engine D8 clean exit 0 (the brickwall held: over-ceiling in, mapped knee out, zero clips)"
           } finally {
             Stop-Process -Id $procD8.Id -Force -ErrorAction SilentlyContinue
@@ -1238,13 +1314,20 @@ jobs:
             }
             node .github/scripts/test-engine-protocol.mjs 9390 limiter "$env:SCAN_FIXTURES"
             if ($LASTEXITCODE -ne 0) {
+              Show-StepLogTail -Path $engineLogD8 -Proc $procD8b -Label "Engine D8b"
               Write-Host "Engine D8b stdout:"
               if (Test-Path engine-d8b-stdout.txt) { Get-Content engine-d8b-stdout.txt }
               Write-Host "Engine D8b stderr:"
               if (Test-Path engine-d8b-stderr.txt) { Get-Content engine-d8b-stderr.txt }
               throw "Engine D8b bypass test failed"
             }
-            Start-Sleep -Seconds 2
+            # 0.12.3 TASK D: wait for ENGINE EXIT before reading the log (the
+            # brief's option (a)) — the file is final once the process is
+            # gone; engineLog flushes per line, so exit = file final.
+            $procD8b.WaitForExit(20000) | Out-Null
+            if (-not $procD8b.HasExited) { Show-StepLogTail -Path $engineLogD8 -Proc $procD8b -Label "Engine D8b"; throw "Engine D8b still running 20s after the harness exit — shutdown hung (dump above names the last phase)" }
+            if ($procD8b.ExitCode -ne 0) { Show-StepLogTail -Path $engineLogD8 -Proc $procD8b -Label "Engine D8b"; throw "Engine D8b exited code=$($procD8b.ExitCode) before the receipt asserts (dump above)" }
+            Write-Host "Engine D8b exit verified BEFORE the log read (file final: exit 0)"
             $d8bLog = @(Get-Content $engineLogD8 | Select-Object -Skip $logLinesBeforeD8b)
             $d8b = { param($needle) @($d8bLog | Where-Object { $_ -match [regex]::Escape($needle) }).Count }
             try {
@@ -1256,12 +1339,11 @@ jobs:
             if ($null -eq $stopBLine) { throw "D8b: the [stop] receipt must name the bypass" }
             Write-Host "D8b engine.log receipts: BYPASS armed x1, clip counter advanced x$cntClipB, [stop] names the bypass (grMax 0.00)"
             } catch {
+              Show-StepLogTail -Path $engineLogD8 -Proc $procD8b -Label "Engine D8b"
               Write-Host "D8b GRAMMAR FAILURE — the slice's [audio]/[stop] lines:"
               $d8bLog | Where-Object { $_ -match "\[audio\]|\[stop\]" } | ForEach-Object { Write-Host $_ }
               throw
             }
-            $procD8b.WaitForExit(20000) | Out-Null
-            if (-not $procD8b.HasExited -or $procD8b.ExitCode -ne 0) { throw "Engine D8b did not exit cleanly (code=$($procD8b.ExitCode))" }
             Write-Host "Engine D8b clean exit 0 (the bypass run: the counter advance is real — the D8a zero is not vacuous)"
           } finally {
             Stop-Process -Id $procD8b.Id -Force -ErrorAction SilentlyContinue
@@ -1304,6 +1386,7 @@ jobs:
             }
             node .github/scripts/test-engine-protocol.mjs 9390 editor "$env:SCAN_FIXTURES"
             if ($LASTEXITCODE -ne 0) {
+              Show-StepLogTail -Path $engineLogD9 -Proc $procD9 -Label "Engine D9"
               Write-Host "Engine D9 stdout:"
               if (Test-Path engine-d9-stdout.txt) { Get-Content engine-d9-stdout.txt }
               Write-Host "Engine D9 stderr:"
@@ -1311,30 +1394,35 @@ jobs:
               if (Test-Path $engineLogD9) { Write-Host "Engine D9 engine.log slice (last 120 lines):"; Get-Content $engineLogD9 | Select-Object -Last 120 }
               throw "Harness D9 (editor mode) failed"
             }
+            # 0.12.3 TASK D: wait for ENGINE EXIT before reading the log (the
+            # brief's option (a)) — the file is final once the process is
+            # gone; engineLog flushes per line, so exit = file final.
+            $procD9.WaitForExit(20000) | Out-Null
+            if (-not $procD9.HasExited) { Show-StepLogTail -Path $engineLogD9 -Proc $procD9 -Label "Engine D9"; throw "Engine D9 still running 20s after the harness exit — shutdown hung (dump above names the last phase)" }
+            if ($procD9.ExitCode -ne 0) { Show-StepLogTail -Path $engineLogD9 -Proc $procD9 -Label "Engine D9"; throw "Engine D9 exited code=$($procD9.ExitCode) before the receipt asserts (dump above)" }
+            Write-Host "Engine D9 exit verified BEFORE the log read (file final: exit 0)"
             $d9Lines = Get-Content $engineLogD9 | Select-Object -Skip $logLinesBeforeD9
             $jamProof = Select-String -Path "engine-d9-stdout.txt" -Pattern "editor-jam call=2 sleeping 12000 ms"
-            if (-not $jamProof) { throw "D9: the editor-jam receipt is missing (SCORCH_TESTVST_EDITOR_JAM_MS did not reach the fixture, or the call>=2 gate mis-fired)" }
+            if (-not $jamProof) { Show-StepLogTail -Path $engineLogD9 -Proc $procD9 -Label "Engine D9"; throw "D9: the editor-jam receipt is missing (SCORCH_TESTVST_EDITOR_JAM_MS did not reach the fixture, or the call>=2 gate mis-fired)" }
             $fold2 = @($d9Lines | Select-String -Pattern "\[editor\] open coalesced instance=inst-a duplicate=2")
-            if (($fold2 | Measure-Object).Count -ne 1) { throw "D9: exactly one 'open coalesced duplicate=2' expected, got $(($fold2 | Measure-Object).Count)" }
+            if (($fold2 | Measure-Object).Count -ne 1) { Show-StepLogTail -Path $engineLogD9 -Proc $procD9 -Label "Engine D9"; throw "D9: exactly one 'open coalesced duplicate=2' expected, got $(($fold2 | Measure-Object).Count)" }
             $fold3 = @($d9Lines | Select-String -Pattern "\[editor\] open coalesced instance=inst-a duplicate=3")
-            if (($fold3 | Measure-Object).Count -ne 1) { throw "D9: exactly one 'open coalesced duplicate=3' expected, got $(($fold3 | Measure-Object).Count)" }
+            if (($fold3 | Measure-Object).Count -ne 1) { Show-StepLogTail -Path $engineLogD9 -Proc $procD9 -Label "Engine D9"; throw "D9: exactly one 'open coalesced duplicate=3' expected, got $(($fold3 | Measure-Object).Count)" }
             $pendingD9 = @($d9Lines | Select-String -Pattern "\[editor\] open pending >10s instance=inst-a folds=2")
-            if (($pendingD9 | Measure-Object).Count -ne 1) { throw "D9: exactly one 'open pending >10s ... folds=2' declaration expected, got $(($pendingD9 | Measure-Object).Count)" }
+            if (($pendingD9 | Measure-Object).Count -ne 1) { Show-StepLogTail -Path $engineLogD9 -Proc $procD9 -Label "Engine D9"; throw "D9: exactly one 'open pending >10s ... folds=2' declaration expected, got $(($pendingD9 | Measure-Object).Count)" }
             if (-not ($pendingD9[0].Line -match "mmJob=openEditor\(inst-a,Scorch Test Synth\) for \d+s editorJobs=\d+")) {
               Write-Host $pendingD9[0].Line
               throw "D9: the >10s declaration does not NAME the blocker (mmJob=openEditor(...) editorJobs=N missing) - the B-2 occupancy suffix did not ship"
             }
             $openedD9 = @($d9Lines | Select-String -Pattern "\[editor\] opened instance=inst-a")
-            if (($openedD9 | Measure-Object).Count -ne 1) { throw "D9: exactly one '[editor] opened instance=inst-a' expected (no window multiplication), got $(($openedD9 | Measure-Object).Count)" }
+            if (($openedD9 | Measure-Object).Count -ne 1) { Show-StepLogTail -Path $engineLogD9 -Proc $procD9 -Label "Engine D9"; throw "D9: exactly one '[editor] opened instance=inst-a' expected (no window multiplication), got $(($openedD9 | Measure-Object).Count)" }
             $closedD9 = @($d9Lines | Select-String -Pattern "\[editor\] closed instance=inst-a")
-            if (($closedD9 | Measure-Object).Count -ne 1) { throw "D9: exactly one '[editor] closed instance=inst-a' expected, got $(($closedD9 | Measure-Object).Count)" }
+            if (($closedD9 | Measure-Object).Count -ne 1) { Show-StepLogTail -Path $engineLogD9 -Proc $procD9 -Label "Engine D9"; throw "D9: exactly one '[editor] closed instance=inst-a' expected, got $(($closedD9 | Measure-Object).Count)" }
             $mmUnrespD9 = @($d9Lines | Select-String -Pattern "\[mm\] message thread unresponsive")
-            if (($mmUnrespD9 | Measure-Object).Count -lt 1) { throw "D9: no 'm] unresponsive' receipt - the heartbeat did not notice the 12 s createEditor jam" }
+            if (($mmUnrespD9 | Measure-Object).Count -lt 1) { Show-StepLogTail -Path $engineLogD9 -Proc $procD9 -Label "Engine D9"; throw "D9: no 'm] unresponsive' receipt - the heartbeat did not notice the 12 s createEditor jam" }
             $namedUnresp = @($mmUnrespD9 | Where-Object { $_.Line -match "mmJob=openEditor\(" })
             if (($namedUnresp | Measure-Object).Count -lt 1) { throw "D9: the unresponsive receipt does not name mmJob=openEditor(...) - the B-2 occupancy suffix did not ship" }
             Write-Host "D9 receipts: editor-jam call=2, fold x2 (duplicate=2,3), pending >10s folds=2, mmJob=openEditor named on heartbeat + watchdog, exactly-one opened/closed"
-            $procD9.WaitForExit(20000) | Out-Null
-            if (-not $procD9.HasExited -or $procD9.ExitCode -ne 0) { throw "Engine D9 did not exit cleanly (code=$($procD9.ExitCode))" }
             Write-Host "Engine D9 clean exit 0 (field-gate B: the next wedge names its blocker, duplicates fold, ever)"
           } finally {
             Stop-Process -Id $procD9.Id -Force -ErrorAction SilentlyContinue
@@ -1362,6 +1450,7 @@ jobs:
             }
             node .github/scripts/test-engine-protocol.mjs 9382 scale
             if ($LASTEXITCODE -ne 0) {
+              Show-StepLogTail -Path (Join-Path $env:APPDATA "scorch\engine.log") -Proc $procE -Label "Engine E"
               Write-Host "Engine E stdout:"
               if (Test-Path engine-e-stdout.txt) { Get-Content engine-e-stdout.txt }
               Write-Host "Engine E stderr:"

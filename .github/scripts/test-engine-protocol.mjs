@@ -1740,11 +1740,20 @@ ws.addEventListener("message", (event) => {
         setTimeout(() => {
           if (trPhase === 3 && trJamErr && trQueuedErr) {
             trPhase = 4;
+            setTimeout(() => { if (trPhase === 4 && !trCleanLoaded) fail("terminal: seq 12's clean-reload 'loaded' never arrived within 30s (phase 4 stall — previously a silent 150s timeout)"); }, 30000);
             console.log("[test] sending the CLEAN reload (seq 12) — the worker recovered from the jam");
             ws.send(JSON.stringify(trLoad(12)));
           }
         }, settleMs);
       }
+    } else if (msg.type === "plugin_state" && msg.state === "error" && trPhase >= 4 && trPhase <= 11) {
+      // TASK D hardening: outside phases 3/12 a plugin_state error had NO
+      // waiter — the machine silently ignored it and stalled to the 150 s
+      // watchdog whose dump names no receipt (the D5 attempt-3 shape:
+      // a bare failure naming nothing). Fail HERE, naming the receipt,
+      // instead of stalling. NOT a weakening — the opposite: an unbounded
+      // silent stall becomes a bounded named failure.
+      fail(`terminal: plugin_state error with no waiter in phase ${trPhase} (the machine would have stalled to the 150s timeout): ${JSON.stringify(msg)}`);
     } else if (msg.type === "plugin_state" && msg.state === "loaded" && msg.instanceId === "hosted" && trPhase <= 9) {
       if (trPhase === 4) {
         trCleanLoaded = true;
@@ -1759,9 +1768,11 @@ ws.addEventListener("message", (event) => {
           trPhase = 7;
           console.log("[test] mid-play reload answered REUSED ✓ — sending openEditor: the editor reopen decoupled from load");
           ws.send(JSON.stringify({ type: "openEditor" }));
+          setTimeout(() => { if (trPhase === 7 && !trEditorOpenOk) fail("terminal: editorOpened/editor_unavailable never arrived within 20s of openEditor (phase 7 stall)"); }, 20000);
         } else if (trReuseCount === 2) {
           trPhase = 9;
           console.log("[test] load-carried openEditor (seq 14) reuse receipt ✓ — the editor was requested by the LOAD itself");
+          setTimeout(() => { if ((trPhase === 9 || trPhase === 8.5) && !trStopped) fail("terminal: the transport stop (playing=false) never arrived within 25s of the carried-editor flow (phase 9/8.5 stall)"); }, 25000);
           // The editorOpened for the carried intent arrives next (phase 9).
         }
       } else {
@@ -1783,6 +1794,7 @@ ws.addEventListener("message", (event) => {
       console.log(`[test] editor OPENED after "reused" ✓ (${msg.width}x${msg.height}) — the reopen is decoupled from load — closing`);
       trPhase = 8;
       ws.send(JSON.stringify({ type: "closeEditor" }));
+      setTimeout(() => { if (trPhase === 8 && !trEditorCloseOk) fail("terminal: editorClosed never arrived within 20s of closeEditor (phase 8 stall)"); }, 20000);
     } else if (msg.type === "editorClosed" && trPhase === 8) {
       trEditorCloseOk = true;
       console.log("[test] editor CLOSED ✓ — sending the load-carried openEditor reload (seq 14, openEditor:true, mid-play reuse)");
@@ -1820,6 +1832,7 @@ ws.addEventListener("message", (event) => {
       trPhase = 11;
       ws.send(JSON.stringify(trLoad(20)));
       ws.send(JSON.stringify(trLoad(21)));   // must FOLD into 20's init
+      setTimeout(() => { if (trPhase === 11 && !trSuppLoaded) fail("terminal: seq 20/21's folded 'loaded' never arrived within 30s (phase 11 stall — the fold may have missed; an error twin would now be named by the no-waiter guard)"); }, 30000);
     } else if (msg.type === "plugin_state" && msg.state === "loaded" && msg.instanceId === "hosted" && trPhase === 11) {
       trSuppLoaded = true;
       console.log("[test] seq 20 LOADED ✓ (seq 21 folded into its init — one instantiate for both) — sending the classic supersede pair (seq 40 fixture, seq 41 bogus)");
@@ -1829,6 +1842,7 @@ ws.addEventListener("message", (event) => {
         type: "load", seq: 41, events: trEvents, meta: TR_META, channels: { t1: 1 },
         plugin: trBogusBody(),
       }));
+      setTimeout(() => { if (trPhase === 12 && !trBogus2Err) fail("terminal: seq 41's failed-fast error twin never arrived within 30s (phase 12 stall)"); }, 30000);
     } else if (msg.type === "plugin_state" && msg.state === "error" && trPhase === 12) {
       if (/no plugin types found/.test(msg.detail ?? "")) {
         trBogus2Err = true;
