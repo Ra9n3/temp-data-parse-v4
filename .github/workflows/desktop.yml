@@ -869,6 +869,21 @@ jobs:
           $engineLogD6 = Join-Path $env:APPDATA "scorch\engine.log"
           $logLinesBeforeD6 = 0
           if (Test-Path $engineLogD6) { $logLinesBeforeD6 = (Get-Content $engineLogD6 | Measure-Object -Line).Lines }
+          # 0.12.3 D6 evidence change (TASK C item 1): on ANY receipt-count
+          # mismatch, dump the tail of engine.log to the step console BEFORE
+          # throwing — the next failed run then shows whether the missing
+          # receipt is genuinely absent from the file or the read raced its
+          # writer. engineLog appends are per-line open/flush/close
+          # (juce File::appendText), so a line missing at read time means
+          # 'not written YET', never 'buffered but invisible'.
+          function Show-D6LogTail([string]$path, [int]$n) {
+            if (Test-Path $path) {
+              Write-Host "D6 evidence dump: last $n lines of engine.log:"
+              Get-Content $path -Tail $n | ForEach-Object { Write-Host "  $_" }
+            } else {
+              Write-Host "D6 evidence dump: engine.log NOT FOUND at $path"
+            }
+          }
           $procD6 = Start-Process -FilePath "engine/build/scorch-engine.exe" -ArgumentList "--port","9387","--null-audio" -PassThru -NoNewWindow -RedirectStandardOutput "engine-d6-stdout.txt" -RedirectStandardError "engine-d6-stderr.txt"
           Start-Sleep -Seconds 3
           try {
@@ -915,33 +930,59 @@ jobs:
             # applied table, v strictly +1: v=1, v=2, v=3.
             foreach ($v in 1,2,3) {
               $maps = @($d6Lines | Select-String -Pattern "\[routing\] route applied: mapping v=$v tracks=3 ")
-              if (($maps | Measure-Object).Count -ne 1) { throw "D6: exactly one 'route applied: mapping v=$v tracks=3' expected, got $(($maps | Measure-Object).Count)" }
+              if (($maps | Measure-Object).Count -ne 1) { Show-D6LogTail $engineLogD6 40; throw "D6: exactly one 'route applied: mapping v=$v tracks=3' expected, got $(($maps | Measure-Object).Count)" }
             }
             # Per-track receipts: t1 (track=1) bound to BOTH instances across
             # the run (v1/v3 → inst-a ch1; v2 → inst-b ch1).
             $t1a = (@($d6Lines | Select-String -Pattern "\[routing\] route applied: track=1 -> instance=inst-a ch=1") | Measure-Object).Count
             $t1b = (@($d6Lines | Select-String -Pattern "\[routing\] route applied: track=1 -> instance=inst-b ch=1") | Measure-Object).Count
-            if ($t1a -lt 2 -or $t1b -lt 1) { throw "D6: track=1 receipts wrong (inst-a=$t1a need >=2 across v1+v3, inst-b=$t1b need >=1 for v2)" }
+            if ($t1a -lt 2 -or $t1b -lt 1) { Show-D6LogTail $engineLogD6 40; throw "D6: track=1 receipts wrong (inst-a=$t1a need >=2 across v1+v3, inst-b=$t1b need >=1 for v2)" }
             # R1: exactly ONE rejection, naming the unknown instance.
             $rejects = @($d6Lines | Select-String -Pattern "\[routing\] route rejected: reason=.*unknown instanceId")
-            if (($rejects | Measure-Object).Count -ne 1) { throw "D6: exactly one 'route rejected: reason=... unknown instanceId' expected, got $(($rejects | Measure-Object).Count)" }
+            if (($rejects | Measure-Object).Count -ne 1) { Show-D6LogTail $engineLogD6 40; throw "D6: exactly one 'route rejected: reason=... unknown instanceId' expected, got $(($rejects | Measure-Object).Count)" }
             # 0.12.3 R-5: exactly ONE ch17 rejection at the live boundary,
             # naming the 1-16 bound + the track (the '.' spans the dash so
             # the pattern is encoding-proof against the en-dash).
             $rtCh17 = @($d6Lines | Select-String -Pattern "\[routing\] route rejected: reason=channel must be an integer 1.16 \(track t1\)")
-            if (($rtCh17 | Measure-Object).Count -ne 1) { throw "D6: exactly one ch17 live-table rejection expected, got $(($rtCh17 | Measure-Object).Count)" }
+            if (($rtCh17 | Measure-Object).Count -ne 1) { Show-D6LogTail $engineLogD6 40; throw "D6: exactly one ch17 live-table rejection expected, got $(($rtCh17 | Measure-Object).Count)" }
             # 0.12.3 R-6: the load-path refusal — a load whose routing map
             # carries ch17 REFUSES the whole plugin set (named bound + track).
             $loadRef = @($d6Lines | Select-String -Pattern "\[load\] plugin set REFUSED: engine channel must be an integer 1.16 \(track t9\)")
-            if (($loadRef | Measure-Object).Count -ne 1) { throw "D6: exactly one load-path ch17 refusal expected, got $(($loadRef | Measure-Object).Count)" }
+            if (($loadRef | Measure-Object).Count -ne 1) { Show-D6LogTail $engineLogD6 40; throw "D6: exactly one load-path ch17 refusal expected, got $(($loadRef | Measure-Object).Count)" }
             # The unmapped-drop receipts: t4 is track slot 4; 6 NOTE_ON +
             # 6 NOTE_OFF = 12 dropped events. Two shapes: the 1 Hz DELTA
             # lines (timing-dependent split) and the FINAL cumulative line
             # at shutdown (exactly 12 — no silent drops at exit).
             $dropDeltas = @($d6Lines | Select-String -Pattern "\[routing\] track 4 unmapped, (\d+) notes dropped \(t4\)$")
-            if (($dropDeltas | Measure-Object).Count -lt 1) { throw "D6: no 'track 4 unmapped, N notes dropped' delta receipt — the 1 Hz drop sampler is silent" }
-            $dropFinal = @($d6Lines | Select-String -Pattern "\[routing\] track 4 unmapped, (\d+) notes dropped \(t4\) \[final at shutdown\]")
-            if (($dropFinal | Measure-Object).Count -ne 1) { throw "D6: exactly one 'track 4 unmapped ... [final at shutdown]' receipt expected, got $(($dropFinal | Measure-Object).Count)" }
+            if (($dropDeltas | Measure-Object).Count -lt 1) { Show-D6LogTail $engineLogD6 40; throw "D6: no 'track 4 unmapped, N notes dropped' delta receipt — the 1 Hz drop sampler is silent" }
+            $dropFinalPattern = "\[routing\] track 4 unmapped, (\d+) notes dropped \(t4\) \[final at shutdown\]"
+            $dropFinal = @($d6Lines | Select-String -Pattern $dropFinalPattern)
+            # 0.12.3 D6 bounded poll (TASK C item 2): the [final at shutdown]
+            # drain is the TAIL of the engine's shutdown chain (after several
+            # bounded 1-s-slice thread joins + editor close), while $d6Lines
+            # is snapshotted ~2 s after the harness exits at 'connection
+            # closed' — the read can lose that race on slower disks (CI 2/2,
+            # local green; static audit: the counter has ONE write site, no
+            # reset path, and the drain grammar is untouched since M3). Poll
+            # the FILE up to 5 s in 100 ms steps, logging each miss; stop
+            # early only once the process has exited (file provably final).
+            # The exactly-one assertion itself is UNCHANGED either way.
+            $d6WaitN = 0
+            while ((($dropFinal | Measure-Object).Count -lt 1) -and ($d6WaitN -lt 50)) {
+              Start-Sleep -Milliseconds 100
+              $d6WaitN++
+              $d6Lines = Get-Content $engineLogD6 | Select-Object -Skip $logLinesBeforeD6
+              $dropFinal = @($d6Lines | Select-String -Pattern $dropFinalPattern)
+              if (($dropFinal | Measure-Object).Count -lt 1) {
+                Write-Host "D6 shutdown-receipt poll: waiting=$d6WaitN"
+                if ($procD6.HasExited) {
+                  Write-Host "D6 shutdown-receipt poll: engine already exited (code=$($procD6.ExitCode)) with the receipt still absent — file is final, stop waiting"
+                  break
+                }
+              }
+            }
+            Write-Host "D6 shutdown-receipt poll: finished after $d6WaitN step(s), receiptCount=$(($dropFinal | Measure-Object).Count), engineHasExited=$($procD6.HasExited)"
+            if (($dropFinal | Measure-Object).Count -ne 1) { Show-D6LogTail $engineLogD6 40; throw "D6: exactly one 'track 4 unmapped ... [final at shutdown]' receipt expected, got $(($dropFinal | Measure-Object).Count)" }
             $dropTotal = [int]$dropFinal[0].Matches[0].Groups[1].Value
             # Floor = t4's 14 authored events (2 CC + 6 ON + 6 OFF). The count
             # may exceed the floor by a small bounded number: an event whose
