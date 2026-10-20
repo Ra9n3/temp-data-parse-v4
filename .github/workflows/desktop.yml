@@ -765,32 +765,41 @@ jobs:
             if (($fold | Measure-Object).Count -ne 1) { throw "D5: exactly one 'init superseded: seq=21 by=20 (coalesced' expected, got $(($fold | Measure-Object).Count)" }
             # The classic pair (40 fixture, 41 bogus) is sent back-to-back by
             # the harness: WHICH way the ~2 ms race resolves is TIMING, not
-            # contract — the contract is the terminal invariant below. Two
-            # M2-era shapes are possible when 41 loses the race, and ONE when
-            # it wins:
-            #   - "init superseded: seq=40 by=41" — 41 parsed while 40's init
-            #     was in-flight (the supersede path);
-            #   - "loaded ... | seq 40" — 40 committed a NEW instance before
-            #     41 arrived;
+            # contract — the contract is the terminal invariant below. The
+            # terminal grammar has FIVE shapes (any one of them = exactly-one):
+            #   - "init superseded: seq=40 by=41" — 41 overwrote 40 while it
+            #     was STILL QUEUED (the queued-overwrite path; the engine has
+            #     no mid-flight supersede — an in-flight request runs to its
+            #     own terminal);
+            #   - "loaded ... | seq 40" — 40 committed a NEW instance;
             #   - "kept ... | seq 40" — M2's DIFF machinery: 40's set is
-            #     IDENTICAL to seq 20's commit, so the worker classifies the
-            #     instance KEPT (zero re-instantiate — the whole M2 point),
-            #     and the per-entry KEPT line is the loaded-class terminal
-            #     (anyCommitted → registry-marked loaded; the engine is
-            #     correct, the 0.9.2-era pattern list just predated the kept
-            #     grammar). All three are exactly-one-terminal outcomes; XOR
-            #     is asserted, anything else throws.
+            #     IDENTICAL to seq 20's commit, per-entry KEPT line;
+            #   - "instance kept ... | seq 40" — the set-reuse fast path's
+            #     summary line (the "[plugin] instance kept" grammar — the
+            #     D5-95 lesson: "[plugin] kept" does NOT match it, and a
+            #     race that lands there counted 0/0/0 and threw);
+            #   - "init failed: seq=40" — 40's OWN init failing is ALSO an
+            #     exactly-one terminal (the watchdog/scan-fail grammar).
+            # All are exactly-one-terminal outcomes; the SUM across all five
+            # must be 1 (XOR), anything else throws — with the seq-40 log
+            # lines dumped so the next failure is self-diagnosing.
             $classicSup = @($d5Lines | Select-String -Pattern "\[plugin\] init superseded: seq=40 by=41\D")
             $classicLoaded = @($d5Lines | Select-String -Pattern "\[plugin\] loaded .* \| seq 40( |\$)")
             $classicKept = @($d5Lines | Select-String -Pattern "\[plugin\] kept .* \| seq 40( |\$)")
+            $classicInstKept = @($d5Lines | Select-String -Pattern "\[plugin\] instance kept .* \| seq 40( |\$)")
+            $classicFail40 = @($d5Lines | Select-String -Pattern "\[plugin\] init failed: seq=40\D")
             $supN = ($classicSup | Measure-Object).Count
             $loadN = ($classicLoaded | Measure-Object).Count
             $keptN = ($classicKept | Measure-Object).Count
-            $termTotal = $supN + $loadN + $keptN
+            $instKeptN = ($classicInstKept | Measure-Object).Count
+            $fail40N = ($classicFail40 | Measure-Object).Count
+            $termTotal = $supN + $loadN + $keptN + $instKeptN + $fail40N
             if ($termTotal -eq 1) {
-              Write-Host "D5 classic pair: seq 40 resolved to EXACTLY ONE terminal (superseded=$supN loaded=$loadN kept=$keptN) — 41 failed fast on the bogus path; the invariant held"
+              Write-Host "D5 classic pair: seq 40 resolved to EXACTLY ONE terminal (superseded=$supN loaded=$loadN kept=$keptN instanceKept=$instKeptN failed=$fail40N) — 41 failed fast on the bogus path; the invariant held"
             } else {
-              throw "D5: classic pair 40/41 must give seq 40 EXACTLY ONE terminal (superseded XOR loaded XOR kept), got superseded=$supN loaded=$loadN kept=$keptN"
+              Write-Host "D5 seq-40 terminal evidence (every line mentioning seq 40 or seq=40 in the slice):"
+              @($d5Lines | Select-String -Pattern "seq 40|seq=40") | ForEach-Object { Write-Host "   $($_.Line)" }
+              throw "D5: classic pair 40/41 must give seq 40 EXACTLY ONE terminal (superseded XOR loaded XOR kept XOR instanceKept XOR failed), got superseded=$supN loaded=$loadN kept=$keptN instanceKept=$instKeptN failed=$fail40N"
             }
             $fail41 = @($d5Lines | Select-String -Pattern "\[plugin\] init failed: seq=41\D")
             if (($fail41 | Measure-Object).Count -ne 1) { throw "D5: exactly one 'init failed: seq=41' expected, got $(($fail41 | Measure-Object).Count)" }
