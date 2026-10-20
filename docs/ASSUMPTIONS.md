@@ -3099,3 +3099,77 @@ Windows CI's device-less runner is the authoritative environment), and the
 scan crash/corrupt negative paths are Windows-only (JUCE's Linux describe
 never loads binaries without a moduleinfo.json, so a gcc-built CrashDummy
 cannot crash the scan child locally — the cl-built CI fixtures do).
+
+## Field-gate B — editor-queue coalescing, MM occupancy, peak source (0.12.1)
+
+Three field-gate receipts commissioned after the three 10:55 minidumps (the
+wedge forensics is TASK A and lands separately; these are the observability
+fixes that are correct INDEPENDENT of what the dumps name). Engine 0.12.1,
+protocol 1, vendored core untouched, the eleven prior modes untouched.
+
+### B-1 — the coalescing fold (one queued openEditor job per instance)
+
+A repeat `openEditor` for an instance whose open job is still queued,
+starting, or blocked inside `createEditor()` now FOLDS into the pending
+epoch instead of queueing another message-thread job (the field evidence:
+ELEVEN queued Falcon editors behind one wedged message thread — the same
+pattern as the 0.9.2 init coalescing fold). The fold is wire-silent (the
+queued path never replied before either); the engine.log receipt names the
+duplicate number, and the fold count rides the >10s declaration
+(`folds=2`). The pending record's `queuedAt` is NOT reset by a fold — the
+watchdog must name the TRUE age of the oldest request. Fold sites: the WS
+handler, the load-carried reuse path, and the load-carried async-publish
+path (all three queue the same job shape).
+
+### B-2 — MM occupancy receipts (the next wedge names its blocker)
+
+Every `>10s` declaration now carries `| mmJob=<name> for <s>s
+editorJobs=<n>`: what the message thread is DOING (the innermost named MM
+job — openEditor/destroyEditor/captureState/applyStrips/retireNode/
+audioDeviceReconfigure — RAII save/restore nesting, registered only when
+the thread really is the message thread via
+`getInstanceWithoutCreating`) and how deep the editor queue is (posted-
+not-finished editor jobs; JUCE exposes no queue length, the probe
+staleness in the same receipt measures the general backlog). Consumers:
+the 3f-7 heartbeat unresponsive/recovered lines, the editor >10s pending
+watchdog, and the init pending/queued >10s warnings. `mmJob=none` with a
+real staleness = idle-in-principle (queue backlog or an unnamed job). The
+3f-7 `engineDiagnostic` wire shape is unchanged (frontend contract).
+
+### B-3 — the render-peak receipt names its source (`src=graph|fallback`)
+
+The 1 Hz `[audio] render peak=` receipt gains `src=`: the peak's MATERIAL
+source for the reported buffer, from two PRE-MIX maxima the audio callback
+now keeps (`g_lastPeakGraph` — the buffer's pre-synth-add state, the graph
+render's contribution; `g_lastPeakSynth` — the synth scratch before it
+lands). Ties → `graph` (the primary path; both-zero is `graph` at peak
+0.000 — no material anywhere). Both maxima are PRE-limiter: attribution of
+material, not of the M4 output conditioning that runs post-mix. The muted
+pre-roll is excluded from both maxima (muteCount hoisted above the add
+loop) — muted samples contribute nothing by construction. Additive field
+at the line's end; every existing substring assert still matches.
+
+### The deterministic editor wedge (SCORCH_TESTVST_EDITOR_JAM_MS)
+
+The fixture's `createEditor()` sleeps N ms ONCE PER SESSION, on the SECOND
+or later call (call #1 is the VST3 wrapper's `hasEditor()` VIEW PROBE —
+JUCE's VST3 `hasEditor` creates the real editor through IPlugView, and the
+load's capability capture calls it; the open path's `createEditorIfNeeded`
+is call #2, the shape the field hit). Token-latch discipline as 0.9.2
+(`SCORCH_TESTVST_JAM_TOKEN` keys the latch file; the latch is consumed
+ONLY by a firing jam; probe children strip the knob alongside the SLOW_*
+family). Test D9 (port 9390) fires openEditor #1 then #2/#3 inside the
+12 s jam and asserts: editor-jam call=2 receipt, fold ×2, the >10s
+declaration NAMING the blocker (`mmJob=openEditor(inst-a,Scorch Test
+Synth) for Ns editorJobs=1`), exactly one opened + closed, heartbeat
+unresponsive receipt naming mmJob=openEditor, engine exit 0. Additive
+asserts elsewhere: D4's unresponsive receipts must carry `editorJobs=`,
+D5's init >10s warnings must carry `mmJob=`, the big test's render-peak
+receipts must carry `src=(graph|fallback)`.
+
+### Version note (provenance discipline)
+
+0.12.0 → 0.12.1: two different binaries must never share a version — the
+minidump provenance question ("does this build include rider X") is
+answerable from the dump's memory strings only if the version string
+disambiguates builds. The harness's 16 engineVersion asserts moved with it.

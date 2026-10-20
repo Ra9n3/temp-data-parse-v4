@@ -524,7 +524,7 @@ namespace {
 // "openEditor":true); the lazy-device window is receipted (nominal fallback +
 // device-ready race re-prepare); matching requests coalesce into an in-flight
 // init instead of answering "reused" while it is still outstanding.
-constexpr const char* kEngineVersion = "0.12.0";   // M4: the real output stage (soft-knee brickwall limiter, post-graph)
+constexpr const char* kEngineVersion = "0.12.1";   // M4 output stage + field-gate B (editor-queue coalescing, MM occupancy, peak src)
 constexpr int kProtocolVersion = 1;
 constexpr int kDefaultPort = 9377;
 constexpr int kMaxVoices = 64;
@@ -1708,11 +1708,93 @@ struct PendingEditorOpen {
     std::string iid;
     std::chrono::steady_clock::time_point queuedAt{};
     std::chrono::steady_clock::time_point startedAt{};   // default = MM job not yet run
+    // Field-gate B-1: duplicate same-instance requests FOLDED into the one
+    // queued job (the field evidence: 11 queued Falcon editors behind one
+    // wedged message thread). The count lands in the >10s watchdog receipt.
+    int folds = 0;
 };
 std::mutex g_pendingEditorMutex;
 bool g_pendingEditorActive = false;
 bool g_pendingEditorNamed = false;   // one named receipt per pending epoch
 PendingEditorOpen g_pendingEditorOpen;
+
+// ─── Field-gate B-2 — MESSAGE-THREAD OCCUPANCY FORENSICS ────────────────
+// The 3f-7 heartbeat answers "is the message thread responsive"; the field
+// wedge (three 10:55 minidumps) needs the NEXT question answered too:
+// WHAT is it doing and how deep is the queue. Two instruments, both
+// lock-light and off-MM-readable:
+//   1. NAMED MM JOBS — an RAII scope (MmNamedJob) at the top of every MM
+//      job body that can plausibly wedge (editor open/close/destroy, state
+//      capture, strips apply, node retire, device reconfigure). Registered
+//      ONLY when the thread really is the message thread
+//      (getInstanceWithoutCreating — never creating the singleton from a
+//      worker: the pump owns MM creation, the 3i comment above). Nesting
+//      follows a save/restore discipline: the innermost running job is the
+//      one named — that IS "what it is doing now".
+//   2. QUEUE DEPTH — g_editorJobsQueued counts editor-family MM jobs
+//      (open/focus/destroy) posted but not yet run. JUCE exposes no queue
+//      length; this named family is the one the field wedge piled up, and
+//      the heartbeat's probe staleness already measures the general queue
+//      latency. Both numbers ride the same occupancy suffix.
+// Consumers: the 3f-7 unresponsive/recovered lines, the editor >10s
+// pending watchdog, and the init pending/queued >10s warnings — every
+// >10s declaration now names its blocker (or names none: mmJob=none means
+// the MM is idle-in-principle and the staleness is queue backlog).
+static long long mmNowMs() {
+    return std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::steady_clock::now().time_since_epoch()).count();
+}
+static bool mmIsMessageThreadSafe() {
+    auto* mm = juce::MessageManager::getInstanceWithoutCreating();
+    return mm != nullptr && mm->isThisTheMessageThread();
+}
+std::mutex g_mmJobMutex;
+std::string g_mmJobName;          // guarded by g_mmJobMutex; empty = no named job running
+long long g_mmJobStartMs = 0;     // guarded by g_mmJobMutex
+std::atomic<int> g_editorJobsQueued{0};   // editor MM jobs posted, not yet run
+// The 3f-7 heartbeat stamp, FILE scope now (was a main() local) — the
+// watchdog sites below read it for the same occupancy suffix.
+std::atomic<long long> g_mmHeartbeatMs{0};
+struct MmNamedJob {
+    explicit MmNamedJob(const std::string& name) {
+        registered = false;
+        if (!mmIsMessageThreadSafe()) return;
+        std::lock_guard<std::mutex> lk(g_mmJobMutex);
+        prev = g_mmJobName;
+        prevStart = g_mmJobStartMs;
+        g_mmJobName = name;
+        g_mmJobStartMs = mmNowMs();
+        registered = true;
+    }
+    void rename(const std::string& name) {   // refine once more is known (plugin name)
+        if (!registered) return;
+        std::lock_guard<std::mutex> lk(g_mmJobMutex);
+        g_mmJobName = name;
+    }
+    ~MmNamedJob() {
+        if (!registered) return;
+        std::lock_guard<std::mutex> lk(g_mmJobMutex);
+        g_mmJobName = std::move(prev);
+        g_mmJobStartMs = prevStart;
+    }
+    MmNamedJob(const MmNamedJob&) = delete;
+    MmNamedJob& operator=(const MmNamedJob&) = delete;
+    bool registered;
+    std::string prev;
+    long long prevStart = 0;
+};
+// The shared suffix — appended by every >10s declaration. Lock-held string
+// build, called at most 1 Hz per site (watchdog cadences), never on the
+// audio thread.
+static std::string mmOccupancySuffix() {
+    const int q = g_editorJobsQueued.load(std::memory_order_relaxed);
+    std::lock_guard<std::mutex> lk(g_mmJobMutex);
+    if (g_mmJobName.empty())
+        return "mmJob=none editorJobs=" + std::to_string(q);
+    const long long s = (mmNowMs() - g_mmJobStartMs) / 1000;
+    return "mmJob=" + g_mmJobName + " for " + std::to_string(s) +
+           "s editorJobs=" + std::to_string(q);
+}
 
 // Defined further down (JSON helpers + close converge point); forward-declared
 // so the window class and open path can reference them.
@@ -1806,7 +1888,11 @@ public:
         // Runs on the message thread. Destroying self synchronously inside
         // the window's own callback is unsafe — schedule the deletion.
         // USER-initiated close → the state capture fires (3d-3).
-        juce::MessageManager::callAsync([iid = this->iid] { destroyEditorWindow(iid, true); });
+        ++g_editorJobsQueued;
+        juce::MessageManager::callAsync([iid = this->iid] {
+            destroyEditorWindow(iid, true);
+            --g_editorJobsQueued;
+        });
     }
 
     std::string iid;
@@ -1820,6 +1906,11 @@ public:
 // old first-guard silent return was the one receipt-less death of an
 // accepted open) and clears the pending-open record the watchdog reads.
 void openEditorWindow(const std::string& iid, HostedPlugin* owner) {
+    // Field-gate B-2: this is THE classic wedge site (createEditor() inside
+    // a plugin UI) — the named scope survives until every terminal path
+    // returns, so a hang here reads "mmJob=openEditor(...) for Ns" in the
+    // next >10s declaration.
+    MmNamedJob _mmNamedJob("openEditor(" + iid + ")");
     auto clearPending = [&iid]() {
         std::lock_guard<std::mutex> pl(g_pendingEditorMutex);
         if (g_pendingEditorActive && g_pendingEditorOpen.iid == iid) {
@@ -1861,6 +1952,7 @@ void openEditorWindow(const std::string& iid, HostedPlugin* owner) {
     // already owns an editor returns IT instead of building a second one
     // (createEditor() could hand back two live editors for one processor —
     // undefined behavior most plugins never test).
+    _mmNamedJob.rename("openEditor(" + iid + "," + owner->name + ")");
     auto* ed = owner->rawInstance.load(std::memory_order_acquire)->createEditorIfNeeded();
     if (ed == nullptr) {
         clearPending();
@@ -1919,6 +2011,9 @@ void openEditorWindow(const std::string& iid, HostedPlugin* owner) {
 // the init worker captures the OUTGOING instance itself (trigger "replace")
 // and a live-pointer race here would capture whichever instance is current.
 void destroyEditorWindow(const std::string& iid, bool captureOnClose) {
+    // Field-gate B-2: editor destructors are the other classic wedge shape
+    // (the 3f-7 heartbeat's own comment) — name the job while it runs.
+    MmNamedJob _mmNamedJob("destroyEditor(" + iid + ")");
     PluginEditorWindow* win = nullptr;
     {
         std::lock_guard<std::mutex> lock(g_editorMutex);
@@ -1954,13 +2049,18 @@ void destroyEditorWindow(const std::string& iid, bool captureOnClose) {
 
 // Schedule-close helpers (callable from ANY thread; execution on the pump).
 void closeEditorAsync(const std::string& iid) {
-    juce::MessageManager::callAsync([iid] { destroyEditorWindow(iid, true); });
+    ++g_editorJobsQueued;
+    juce::MessageManager::callAsync([iid] {
+        destroyEditorWindow(iid, true);
+        --g_editorJobsQueued;
+    });
 }
 // Shutdown path: schedule close-all and WAIT (bounded) so the pump actually
 // runs it before stopDispatchLoop — clean window teardown on graceful exit.
 // A hard kill needs nothing: the OS reaps the process's windows.
 void closeAllEditorsAtShutdown() {
     std::atomic<bool> done{false};
+    ++g_editorJobsQueued;
     juce::MessageManager::callAsync([&done] {
         std::vector<std::string> ids;
         {
@@ -1968,6 +2068,7 @@ void closeAllEditorsAtShutdown() {
             for (auto& kv : g_editors) ids.push_back(kv.first);
         }
         for (const auto& id : ids) destroyEditorWindow(id, false);
+        --g_editorJobsQueued;
         done.store(true);
     });
     for (int i = 0; i < 50 && !done.load(); ++i)
@@ -1990,6 +2091,11 @@ constexpr size_t kMaxPluginStateBytes = 2 * 1024 * 1024;   // ~2 MiB/instance
 // from any thread; plugins guard internally). try/catch: a plugin that
 // throws in getStateInformation must not kill anything.
 void captureAndBroadcastState(juce::AudioPluginInstance* inst, const HostedPlugin& h, const char* trigger) {
+    // Field-gate B-2: getStateInformation on the message thread is the wedge
+    // shape the 3f-7 heartbeat names first. The named scope registers ONLY
+    // when this really runs on the MM (it also runs on the init worker —
+    // the M1-hotfix path — where an MM occupancy claim would be a lie).
+    MmNamedJob _mmNamedJob("captureState(" + h.instanceId + ")");
     // Stage 3f-7 (4b): BEGIN before the first call into the plugin
     // (getStateInformation) and END with the elapsed ms after it — the same
     // receipt shape the editor close got, so a slow/hung capture is located
@@ -2274,6 +2380,15 @@ std::atomic<uint64_t> g_ledgerWrite{0};
 std::atomic<uint64_t> g_ledgerRead{0};
 std::atomic<bool> g_dispatchLog{false};
 std::atomic<float> g_lastPeak{0.0f};
+// Field-gate B-3: render-source attribution — per-buffer maxima of the TWO
+// render paths, measured PRE-mix (the graph render's own output state
+// before the synth tail adds over it; the synth scratch before it lands).
+// The 1 Hz render-peak receipt names src=graph|fallback from these: ties →
+// graph (the primary path), both zero → src=graph peak 0.000 (no material
+// anywhere). PRE-limiter magnitudes: attribution of MATERIAL, not of the
+// M4 output conditioning that runs after the mix.
+std::atomic<float> g_lastPeakGraph{0.0f};
+std::atomic<float> g_lastPeakSynth{0.0f};
 
 // ─── Stage 3e-2 — TRANSPORT INFO (PLAYHEAD) ────────────────────────────────
 // The host-side playhead every hosted instance sees via getPlayHead(). Owned
@@ -2794,8 +2909,27 @@ public:
                 }
             }
             const bool noPlugin = !pluginRendering;
+            // Field-gate B-3: muteCount is computed BEFORE the add loop so
+            // per-source maxima only see the UNMUTED region — muted samples
+            // contribute nothing by construction (the memset below zeroes
+            // them; the truth pass reports honest silence). graphPk reads
+            // the buffer's PRE-ADD state (the graph render's contribution
+            // alone — zero when nothing is hosted, the assign branch
+            // overwrites silence); synthPk reads the synth scratch (the
+            // fallback contribution alone). Two extra compares per sample,
+            // same order as the existing truth pass; no lock, no allocation.
+            const int64_t muteCount = startSample < 0
+                ? std::min<int64_t>(static_cast<int64_t>(numSamples), -startSample) : 0;
+            float graphPk = 0.0f, synthPk = 0.0f;
             for (int s = 0; s < numSamples; ++s) {
                 const float out = synthScratch[static_cast<size_t>(s)];
+                if (s >= muteCount) {
+                    synthPk = std::max(synthPk, std::fabs(out));
+                    if (!noPlugin) {
+                        for (int ch = 0; ch < numOutputChannels; ++ch)
+                            graphPk = std::max(graphPk, std::fabs(outputChannelData[ch][s]));
+                    }
+                }
                 if (noPlugin) {
                     for (int ch = 0; ch < numOutputChannels; ++ch)
                         outputChannelData[ch][s] = out;
@@ -2804,6 +2938,8 @@ public:
                         outputChannelData[ch][s] += out;
                 }
             }
+            g_lastPeakGraph.store(graphPk, std::memory_order_relaxed);
+            g_lastPeakSynth.store(synthPk, std::memory_order_relaxed);
             // Phase 2 — MUTED PRE-ROLL, sample-accurate: samples before
             // timeline zero rendered the latency-line priming + the
             // pre-fired start-tick events into the buffer; they are
@@ -2811,8 +2947,6 @@ public:
             // the grid position of playStartTick. The peak truth pass below
             // measures the POST-mute buffer — a muted pre-roll reports
             // peak 0 (honest silence, no phantom pre-roll peak).
-            const int64_t muteCount = startSample < 0
-                ? std::min<int64_t>(static_cast<int64_t>(numSamples), -startSample) : 0;
             if (muteCount > 0) {
                 for (int ch = 0; ch < numOutputChannels; ++ch)
                     std::memset(outputChannelData[ch], 0,
@@ -2897,6 +3031,7 @@ public:
         // callback object — the same one-address guarantee Stage 3e-2 built).
         EnginePlayHead* ph = &playHead;
         juce::MessageManager::callAsync([rate, buf, devName, devType, ph] {
+            MmNamedJob _mmNamedJob("audioDeviceReconfigure");   // field-gate B-2
             if (g_host.graph() == nullptr) {
                 engineLog("[audio] device start — no host graph (nothing hosted yet): reconfigure skipped");
                 return;
@@ -4943,18 +5078,35 @@ void handle_load(const juce::var& json, ix::WebSocket& ws, size_t byteSize) {
                     // the instance at run time); a repeat request RAISES.
                     if (loadWantsEditor && !r.instanceId.empty()) {
                         const std::string iid = r.instanceId;
+                        // Field-gate B-1: the load-carried intent folds too —
+                        // an open job for this instance already queued/in
+                        // flight satisfies it; queueing a second one would
+                        // rebuild the same pileup.
+                        bool folded = false;
                         {
                             std::lock_guard<std::mutex> pl(g_pendingEditorMutex);
-                            g_pendingEditorOpen = PendingEditorOpen{ iid, std::chrono::steady_clock::now(), {} };
-                            g_pendingEditorActive = true;
-                            g_pendingEditorNamed = false;
+                            if (g_pendingEditorActive && g_pendingEditorOpen.iid == iid) {
+                                ++g_pendingEditorOpen.folds;
+                                folded = true;
+                            } else {
+                                g_pendingEditorOpen = PendingEditorOpen{ iid, std::chrono::steady_clock::now(), {}, 0 };
+                                g_pendingEditorActive = true;
+                                g_pendingEditorNamed = false;
+                            }
                         }
-                        juce::MessageManager::callAsync([iid] {
-                            HostedPlugin* hh = findLiveInstance(iid);
-                            openEditorWindow(iid, hh);
-                        });
-                        engineLog("[editor] open requested instance=" + iid +
-                                  " (load-carried openEditor — reuse path, editor reopen decoupled from load)");
+                        if (folded) {
+                            engineLog("[editor] open coalesced instance=" + iid +
+                                      " (load-carried openEditor — a job for this instance is already queued/starting; folded)");
+                        } else {
+                            ++g_editorJobsQueued;
+                            juce::MessageManager::callAsync([iid] {
+                                HostedPlugin* hh = findLiveInstance(iid);
+                                openEditorWindow(iid, hh);
+                                --g_editorJobsQueued;
+                            });
+                            engineLog("[editor] open requested instance=" + iid +
+                                      " (load-carried openEditor — reuse path, editor reopen decoupled from load)");
+                        }
                     }
                 }
                 std::cout << "[engine] plugin set reused (mid-play, seq " << seq
@@ -5578,6 +5730,7 @@ struct StripsApplyOutcome {
 static void applyStripsJob(std::shared_ptr<StripsApplyOutcome> out,
                            std::shared_ptr<std::vector<StripEntry>> wanted,
                            std::shared_ptr<std::vector<std::string>> wantedInsts) {
+    MmNamedJob _mmNamedJob("applyStrips");   // field-gate B-2: graph mutation on the MM
     auto* graph = g_host.graph();
     if (graph == nullptr) { out->error = "no host graph"; out->done.store(true); return; }
     const auto outputID = g_host.outputNodeID();
@@ -6219,6 +6372,7 @@ void handle_open_editor(const juce::var& json, ix::WebSocket& ws) {
     if (alreadyOpen) {
         // One editor per instance: a repeat request RAISES the existing
         // window and re-echoes editorOpened (focused) — never a second one.
+        ++g_editorJobsQueued;
         juce::MessageManager::callAsync([iid] {
             PluginEditorWindow* win = nullptr;
             {
@@ -6227,6 +6381,7 @@ void handle_open_editor(const juce::var& json, ix::WebSocket& ws) {
                 if (it != g_editors.end()) win = it->second;
             }
             if (win != nullptr) win->toFront(true);
+            --g_editorJobsQueued;
         });
         ws.send(std::string("{\"type\":\"editorOpened\",\"instanceId\":\"") + escape_json(iid) +
                 "\",\"name\":\"" + escape_json(live->name) + "\",\"focused\":true}");
@@ -6244,15 +6399,34 @@ void handle_open_editor(const juce::var& json, ix::WebSocket& ws) {
     // instead re-resolves by id from the CURRENT set at message-thread run
     // time — this codebase's standard resolve-from-current-load pattern — and
     // the abandon receipt in openEditorWindow names any retirement.
+    // Field-gate B-1 — THE COALESCING FOLD. A request arriving while this
+    // instance's open job is still queued/starting (or blocked inside
+    // createEditor) folds into it: ONE queued openEditor job per instance,
+    // ever. The field evidence is 11 queued Falcon editors behind one wedged
+    // message thread — each accepted request used to queue its own MM job,
+    // and a queue that deep both bloats the wedge and multiplies the focus
+    // storm on recovery. Same pattern as the 0.9.2 init coalescing fold.
+    // The pending record is NOT reset here: the watchdog must name the TRUE
+    // age of the OLDEST request; the duplicate count lands in the same
+    // record and rides the >10s receipt.
     {
         std::lock_guard<std::mutex> pl(g_pendingEditorMutex);
-        g_pendingEditorOpen = PendingEditorOpen{ iid, std::chrono::steady_clock::now(), {} };
+        if (g_pendingEditorActive && g_pendingEditorOpen.iid == iid) {
+            ++g_pendingEditorOpen.folds;
+            engineLog("[editor] open coalesced instance=" + iid +
+                      " duplicate=" + std::to_string(g_pendingEditorOpen.folds + 1) +
+                      " (a job for this instance is already queued/starting — folded, not queued again)");
+            return;
+        }
+        g_pendingEditorOpen = PendingEditorOpen{ iid, std::chrono::steady_clock::now(), {}, 0 };
         g_pendingEditorActive = true;
         g_pendingEditorNamed = false;
     }
+    ++g_editorJobsQueued;
     juce::MessageManager::callAsync([iid] {
         HostedPlugin* h = findLiveInstance(iid);   // re-resolve at message-thread run time
         openEditorWindow(iid, h);
+        --g_editorJobsQueued;
     });
     engineLog("[editor] open requested instance=" + iid + " plugin=" + live->name);
 }
@@ -6304,6 +6478,7 @@ void handle_capture_state() {
 // close stays here: window teardown is message-thread property and is not
 // seconds-class.
 void retireInstanceNodeOnMessageThread(const std::string& iid) {
+    MmNamedJob _mmNamedJob("retireNode(" + iid + ")");   // field-gate B-2
     HostedPlugin* old = findLiveInstance(iid);
     if (old == nullptr || old->rawInstance.load(std::memory_order_acquire) == nullptr) {
         engineLog("[plugin] retire SKIPPED — instance not live at message-thread run (requested id \"" +
@@ -6380,11 +6555,13 @@ int main(int argc, char** argv) {
             _putenv_s("SCORCH_TESTVST_SLOW_CREATE_N", "");
             _putenv_s("SCORCH_TESTVST_SLOW_PREPARE_N", "");
             _putenv_s("SCORCH_TESTVST_SLOW_PREPARE_S", "");
+            _putenv_s("SCORCH_TESTVST_EDITOR_JAM_MS", "");
 #else
             setenv("SCORCH_TESTVST_SLOW_CREATE_S", "", 1);
             setenv("SCORCH_TESTVST_SLOW_CREATE_N", "", 1);
             setenv("SCORCH_TESTVST_SLOW_PREPARE_N", "", 1);
             setenv("SCORCH_TESTVST_SLOW_PREPARE_S", "", 1);
+            setenv("SCORCH_TESTVST_EDITOR_JAM_MS", "", 1);
 #endif
             return runProbeWorker(argv[i + 1], argv[i + 2]);
         }
@@ -6494,8 +6671,9 @@ int main(int argc, char** argv) {
     // line when fresh stamps flow again; the same transitions broadcast an
     // additive engineDiagnostic message so the frontend can name the
     // condition in a late-loadAck toast (item 5) without reading engine.log.
-    std::atomic<long long> g_mmHeartbeatMs{0};
-    std::thread mm_heartbeat_thread([&g_mmHeartbeatMs]() {
+    // (g_mmHeartbeatMs lives at FILE scope now — field-gate B-2 moved it out
+    // of main() so every >10s declaration can read the same stamp.)
+    std::thread mm_heartbeat_thread([]() {
         auto nowMs = []() {
             return std::chrono::duration_cast<std::chrono::milliseconds>(
                 std::chrono::steady_clock::now().time_since_epoch()).count();
@@ -6506,7 +6684,7 @@ int main(int argc, char** argv) {
         while (!g_should_exit.load()) {
             std::this_thread::sleep_for(std::chrono::milliseconds(1000));
             if (g_should_exit.load()) break;
-            juce::MessageManager::callAsync([&g_mmHeartbeatMs, nowMs] {
+            juce::MessageManager::callAsync([nowMs] {
                 g_mmHeartbeatMs.store(nowMs(), std::memory_order_release);
             });
             const long long now = nowMs();
@@ -6517,13 +6695,15 @@ int main(int argc, char** argv) {
                 unresponsiveNamed = true;
                 stallStartMs = last;
                 const long long s = (now - stallStartMs) / 1000;
-                engineLog("[mm] message thread unresponsive for " + std::to_string(s) + " s");
+                engineLog("[mm] message thread unresponsive for " + std::to_string(s) + " s — " +
+                          mmOccupancySuffix());
                 broadcastJson(std::string("{\"type\":\"engineDiagnostic\",\"mm\":\"unresponsive\",\"seconds\":") +
                               std::to_string(s) + "}");
             } else if (fresh && unresponsiveNamed) {
                 unresponsiveNamed = false;
                 const long long s = (now - stallStartMs) / 1000;
-                engineLog("[mm] message thread recovered after " + std::to_string(s) + " s");
+                engineLog("[mm] message thread recovered after " + std::to_string(s) + " s — " +
+                          mmOccupancySuffix());
                 broadcastJson(std::string("{\"type\":\"engineDiagnostic\",\"mm\":\"recovered\",\"seconds\":") +
                               std::to_string(s) + "}");
             }
@@ -6800,11 +6980,18 @@ int main(int argc, char** argv) {
                     if (since >= 10000) {
                         g_pendingEditorNamed = true;
                         const bool started = g_pendingEditorOpen.startedAt.time_since_epoch().count() != 0;
+                        // Field-gate B-2: the declaration carries the MM
+                        // occupancy (WHAT the message thread is doing, how
+                        // deep the editor queue is) and the B-1 fold count —
+                        // "11 queued Falcon editors" is now observable as
+                        // folds=10 on ONE job, not 11 silent queued jobs.
                         engineLog(std::string("[editor] open pending >10s instance=") +
                                   g_pendingEditorOpen.iid +
+                                  " folds=" + std::to_string(g_pendingEditorOpen.folds) +
                                   (started
                                        ? " — createEditor() has not returned; message thread blocked inside plugin editor creation"
-                                       : " — message-thread job has not started; message thread appears wedged"));
+                                       : " — message-thread job has not started; message thread appears wedged") +
+                                  " | " + mmOccupancySuffix());
                     }
                 }
             }
@@ -6852,7 +7039,15 @@ int main(int argc, char** argv) {
                               " selectorEmitted=[" + selCounts + "]" +
                               (g_limiterBypassed.load(std::memory_order_relaxed)
                                    ? " limiter=off (SCORCH_LIMITER_OFF)"
-                                   : " limiter=armed (M4 output stage, post-graph)"));
+                                   : " limiter=armed (M4 output stage, post-graph)") +
+                              // Field-gate B-3: WHOSE audio was that — the
+                              // peak's material source for THIS buffer
+                              // (pre-mix maxima; ties → graph, the primary
+                              // path; both zero → graph at peak 0.000).
+                              " src=" +
+                              (g_lastPeakGraph.load(std::memory_order_relaxed) >=
+                                       g_lastPeakSynth.load(std::memory_order_relaxed)
+                                   ? "graph" : "fallback"));
                     janitorLastPeakEmit = now;
                 }
                 // M4 (D5): the limiter gr-advance receipt — the same 1 Hz
@@ -7863,18 +8058,33 @@ int main(int argc, char** argv) {
                 // reopen decoupled from the load's own completion timing.
                 if (req.openEditor && firstCommitted != nullptr) {
                     const std::string iid = firstCommitted->instanceId;
+                    // Field-gate B-1: the async-publish fold — same contract
+                    // as the WS handler and the reuse path.
+                    bool folded = false;
                     {
                         std::lock_guard<std::mutex> pl(g_pendingEditorMutex);
-                        g_pendingEditorOpen = PendingEditorOpen{ iid, std::chrono::steady_clock::now(), {} };
-                        g_pendingEditorActive = true;
-                        g_pendingEditorNamed = false;
+                        if (g_pendingEditorActive && g_pendingEditorOpen.iid == iid) {
+                            ++g_pendingEditorOpen.folds;
+                            folded = true;
+                        } else {
+                            g_pendingEditorOpen = PendingEditorOpen{ iid, std::chrono::steady_clock::now(), {}, 0 };
+                            g_pendingEditorActive = true;
+                            g_pendingEditorNamed = false;
+                        }
                     }
-                    juce::MessageManager::callAsync([iid] {
-                        HostedPlugin* hh = findLiveInstance(iid);
-                        openEditorWindow(iid, hh);
-                    });
-                    engineLog("[editor] open requested instance=" + iid +
-                              " (load-carried openEditor — async path, editor opens at publish)");
+                    if (folded) {
+                        engineLog("[editor] open coalesced instance=" + iid +
+                                  " (load-carried openEditor — async path; a job for this instance is already queued/starting, folded)");
+                    } else {
+                        ++g_editorJobsQueued;
+                        juce::MessageManager::callAsync([iid] {
+                            HostedPlugin* hh = findLiveInstance(iid);
+                            openEditorWindow(iid, hh);
+                            --g_editorJobsQueued;
+                        });
+                        engineLog("[editor] open requested instance=" + iid +
+                                  " (load-carried openEditor — async path, editor opens at publish)");
+                    }
                 }
             } else if (initRegistryMarkTerminal(req.seq, "failed")) {
                 engineLog("[plugin] init failed: seq=" + std::to_string(req.seq) +
@@ -7996,14 +8206,14 @@ int main(int argc, char** argv) {
                                     " instance=" + (r.instanceId.empty() ? "-" : r.instanceId) +
                                     " (" + std::to_string(secs) +
                                     "s) — the init is still running (terminal declaration at " +
-                                    std::to_string(terminalMs / 1000) + "s)",
+                                    std::to_string(terminalMs / 1000) + "s) | " + mmOccupancySuffix(),
                                     false, "", ""});
                             } else {
                                 declarations.push_back({r.seq,
                                     "[plugin] init queued >10s seq " + std::to_string(r.seq) +
                                     " (" + std::to_string(secs) +
                                     "s) — the worker has not reached this request yet (terminal declaration at " +
-                                    std::to_string(terminalMs / 1000) + "s)",
+                                    std::to_string(terminalMs / 1000) + "s) | " + mmOccupancySuffix(),
                                     false, "", ""});
                             }
                         }

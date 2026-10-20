@@ -89,6 +89,21 @@
 //       per-session token; probe children inherit it, so a probe that
 //       creates the fixture also sees the latch). Absent or 0 = every
 //       create sleeps (the original behavior, unchanged for slowload).
+//   SCORCH_TESTVST_EDITOR_JAM_MS=<ms> — field-gate B-1/B-2 CI hook: the
+//       createEditor() call sleeps that long ONCE PER SESSION, on the
+//       SECOND+ call (call #1 is the VST3 wrapper's hasEditor() VIEW PROBE
+//       — JUCE's VST3 hasEditor creates the real editor through IPlugView
+//       to test availability, and that runs during the LOAD's capability
+//       capture; the open path's createEditorIfNeeded is call #2 — the
+//       wedge the field hit). The same token latch discipline —
+//       SCORCH_TESTVST_JAM_TOKEN keys the latch file; a module reload
+//       cannot re-arm it. This is the deterministic "message thread
+//       blocked inside plugin editor creation" wedge: the engine's >10s
+//       editor watchdog must name it (mmJob=openEditor(...) in the
+//       occupancy suffix), and duplicate openEditor requests fired during
+//       the jam must FOLD into the one queued job (B-1; the field evidence
+//       was 11 queued Falcon editors behind one wedged message thread).
+//       Receipt: "[testvst] editor-jam call=2 sleeping <ms> ms".
 //   SCORCH_TESTVST_SLOW_PREPARE_N=<call#> + SCORCH_TESTVST_SLOW_PREPARE_S=<seconds>
 //       — the Nth prepareToPlay call (1-based; 0 = disabled) sleeps that
 //       long. EMPIRICAL (measured 2026-10-18): JUCE 8.0.4's VST3 wrapper
@@ -114,6 +129,7 @@
 
 #pragma once
 
+#include <atomic>
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
@@ -136,6 +152,7 @@
 #define SCORCH_TESTVST_AUX_DISABLED 0
 #endif
 #include <limits>
+#include <atomic>
 #include <chrono>
 #include <thread>
 #include <juce_audio_processors/juce_audio_processors.h>
@@ -462,7 +479,44 @@ public:
                        juce::Justification::centred);
         }
     };
-    juce::AudioProcessorEditor* createEditor() override { return new TinyEditor(*this); }
+    juce::AudioProcessorEditor* createEditor() override {
+        // Field-gate B-1/B-2: the deterministic editor-creation wedge (see
+        // the header contract above). The jam fires ONCE PER SESSION, on
+        // the SECOND+ call: call #1 is the VST3 wrapper's hasEditor() view
+        // probe during the load's capability capture (JUCE's VST3
+        // hasEditor creates the real editor through IPlugView — it is NOT
+        // the wedge shape); the open path's createEditorIfNeeded is the
+        // call that must jam. The latch is consumed ONLY by a firing jam,
+        // so a closed-and-reopened editor never re-jams and the latch file
+        // survives module reloads (the 0.9.2 lesson).
+        static std::atomic<int> edCallCount{0};
+        const int call = ++edCallCount;
+        if (const char* ej = std::getenv("SCORCH_TESTVST_EDITOR_JAM_MS")) {
+            const int ms = std::atoi(ej);
+            if (ms > 0 && call >= 2) {
+                std::string tok = "editorjam";
+                if (const char* t = std::getenv("SCORCH_TESTVST_JAM_TOKEN")) tok = t;
+                std::string latchPath = "/tmp/scorch-testvst-editorjam-latch-" + tok;
+                if (const char* td = std::getenv("TEMP")) latchPath = std::string(td) + "\\scorch-testvst-editorjam-latch-" + tok;
+                else if (const char* td2 = std::getenv("TMP")) latchPath = std::string(td2) + "\\scorch-testvst-editorjam-latch-" + tok;
+                else if (const char* td3 = std::getenv("TMPDIR")) latchPath = std::string(td3) + "/scorch-testvst-editorjam-latch-" + tok;
+                bool fire = true;
+                if (std::FILE* lf = std::fopen(latchPath.c_str(), "r")) {
+                    std::fclose(lf);
+                    fire = false;
+                } else if (std::FILE* wl = std::fopen(latchPath.c_str(), "w")) {
+                    std::fputs("1", wl);
+                    std::fclose(wl);
+                }
+                if (fire) {
+                    std::fprintf(stdout, "[testvst] editor-jam call=%d sleeping %d ms (SCORCH_TESTVST_EDITOR_JAM_MS)\n", call, ms);
+                    std::fflush(stdout);
+                    std::this_thread::sleep_for(std::chrono::milliseconds(ms));
+                }
+            }
+        }
+        return new TinyEditor(*this);
+    }
     bool hasEditor() const override { return true; }
 
 private:

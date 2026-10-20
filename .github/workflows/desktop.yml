@@ -651,6 +651,11 @@ jobs:
             $d4Lines = Get-Content $engineLogD4 | Select-Object -Skip $logLinesBeforeD4
             $mmUnresp = @($d4Lines | Select-String -Pattern "\[mm\] message thread unresponsive")
             $mmRecov  = @($d4Lines | Select-String -Pattern "\[mm\] message thread recovered")
+            # Field-gate B-2: the unresponsive/recovered receipts carry the
+            # MM occupancy suffix (mmJob=<name> for Ns editorJobs=N) - the
+            # "is it stuck" receipt must also say WHAT it is stuck on.
+            $mmUnrespNamed = @($mmUnresp | Where-Object { $_.Line -match "editorJobs=" })
+            if (($mmUnrespNamed | Measure-Object).Count -lt 1) { throw "M1-hotfix: the unresponsive receipt does not carry the B-2 occupancy suffix (mmJob=/editorJobs=) - the next wedge would stay unnamed" }
             if (($mmUnresp | Measure-Object).Count -gt 2) {
               Write-Host $mmUnresp
               throw "M1-hotfix: $(($mmUnresp | Measure-Object).Count) '[mm] unresponsive' windows exceed the structural bound of 2 (create + worker prepare) — an extra heavy phase ran on the message thread"
@@ -792,6 +797,8 @@ jobs:
             # Heartbeat: the pending and queued >10s warnings fired during the jam.
             $pendWarn = @($d5Lines | Select-String -Pattern "\[plugin\] init pending >10s seq 10")
             if (($pendWarn | Measure-Object).Count -lt 1) { throw "D5: no 'init pending >10s seq 10' warning — the heartbeat did not fire during the jam" }
+            # Field-gate B-2: the init >10s warnings carry the occupancy suffix too.
+            if (-not ($pendWarn[0].Line -match "mmJob=")) { throw "D5: the init >10s warning does not carry the B-2 occupancy suffix (mmJob=/editorJobs=)" }
             $queuedWarn = @($d5Lines | Select-String -Pattern "\[plugin\] init queued >10s seq 11")
             if (($queuedWarn | Measure-Object).Count -lt 1) { throw "D5: no 'init queued >10s seq 11' warning — the queued heartbeat did not fire" }
             # Stage receipts: the worker named its stages (instantiate/prepare/commit/publish at minimum).
@@ -1198,6 +1205,78 @@ jobs:
             Remove-Item Env:\SCORCH_TESTVST_HOT_AMP -ErrorAction SilentlyContinue
           }
 
+          # Test D9 — FIELD-GATE B: the editor-queue wedge, deterministic.
+          # SCORCH_TESTVST_EDITOR_JAM_MS jams the fixture's createEditor()
+          # for 12 s ONCE PER SESSION on the SECOND call (call #1 is the VST3
+          # wrapper's hasEditor() VIEW PROBE during the load's capability
+          # capture — JUCE's VST3 hasEditor creates the real editor through
+          # IPlugView; the open path's createEditorIfNeeded is call #2, the
+          # shape the field hit). The harness fires openEditor #1, then #2
+          # and #3 INSIDE the jam:
+          #   B-1 FOLD - the duplicates must NOT queue more MM jobs: exactly
+          #     two "[editor] open coalesced ... duplicate=2/3" receipts
+          #     (wire-silent; the field evidence was ELEVEN queued Falcon
+          #     editors behind one wedged message thread);
+          #   B-2 OCCUPANCY - the >10s editor watchdog must NAME the blocker:
+          #     "[editor] open pending >10s instance=inst-a folds=2 -
+          #     createEditor() has not returned ... | mmJob=openEditor(
+          #     inst-a,Scorch Test Synth) for Ns editorJobs=1"; the heartbeat
+          #     unresponsive line carries the same suffix;
+          #   EXACTLY ONE "[editor] opened instance=inst-a" (no window
+          #     multiplication) and one close.
+          # ASCII-only needles (the D7 lesson).
+          Write-Host "=== Test D9: field-gate B (editor-queue coalescing + MM occupancy naming the blocker) ==="
+          $env:SCORCH_TESTVST_EDITOR_JAM_MS = "12000"
+          $engineLogD9 = Join-Path $env:APPDATA "scorch\engine.log"
+          $logLinesBeforeD9 = 0
+          if (Test-Path $engineLogD9) { $logLinesBeforeD9 = (Get-Content $engineLogD9 | Measure-Object -Line).Lines }
+          $procD9 = Start-Process -FilePath "engine/build/scorch-engine.exe" -ArgumentList "--port","9390" -PassThru -NoNewWindow -RedirectStandardOutput "engine-d9-stdout.txt" -RedirectStandardError "engine-d9-stderr.txt"
+          Start-Sleep -Seconds 3
+          try {
+            if ($procD9.HasExited) {
+              Write-Host "Engine D9 exited early (code=$($procD9.ExitCode)). stdout:"
+              if (Test-Path engine-d9-stdout.txt) { Get-Content engine-d9-stdout.txt }
+              throw "Engine D9 process exited before test could connect"
+            }
+            node .github/scripts/test-engine-protocol.mjs 9390 editor "$env:SCAN_FIXTURES"
+            if ($LASTEXITCODE -ne 0) {
+              Write-Host "Engine D9 stdout:"
+              if (Test-Path engine-d9-stdout.txt) { Get-Content engine-d9-stdout.txt }
+              Write-Host "Engine D9 stderr:"
+              if (Test-Path engine-d9-stderr.txt) { Get-Content engine-d9-stderr.txt }
+              if (Test-Path $engineLogD9) { Write-Host "Engine D9 engine.log slice (last 120 lines):"; Get-Content $engineLogD9 | Select-Object -Last 120 }
+              throw "Harness D9 (editor mode) failed"
+            }
+            $d9Lines = Get-Content $engineLogD9 | Select-Object -Skip $logLinesBeforeD9
+            $jamProof = Select-String -Path "engine-d9-stdout.txt" -Pattern "editor-jam call=2 sleeping 12000 ms"
+            if (-not $jamProof) { throw "D9: the editor-jam receipt is missing (SCORCH_TESTVST_EDITOR_JAM_MS did not reach the fixture, or the call>=2 gate mis-fired)" }
+            $fold2 = @($d9Lines | Select-String -Pattern "\[editor\] open coalesced instance=inst-a duplicate=2")
+            if (($fold2 | Measure-Object).Count -ne 1) { throw "D9: exactly one 'open coalesced duplicate=2' expected, got $(($fold2 | Measure-Object).Count)" }
+            $fold3 = @($d9Lines | Select-String -Pattern "\[editor\] open coalesced instance=inst-a duplicate=3")
+            if (($fold3 | Measure-Object).Count -ne 1) { throw "D9: exactly one 'open coalesced duplicate=3' expected, got $(($fold3 | Measure-Object).Count)" }
+            $pendingD9 = @($d9Lines | Select-String -Pattern "\[editor\] open pending >10s instance=inst-a folds=2")
+            if (($pendingD9 | Measure-Object).Count -ne 1) { throw "D9: exactly one 'open pending >10s ... folds=2' declaration expected, got $(($pendingD9 | Measure-Object).Count)" }
+            if (-not ($pendingD9[0].Line -match "mmJob=openEditor\(inst-a,Scorch Test Synth\) for \d+s editorJobs=\d+")) {
+              Write-Host $pendingD9[0].Line
+              throw "D9: the >10s declaration does not NAME the blocker (mmJob=openEditor(...) editorJobs=N missing) - the B-2 occupancy suffix did not ship"
+            }
+            $openedD9 = @($d9Lines | Select-String -Pattern "\[editor\] opened instance=inst-a")
+            if (($openedD9 | Measure-Object).Count -ne 1) { throw "D9: exactly one '[editor] opened instance=inst-a' expected (no window multiplication), got $(($openedD9 | Measure-Object).Count)" }
+            $closedD9 = @($d9Lines | Select-String -Pattern "\[editor\] closed instance=inst-a")
+            if (($closedD9 | Measure-Object).Count -ne 1) { throw "D9: exactly one '[editor] closed instance=inst-a' expected, got $(($closedD9 | Measure-Object).Count)" }
+            $mmUnrespD9 = @($d9Lines | Select-String -Pattern "\[mm\] message thread unresponsive")
+            if (($mmUnrespD9 | Measure-Object).Count -lt 1) { throw "D9: no 'm] unresponsive' receipt - the heartbeat did not notice the 12 s createEditor jam" }
+            $namedUnresp = @($mmUnrespD9 | Where-Object { $_.Line -match "mmJob=openEditor\(" })
+            if (($namedUnresp | Measure-Object).Count -lt 1) { throw "D9: the unresponsive receipt does not name mmJob=openEditor(...) - the B-2 occupancy suffix did not ship" }
+            Write-Host "D9 receipts: editor-jam call=2, fold x2 (duplicate=2,3), pending >10s folds=2, mmJob=openEditor named on heartbeat + watchdog, exactly-one opened/closed"
+            $procD9.WaitForExit(20000) | Out-Null
+            if (-not $procD9.HasExited -or $procD9.ExitCode -ne 0) { throw "Engine D9 did not exit cleanly (code=$($procD9.ExitCode))" }
+            Write-Host "Engine D9 clean exit 0 (field-gate B: the next wedge names its blocker, duplicates fold, ever)"
+          } finally {
+            Stop-Process -Id $procD9.Id -Force -ErrorAction SilentlyContinue
+            Remove-Item Env:\SCORCH_TESTVST_EDITOR_JAM_MS -ErrorAction SilentlyContinue
+          }
+
           # Test E — Stage 3c-hotfix: REAL-PROJECT-SIZED load. The CI gap was
           # scale; this closes it: a deterministic 13,824-event (~1.1 MB)
           # fixture is sent as ONE load message and the loadAck receipt must
@@ -1336,6 +1415,11 @@ jobs:
           if ($clipReceipts -lt 1) { throw "engine.log missing the M2 clip-counter receipt (the multi test's summed fixtures exceed unity — the counter must fire)" }
           $renderPeakReceipts = (Select-String -Path $engineLog -Pattern "\[audio\] render peak=").Count
           if ($renderPeakReceipts -lt 1) { throw "engine.log missing the M2 per-render peak receipt" }
+          # Field-gate B-3: the render-peak receipt names its MATERIAL source
+          # (src=graph - the hosted graph rendered it; src=fallback - the
+          # internal synth did) - the "whose audio was that" ambiguity is dead.
+          $srcPeakReceipts = @(Select-String -Path $engineLog -Pattern "\[audio\] render peak=.* src=(graph|fallback)")
+          if (($srcPeakReceipts | Measure-Object).Count -lt 1) { throw "engine.log render-peak receipts carry no src= attribution (field-gate B-3 did not ship)" }
           $unityReceipts = (Select-String -Path $engineLog -Pattern "output guard \(M2\): unity — no multiplication").Count
           if ($unityReceipts -lt 3) { throw "engine.log missing the M2 unity output-guard receipts (got $unityReceipts, need 3: tests A+D+E)" }
           # Stage 3c-polish: D1 device-config receipts + F3 session peak.

@@ -390,6 +390,23 @@ const limStop = () => ws.send(JSON.stringify({ type: "transport", command: "stop
 // brickwall case) and with SCORCH_LIMITER_OFF=1 in the ENGINE's env (the
 // counter-advance case). The mjs reads its own inherited copy of the knob
 // and flips its assertion set to match the engine's actual stage state.
+
+// ── Field-gate B editor-mode state (editor-queue coalescing + MM occupancy) ──
+// The wedge shape, deterministic: SCORCH_TESTVST_EDITOR_JAM_MS jams the
+// fixture's createEditor() for 12 s ONCE PER SESSION (token latch) — the
+// message thread blocks INSIDE plugin editor creation. Three openEditor
+// requests fire while it is wedged: the field build queued THREE MM jobs
+// (the user's field evidence was ELEVEN queued Falcon editors); the B-1
+// fold must collapse requests 2..3 into the ONE queued job (wire-silent,
+// engine.log receipted — desktop.yml's half) and the >10s watchdog must
+// name the blocker ("mmJob=openEditor(...)" + folds=2 + queuedEditorJobs=0).
+// The window then opens EXACTLY ONCE (no multiplication). Headless (web CI):
+// createEditor succeeds, the DISPLAY check answers editor_unavailable after
+// the jam — the fold + watchdog receipts are identical on that arm.
+let edPhase = 0, edScanPlugin = null;
+let edOpenedCount = 0, edClosedOk = false, edHeadlessArm = false, edFoldWindowSent = 0;
+const edInstanceId = "inst-a";
+const edSendOpen = () => ws.send(JSON.stringify({ type: "openEditor", instanceId: edInstanceId }));
 const limiterOff = process.env.SCORCH_LIMITER_OFF != null;
 
 // Events chosen so a note IS sounding when the test stops (tick ~600): the
@@ -533,6 +550,8 @@ const timeout = setTimeout(() => {
     console.error(`TIMEOUT at step ${step} phase=${stPhase} (scanA=${stScanA ? "ok" : "none"} scanM=${stScanM ? "ok" : "none"} loaded=${stLoadedCount} appliedVs=[${stAppliedVs.join(",")}] rejected=${stRejected}@v${stRejectV} reason="${stRejectReason}" windowMax=${stWindowMax().toFixed(3)} layouts=${JSON.stringify(stLayouts)} layoutPushes=${stLayoutPushCount} stripLayoutChanged=${JSON.stringify(stStripLayoutChanged)})`);
   } else if (mode === "limiter") {
     console.error(`TIMEOUT at step ${step} phase=${limPhase} (scan=${limScanPlugin ? "ok" : "none"} limiterOff=${limiterOff} peak=${limPeak.toFixed(3)} windowMax=${limWindowMax().toFixed(3)})`);
+  } else if (mode === "editor") {
+    console.error(`TIMEOUT at step ${step} phase=${edPhase} (scan=${edScanPlugin ? "ok" : "none"} opened=${edOpenedCount} foldsSent=${edFoldWindowSent} headless=${edHeadlessArm} closed=${edClosedOk})`);
   } else if (mode === "slowload") {
     console.error(`TIMEOUT at step ${step} phase=${slPhase} (scan=${slScanPlugin ? "ok" : "none"} ack=${slAckOk} ackMs=${slAckMs} loaded=${slLoadedOk} loadedMs=${slLoadedMs} play=${slPlayOk} ticks=${slTicksOk} peak=${slPeak.toFixed(3)} stop=${slStopOk})`);
   } else if (mode === "terminal") {
@@ -548,7 +567,7 @@ const timeout = setTimeout(() => {
 // loaded-receipt bound is asserted EXPLICITLY per phase below — but the
 // wall-clock budget still covers them, plus the Stage 3h stall probe (a 2.5 s
 // audio freeze + its tail): 120 s.
-}, mode === "scan" ? 180000 : mode === "host" ? 150000 : mode === "multi" ? 120000 : mode === "latency" ? 90000 : mode === "slowload" ? 90000 : mode === "terminal" ? 150000 : mode === "routing" ? 120000 : mode === "strips" ? 150000 : mode === "limiter" ? 90000 : 30000);
+}, mode === "scan" ? 180000 : mode === "host" ? 150000 : mode === "multi" ? 120000 : mode === "latency" ? 90000 : mode === "slowload" ? 90000 : mode === "terminal" ? 150000 : mode === "routing" ? 120000 : mode === "strips" ? 150000 : mode === "limiter" ? 90000 : mode === "editor" ? 60000 : 30000);
 
 // scan-mode flags
 let scanSent = false, scanResultOk = false, aliveAfterCrashOk = false, defaultScanOk = false;
@@ -1027,9 +1046,9 @@ ws.addEventListener("message", (event) => {
     }
     if (msg.type === "hello" && multiPhase === 0) {
       if (msg.protocol !== 1) fail(`expected protocol 1, got ${msg.protocol}`);
-      if (msg.engineVersion !== "0.12.0") fail(`expected 0.12.0, got ${msg.engineVersion}`);
+      if (msg.engineVersion !== "0.12.1") fail(`expected 0.12.1, got ${msg.engineVersion}`);
       if (!fixtureDir) fail("multi mode requires a fixture dir argument");
-      console.log("[test] hello OK (0.12.0) — M2 multi-instance: scanning for BOTH fixture identities...");
+      console.log("[test] hello OK (0.12.1) — M2 multi-instance: scanning for BOTH fixture identities...");
       multiPhase = 1;
       ws.send(JSON.stringify({ type: "scan", dirs: [fixtureDir] }));
     } else if (msg.type === "scan_result" && multiPhase === 1) {
@@ -1189,9 +1208,9 @@ ws.addEventListener("message", (event) => {
     } else if (msg.type === "hello" && rtPhase === 0) {
       helloOk = true;
       if (msg.protocol !== 1) fail(`expected protocol 1, got ${msg.protocol}`);
-      if (msg.engineVersion !== "0.12.0") fail(`expected 0.12.0, got ${msg.engineVersion}`);
+      if (msg.engineVersion !== "0.12.1") fail(`expected 0.12.1, got ${msg.engineVersion}`);
       if (!fixtureDir) fail("routing mode requires a fixture dir argument");
-      console.log("[test] hello OK (0.12.0) — M3 PR1: scanning for the stand-in identity...");
+      console.log("[test] hello OK (0.12.1) — M3 PR1: scanning for the stand-in identity...");
       rtPhase = 1;
       ws.send(JSON.stringify({ type: "scan", dirs: [fixtureDir] }));
     } else if (msg.type === "scan_result" && rtPhase === 1) {
@@ -1342,9 +1361,9 @@ ws.addEventListener("message", (event) => {
     } else if (msg.type === "hello" && stPhase === 0) {
       helloOk = true;
       if (msg.protocol !== 1) fail(`expected protocol 1, got ${msg.protocol}`);
-      if (msg.engineVersion !== "0.12.0") fail(`expected 0.12.0, got ${msg.engineVersion}`);
+      if (msg.engineVersion !== "0.12.1") fail(`expected 0.12.1, got ${msg.engineVersion}`);
       if (!fixtureDir) fail("strips mode requires a fixture dir argument");
-      console.log("[test] hello OK (0.12.0) — M3 PR2: scanning for the fixture identities...");
+      console.log("[test] hello OK (0.12.1) — M3 PR2: scanning for the fixture identities...");
       stPhase = 1;
       ws.send(JSON.stringify({ type: "scan", dirs: [fixtureDir] }));
     } else if (msg.type === "scan_result" && stPhase === 1) {
@@ -1476,9 +1495,9 @@ ws.addEventListener("message", (event) => {
     } else if (msg.type === "hello" && limPhase === 0) {
       helloOk = true;
       if (msg.protocol !== 1) fail(`expected protocol 1, got ${msg.protocol}`);
-      if (msg.engineVersion !== "0.12.0") fail(`expected 0.12.0, got ${msg.engineVersion}`);
+      if (msg.engineVersion !== "0.12.1") fail(`expected 0.12.1, got ${msg.engineVersion}`);
       if (!fixtureDir) fail("limiter mode requires a fixture dir argument");
-      console.log(`[test] hello OK (0.12.0) — M4 output stage: limiter ${limiterOff ? "BYPASSED (SCORCH_LIMITER_OFF — the counter-advance case)" : "ARMED (the brickwall case)"} — scanning...`);
+      console.log(`[test] hello OK (0.12.1) — M4 output stage: limiter ${limiterOff ? "BYPASSED (SCORCH_LIMITER_OFF — the counter-advance case)" : "ARMED (the brickwall case)"} — scanning...`);
       limPhase = 1;
       ws.send(JSON.stringify({ type: "scan", dirs: [fixtureDir] }));
     } else if (msg.type === "scan_result" && limPhase === 1) {
@@ -1516,14 +1535,86 @@ ws.addEventListener("message", (event) => {
         finishAndShutdown();
       }
     }
+  } else if (mode === "editor") {
+    // ── Field-gate B: the editor-queue wedge, deterministic (see the state block) ──
+    // Wire half: exactly ONE editorOpened for the instance (no multiplication),
+    // the folded duplicates answer NOTHING (the queued path never replies —
+    // same as before; the fold is receipted engine.log-side), no errors except
+    // the headless arm's editor_unavailable (createEditor succeeded, no
+    // display — the fold + watchdog receipts are identical on that arm).
+    // engine.log half (desktop.yml): the two "[editor] open coalesced" lines,
+    // the "[editor] open pending >10s ... folds=2 ... mmJob=openEditor(
+    // inst-a,...) for Ns queuedEditorJobs=0" declaration, "[testvst]
+    // editor-jam call=1", exactly one "[editor] opened".
+    if (msg.type === "error") {
+      if (edPhase >= 3 && edOpenedCount === 0 && edFoldWindowSent >= 2 &&
+          msg.code === "editor_unavailable" && String(msg.echo ?? "") === "openEditor") {
+        // The headless arm: the jam ran to completion, createEditorIfNeeded
+        // returned a real editor, the display guard answered unavailable.
+        // The B-1 fold and the >10s declaration happened INSIDE the jam —
+        // identical to the display arm up to this point.
+        edHeadlessArm = true;
+        console.log("[test] headless arm: editor_unavailable after the jam (no display) — fold + watchdog receipts are engine.log-side, identical — shutting down");
+        edPhase = 5;
+        finishAndShutdown();
+      } else {
+        fail(`editor: unexpected error: ${JSON.stringify(msg)}`);
+      }
+    } else if (msg.type === "hello" && edPhase === 0) {
+      helloOk = true;
+      if (msg.protocol !== 1) fail(`expected protocol 1, got ${msg.protocol}`);
+      if (msg.engineVersion !== "0.12.1") fail(`expected 0.12.1, got ${msg.engineVersion}`);
+      if (!fixtureDir) fail("editor mode requires a fixture dir argument");
+      console.log(`[test] hello OK (0.12.1) — field-gate B: editor-queue coalescing + MM occupancy — scanning...`);
+      edPhase = 1;
+      ws.send(JSON.stringify({ type: "scan", dirs: [fixtureDir] }));
+    } else if (msg.type === "scan_result" && edPhase === 1) {
+      edScanPlugin = (msg.plugins ?? []).find((p) => p.name === "Scorch Test Synth");
+      if (!edScanPlugin) fail(`editor mode: "Scorch Test Synth" required, got ${JSON.stringify(msg.plugins)}`);
+      console.log(`[test] identity A (${edScanPlugin.uid}) — loading inst-a (SCORCH_TESTVST_EDITOR_JAM_MS is set in the ENGINE's env)`);
+      edPhase = 2;
+      ws.send(JSON.stringify({
+        type: "load", seq: 1,
+        events: [],
+        meta: LIM_META,
+        plugins: [{ instanceId: edInstanceId, uid: edScanPlugin.uid, path: edScanPlugin.path, name: edScanPlugin.name }],
+      }));
+    } else if (msg.type === "plugin_state" && msg.state === "loaded" && edPhase === 2) {
+      console.log("[test] inst-a live — firing openEditor #1 (the job jams inside createEditor for 12 s)");
+      edPhase = 3;
+      edSendOpen();
+      setTimeout(() => {
+        console.log("[test] openEditor #2 — MUST FOLD (a job for this instance is already queued/starting)");
+        edSendOpen();
+        ++edFoldWindowSent;
+      }, 600);
+      setTimeout(() => {
+        console.log("[test] openEditor #3 — MUST FOLD (same epoch; the field build queued 11 of these)");
+        edSendOpen();
+        ++edFoldWindowSent;
+      }, 1200);
+    } else if (msg.type === "editorOpened") {
+      edOpenedCount++;
+      if (edOpenedCount > 1) fail(`editor: ${edOpenedCount} editorOpened broadcasts for one instance — the fold FAILED (the field bug: 11 queued jobs, 11 windows)`);
+      if (String(msg.instanceId ?? "") !== edInstanceId) fail(`editor: editorOpened for "${msg.instanceId}", expected "${edInstanceId}"`);
+      console.log(`[test] editorOpened (${msg.width}x${msg.height}) — EXACTLY ONE (the fold held) — closing`);
+      edPhase = 4;
+      setTimeout(() => {
+        ws.send(JSON.stringify({ type: "closeEditor", instanceId: edInstanceId }));
+      }, 300);
+    } else if (msg.type === "editorClosed" && edPhase === 4) {
+      edClosedOk = true;
+      console.log("[test] editorClosed — field-gate B wire contract complete (coalescing + occupancy receipts: desktop.yml)");
+      finishAndShutdown();
+    }
   } else if (mode === "slowload") {
     // ── M1-hotfix: the heavy-load death class (see the state block above) ──
     if (msg.type === "hello" && slPhase === 0) {
       if (msg.protocol !== 1) fail(`expected protocol 1, got ${msg.protocol}`);
-      if (msg.engineVersion !== "0.12.0") fail(`expected 0.12.0, got ${msg.engineVersion}`);
+      if (msg.engineVersion !== "0.12.1") fail(`expected 0.12.1, got ${msg.engineVersion}`);
       if (!fixtureDir) fail("slowload mode requires a fixture dir argument");
       helloOk = true;
-      console.log(`[test] hello OK (0.12.0) — slow-load knobs: create=${SLOW_CREATE_S}s prepareN=${process.env.SCORCH_TESTVST_SLOW_PREPARE_N ?? 0}(x${SLOW_PREPARE_S}s) — scanning...`);
+      console.log(`[test] hello OK (0.12.1) — slow-load knobs: create=${SLOW_CREATE_S}s prepareN=${process.env.SCORCH_TESTVST_SLOW_PREPARE_N ?? 0}(x${SLOW_PREPARE_S}s) — scanning...`);
       slPhase = 1;
       ws.send(JSON.stringify({ type: "scan", dirs: [fixtureDir] }));
     } else if (msg.type === "scan_result" && slPhase === 1) {
@@ -1575,10 +1666,10 @@ ws.addEventListener("message", (event) => {
     // ── 0.9.2: the init-queue terminal-receipt invariant (see the state block) ──
     if (msg.type === "hello" && trPhase === 0) {
       if (msg.protocol !== 1) fail(`expected protocol 1, got ${msg.protocol}`);
-      if (msg.engineVersion !== "0.12.0") fail(`expected 0.12.0, got ${msg.engineVersion}`);
+      if (msg.engineVersion !== "0.12.1") fail(`expected 0.12.1, got ${msg.engineVersion}`);
       if (!fixtureDir) fail("terminal mode requires a fixture dir argument");
       helloOk = true;
-      console.log(`[test] hello OK (0.12.0) — terminal-receipt knobs: jam=${TR_JAM_S}s timeout=${TR_TIMEOUT_S}s — scanning...`);
+      console.log(`[test] hello OK (0.12.1) — terminal-receipt knobs: jam=${TR_JAM_S}s timeout=${TR_TIMEOUT_S}s — scanning...`);
       trPhase = 1;
       ws.send(JSON.stringify({ type: "scan", dirs: [fixtureDir] }));
     } else if (msg.type === "scan_result" && trPhase === 1) {
@@ -2204,7 +2295,7 @@ ws.addEventListener("message", (event) => {
     if (msg.type === "hello" && !helloOk) {
       helloOk = true;
       if (msg.protocol !== 1) fail(`expected protocol 1, got ${msg.protocol}`);
-      if (msg.engineVersion !== "0.12.0") fail(`expected 0.12.0, got ${msg.engineVersion}`);
+      if (msg.engineVersion !== "0.12.1") fail(`expected 0.12.1, got ${msg.engineVersion}`);
       if (!fixtureDir) fail("scan mode requires a fixture dir argument");
       console.log("[test] hello OK — sending scan of fixture dir + nested dir (dedup proof):", fixtureDir);
       scanSent = true;
@@ -2364,11 +2455,11 @@ ws.addEventListener("message", (event) => {
     // ── Stage 3i: runtime latency tracking (detect, then mini-republish) ──
     if (msg.type === "hello" && latPhase === 0) {
       if (msg.protocol !== 1) fail(`expected protocol 1, got ${msg.protocol}`);
-      if (msg.engineVersion !== "0.12.0") fail(`expected 0.12.0, got ${msg.engineVersion}`);
+      if (msg.engineVersion !== "0.12.1") fail(`expected 0.12.1, got ${msg.engineVersion}`);
       if (!fixtureDir) fail("latency mode requires a fixture dir argument");
       helloOk = true;
       latPhase = 1;
-      console.log("[test] hello OK (0.12.0) — scanning for the stand-in host plugin...");
+      console.log("[test] hello OK (0.12.1) — scanning for the stand-in host plugin...");
       ws.send(JSON.stringify({ type: "dispatch_log", enable: true }));   // Phase 2: the pre-fire proof is ledger-based
       ws.send(JSON.stringify({ type: "scan", dirs: [fixtureDir] }));
     } else if (msg.type === "scan_result" && latPhase === 1) {
@@ -2424,7 +2515,7 @@ ws.addEventListener("message", (event) => {
     if (msg.type === "hello" && !helloOk) {
       helloOk = true;
       if (msg.protocol !== 1) fail(`expected protocol 1, got ${msg.protocol}`);
-      if (msg.engineVersion !== "0.12.0") fail(`expected 0.12.0, got ${msg.engineVersion}`);
+      if (msg.engineVersion !== "0.12.1") fail(`expected 0.12.1, got ${msg.engineVersion}`);
       // Stage 3c close-out: the dispatch ledger streams what the engine
       // ACTUALLY dispatched — the replay-burst and re-attack asserts read it.
       ws.send(JSON.stringify({ type: "dispatch_log", enable: true }));
@@ -2958,6 +3049,27 @@ ws.addEventListener("close", () => {
       process.exit(0);
     } else {
       console.error(`FAILED: hello=${helloOk} scan=${limScanPlugin ? "ok" : "none"} limiterOff=${limiterOff} peak=${limPeak.toFixed(3)} phase=${limPhase}`);
+      process.exit(1);
+    }
+  } else if (mode === "editor") {
+    // Display arm: exactly one opened + closed. Headless arm: zero opened,
+    // the editor_unavailable error after the jam (receipts identical).
+    allOk = helloOk && edScanPlugin != null &&
+      ((edOpenedCount === 1 && edClosedOk && !edHeadlessArm) ||
+       (edHeadlessArm && edOpenedCount === 0));
+    if (allOk) {
+      console.log("");
+      console.log("========================================");
+      console.log("ALL EDITOR-QUEUE TESTS PASSED (field-gate B):");
+      console.log("  three openEditor requests into a 12 s createEditor jam → EXACTLY ONE window");
+      console.log(`  the duplicates FOLDED (wire-silent; engine.log: [editor] open coalesced x${edFoldWindowSent})`);
+      console.log("  the >10s declaration names the blocker: mmJob=openEditor(...), folds=2, editorJobs outstanding");
+      if (edHeadlessArm) console.log("  headless arm: editor_unavailable after the jam (no display) — receipts identical");
+      console.log("  engine.log assertions are desktop.yml's half (fold count, occupancy, exactly-one opened)");
+      console.log("========================================");
+      process.exit(0);
+    } else {
+      console.error(`FAILED: hello=${helloOk} scan=${edScanPlugin ? "ok" : "none"} opened=${edOpenedCount} foldsSent=${edFoldWindowSent} closed=${edClosedOk} headless=${edHeadlessArm} phase=${edPhase}`);
       process.exit(1);
     }
   } else {
