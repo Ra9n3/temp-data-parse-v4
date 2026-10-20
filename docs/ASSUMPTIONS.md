@@ -3173,3 +3173,27 @@ receipts must carry `src=(graph|fallback)`.
 minidump provenance question ("does this build include rider X") is
 answerable from the dump's memory strings only if the version string
 disambiguates builds. The harness's 16 engineVersion asserts moved with it.
+
+## Field-gate-2 — the [stripmix] 1 Hz per-strip receipt (0.12.2)
+
+Measurement instrumentation for the "shared instance plays loud" field
+report — an observability change ONLY; no gain, wiring, summing, or MIDI
+behavior is touched by it. Every active strip with content in the window
+emits once per second, on the worker thread (the audio thread never logs;
+the drain is the g_stripStats exchange pattern with its OWN atomics):
+
+    [stripmix] strip=<id> inst=<name> in_db=<x> out_db=<x> in=<lin> out=<lin> pair=[a,b] blocks=<n>
+
+`in_db`/`out_db` are 20·log10 of the window's max |in| / max |out| (a
+silent window emits no line; 0.0 peak prints `-inf`). The first four
+fields are the greppable contract; the linear peaks, pair and block count
+ride after for the dB table's cross-checks. The window is deliberately
+SEPARATE from the `[strip] stats` atomics (SCORCH_STRIP_LOG drains those
+every worker wake; a second consumer on the same atomics would steal
+peaks and break CI's verbatim deltas) — two independent windows, zero
+interaction. Strip in/out peaks are PRE-master, PRE-limiter: they measure
+the strip stage itself; the master's post-stage truth stays with the 1 Hz
+janitor peak receipt and the wire's state.peak. Purpose: the shared-
+instance loudness question (two strips carrying the same instance output
+sum at the output node) is answerable from receipts — strip in_db/out_db
+per config + the master peak — instead of from guesses.

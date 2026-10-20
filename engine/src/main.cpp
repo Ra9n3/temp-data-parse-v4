@@ -524,7 +524,7 @@ namespace {
 // "openEditor":true); the lazy-device window is receipted (nominal fallback +
 // device-ready race re-prepare); matching requests coalesce into an in-flight
 // init instead of answering "reused" while it is still outstanding.
-constexpr const char* kEngineVersion = "0.12.1";   // M4 output stage + field-gate B (editor-queue coalescing, MM occupancy, peak src)
+constexpr const char* kEngineVersion = "0.12.2";   // field-gate-2: [stripmix] 1 Hz per-strip in/out dB receipt (shared-instance loudness probe)
 constexpr int kProtocolVersion = 1;
 constexpr int kDefaultPort = 9377;
 constexpr int kMaxVoices = 64;
@@ -709,6 +709,12 @@ struct StripStats {
     std::atomic<float> postPeak { 0.0f };   // max |out| — delivery truth (0 when muted/dead)
 };
 StripStats g_stripStats[kMaxStrips];
+// Field-gate-2: the [stripmix] receipt's OWN per-strip window (in/out peaks +
+// block count). Deliberately SEPARATE from g_stripStats: the [strip] stats
+// drain (SCORCH_STRIP_LOG) exchanges ITS atomics every worker wake — a second
+// consumer on the same atomics would steal peaks from it (and CI asserts those
+// deltas verbatim). Two independent windows, zero interaction.
+StripStats g_stripMixStats[kMaxStrips];
 // The strip table (D2 ownership shape, same as RoutingTable): the frontend
 // owns the wiring; the engine holds an immutable runtime snapshot published
 // behind ONE atomic shared_ptr. An entry is the frontend's INTENT and
@@ -825,6 +831,11 @@ public:
         casMax (g_stripStats[(size_t) slot].prePeak, preMax);
         casMax (g_stripStats[(size_t) slot].postPeak, postMax);
         g_stripStats[(size_t) slot].blocks.fetch_add (1, std::memory_order_relaxed);
+        // Field-gate-2: the same shape into the [stripmix] window — two
+        // CAS-max + one fetch_add per BLOCK, nothing per sample.
+        casMax (g_stripMixStats[(size_t) slot].prePeak, preMax);
+        casMax (g_stripMixStats[(size_t) slot].postPeak, postMax);
+        g_stripMixStats[(size_t) slot].blocks.fetch_add (1, std::memory_order_relaxed);
     }
 
     const juce::String getName() const override
@@ -7176,6 +7187,52 @@ int main(int argc, char** argv) {
                                       "] pre=" + juce::String(pre, 4).toStdString() +
                                       " post=" + juce::String(post, 4).toStdString() +
                                       " blocks=" + std::to_string(blocks));
+                        }
+                    }
+                }
+            }
+            // (3b) Field-gate-2: the 1 Hz [stripmix] receipt — per ACTIVE strip
+            //      with content in the window, in/out peaks as dB (the
+            //      shared-instance loudness probe: strip-level truth that pairs
+            //      with the janitor's master-level receipt). The greppable
+            //      contract is the FIRST FOUR fields — [stripmix] strip=<id>
+            //      inst=<name> in_db=<x> out_db=<x> — extras (linear peaks,
+            //      pair, blocks) ride AFTER so the shape stays stable. Own
+            //      window: never touches g_stripStats (the [strip] drain's
+            //      atomics). No env gate: always-on like the janitor, silent
+            //      strips emit nothing (blocks==0 in the window).
+            {
+                static std::chrono::steady_clock::time_point stripMixLastEmit{};
+                const auto nowMix = std::chrono::steady_clock::now();
+                if (std::chrono::duration_cast<std::chrono::milliseconds>(
+                        nowMix - stripMixLastEmit).count() >= 1000) {
+                    stripMixLastEmit = nowMix;
+                    const auto setMx = g_strips.load(std::memory_order_acquire);
+                    if (setMx != nullptr) {
+                        for (const auto& e : setMx->strips) {
+                            if (!e.active || e.slot < 0 || e.slot >= kMaxStrips) continue;
+                            StripStats& sm = g_stripMixStats[(size_t) e.slot];
+                            const uint64_t mblocks = sm.blocks.exchange(0, std::memory_order_relaxed);
+                            if (mblocks == 0) continue;   // silent window: no line
+                            const float mpre = sm.prePeak.exchange(0.0f, std::memory_order_relaxed);
+                            const float mpost = sm.postPeak.exchange(0.0f, std::memory_order_relaxed);
+                            char preDb[16], postDb[16];
+                            if (mpre > 0.0f)
+                                std::snprintf(preDb, sizeof(preDb), "%.2f", 20.0 * std::log10((double) mpre));
+                            else
+                                std::snprintf(preDb, sizeof(preDb), "%s", "-inf");
+                            if (mpost > 0.0f)
+                                std::snprintf(postDb, sizeof(postDb), "%.2f", 20.0 * std::log10((double) mpost));
+                            else
+                                std::snprintf(postDb, sizeof(postDb), "%s", "-inf");
+                            engineLog("[stripmix] strip=" + e.stripId +
+                                      " inst=" + e.inst +
+                                      " in_db=" + preDb +
+                                      " out_db=" + postDb +
+                                      " in=" + juce::String(mpre, 4).toStdString() +
+                                      " out=" + juce::String(mpost, 4).toStdString() +
+                                      " pair=[" + std::to_string(e.pair0) + "," + std::to_string(e.pair1) + "]" +
+                                      " blocks=" + std::to_string(mblocks));
                         }
                     }
                 }

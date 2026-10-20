@@ -1046,9 +1046,9 @@ ws.addEventListener("message", (event) => {
     }
     if (msg.type === "hello" && multiPhase === 0) {
       if (msg.protocol !== 1) fail(`expected protocol 1, got ${msg.protocol}`);
-      if (msg.engineVersion !== "0.12.1") fail(`expected 0.12.1, got ${msg.engineVersion}`);
+      if (msg.engineVersion !== "0.12.2") fail(`expected 0.12.2, got ${msg.engineVersion}`);
       if (!fixtureDir) fail("multi mode requires a fixture dir argument");
-      console.log("[test] hello OK (0.12.1) — M2 multi-instance: scanning for BOTH fixture identities...");
+      console.log("[test] hello OK (0.12.2) — M2 multi-instance: scanning for BOTH fixture identities...");
       multiPhase = 1;
       ws.send(JSON.stringify({ type: "scan", dirs: [fixtureDir] }));
     } else if (msg.type === "scan_result" && multiPhase === 1) {
@@ -1208,9 +1208,9 @@ ws.addEventListener("message", (event) => {
     } else if (msg.type === "hello" && rtPhase === 0) {
       helloOk = true;
       if (msg.protocol !== 1) fail(`expected protocol 1, got ${msg.protocol}`);
-      if (msg.engineVersion !== "0.12.1") fail(`expected 0.12.1, got ${msg.engineVersion}`);
+      if (msg.engineVersion !== "0.12.2") fail(`expected 0.12.2, got ${msg.engineVersion}`);
       if (!fixtureDir) fail("routing mode requires a fixture dir argument");
-      console.log("[test] hello OK (0.12.1) — M3 PR1: scanning for the stand-in identity...");
+      console.log("[test] hello OK (0.12.2) — M3 PR1: scanning for the stand-in identity...");
       rtPhase = 1;
       ws.send(JSON.stringify({ type: "scan", dirs: [fixtureDir] }));
     } else if (msg.type === "scan_result" && rtPhase === 1) {
@@ -1361,9 +1361,9 @@ ws.addEventListener("message", (event) => {
     } else if (msg.type === "hello" && stPhase === 0) {
       helloOk = true;
       if (msg.protocol !== 1) fail(`expected protocol 1, got ${msg.protocol}`);
-      if (msg.engineVersion !== "0.12.1") fail(`expected 0.12.1, got ${msg.engineVersion}`);
+      if (msg.engineVersion !== "0.12.2") fail(`expected 0.12.2, got ${msg.engineVersion}`);
       if (!fixtureDir) fail("strips mode requires a fixture dir argument");
-      console.log("[test] hello OK (0.12.1) — M3 PR2: scanning for the fixture identities...");
+      console.log("[test] hello OK (0.12.2) — M3 PR2: scanning for the fixture identities...");
       stPhase = 1;
       ws.send(JSON.stringify({ type: "scan", dirs: [fixtureDir] }));
     } else if (msg.type === "scan_result" && stPhase === 1) {
@@ -1495,9 +1495,9 @@ ws.addEventListener("message", (event) => {
     } else if (msg.type === "hello" && limPhase === 0) {
       helloOk = true;
       if (msg.protocol !== 1) fail(`expected protocol 1, got ${msg.protocol}`);
-      if (msg.engineVersion !== "0.12.1") fail(`expected 0.12.1, got ${msg.engineVersion}`);
+      if (msg.engineVersion !== "0.12.2") fail(`expected 0.12.2, got ${msg.engineVersion}`);
       if (!fixtureDir) fail("limiter mode requires a fixture dir argument");
-      console.log(`[test] hello OK (0.12.1) — M4 output stage: limiter ${limiterOff ? "BYPASSED (SCORCH_LIMITER_OFF — the counter-advance case)" : "ARMED (the brickwall case)"} — scanning...`);
+      console.log(`[test] hello OK (0.12.2) — M4 output stage: limiter ${limiterOff ? "BYPASSED (SCORCH_LIMITER_OFF — the counter-advance case)" : "ARMED (the brickwall case)"} — scanning...`);
       limPhase = 1;
       ws.send(JSON.stringify({ type: "scan", dirs: [fixtureDir] }));
     } else if (msg.type === "scan_result" && limPhase === 1) {
@@ -1563,9 +1563,9 @@ ws.addEventListener("message", (event) => {
     } else if (msg.type === "hello" && edPhase === 0) {
       helloOk = true;
       if (msg.protocol !== 1) fail(`expected protocol 1, got ${msg.protocol}`);
-      if (msg.engineVersion !== "0.12.1") fail(`expected 0.12.1, got ${msg.engineVersion}`);
+      if (msg.engineVersion !== "0.12.2") fail(`expected 0.12.2, got ${msg.engineVersion}`);
       if (!fixtureDir) fail("editor mode requires a fixture dir argument");
-      console.log(`[test] hello OK (0.12.1) — field-gate B: editor-queue coalescing + MM occupancy — scanning...`);
+      console.log(`[test] hello OK (0.12.2) — field-gate B: editor-queue coalescing + MM occupancy — scanning...`);
       edPhase = 1;
       ws.send(JSON.stringify({ type: "scan", dirs: [fixtureDir] }));
     } else if (msg.type === "scan_result" && edPhase === 1) {
@@ -1611,10 +1611,10 @@ ws.addEventListener("message", (event) => {
     // ── M1-hotfix: the heavy-load death class (see the state block above) ──
     if (msg.type === "hello" && slPhase === 0) {
       if (msg.protocol !== 1) fail(`expected protocol 1, got ${msg.protocol}`);
-      if (msg.engineVersion !== "0.12.1") fail(`expected 0.12.1, got ${msg.engineVersion}`);
+      if (msg.engineVersion !== "0.12.2") fail(`expected 0.12.2, got ${msg.engineVersion}`);
       if (!fixtureDir) fail("slowload mode requires a fixture dir argument");
       helloOk = true;
-      console.log(`[test] hello OK (0.12.1) — slow-load knobs: create=${SLOW_CREATE_S}s prepareN=${process.env.SCORCH_TESTVST_SLOW_PREPARE_N ?? 0}(x${SLOW_PREPARE_S}s) — scanning...`);
+      console.log(`[test] hello OK (0.12.2) — slow-load knobs: create=${SLOW_CREATE_S}s prepareN=${process.env.SCORCH_TESTVST_SLOW_PREPARE_N ?? 0}(x${SLOW_PREPARE_S}s) — scanning...`);
       slPhase = 1;
       ws.send(JSON.stringify({ type: "scan", dirs: [fixtureDir] }));
     } else if (msg.type === "scan_result" && slPhase === 1) {
@@ -1666,10 +1666,10 @@ ws.addEventListener("message", (event) => {
     // ── 0.9.2: the init-queue terminal-receipt invariant (see the state block) ──
     if (msg.type === "hello" && trPhase === 0) {
       if (msg.protocol !== 1) fail(`expected protocol 1, got ${msg.protocol}`);
-      if (msg.engineVersion !== "0.12.1") fail(`expected 0.12.1, got ${msg.engineVersion}`);
+      if (msg.engineVersion !== "0.12.2") fail(`expected 0.12.2, got ${msg.engineVersion}`);
       if (!fixtureDir) fail("terminal mode requires a fixture dir argument");
       helloOk = true;
-      console.log(`[test] hello OK (0.12.1) — terminal-receipt knobs: jam=${TR_JAM_S}s timeout=${TR_TIMEOUT_S}s — scanning...`);
+      console.log(`[test] hello OK (0.12.2) — terminal-receipt knobs: jam=${TR_JAM_S}s timeout=${TR_TIMEOUT_S}s — scanning...`);
       trPhase = 1;
       ws.send(JSON.stringify({ type: "scan", dirs: [fixtureDir] }));
     } else if (msg.type === "scan_result" && trPhase === 1) {
@@ -2295,7 +2295,7 @@ ws.addEventListener("message", (event) => {
     if (msg.type === "hello" && !helloOk) {
       helloOk = true;
       if (msg.protocol !== 1) fail(`expected protocol 1, got ${msg.protocol}`);
-      if (msg.engineVersion !== "0.12.1") fail(`expected 0.12.1, got ${msg.engineVersion}`);
+      if (msg.engineVersion !== "0.12.2") fail(`expected 0.12.2, got ${msg.engineVersion}`);
       if (!fixtureDir) fail("scan mode requires a fixture dir argument");
       console.log("[test] hello OK — sending scan of fixture dir + nested dir (dedup proof):", fixtureDir);
       scanSent = true;
@@ -2455,11 +2455,11 @@ ws.addEventListener("message", (event) => {
     // ── Stage 3i: runtime latency tracking (detect, then mini-republish) ──
     if (msg.type === "hello" && latPhase === 0) {
       if (msg.protocol !== 1) fail(`expected protocol 1, got ${msg.protocol}`);
-      if (msg.engineVersion !== "0.12.1") fail(`expected 0.12.1, got ${msg.engineVersion}`);
+      if (msg.engineVersion !== "0.12.2") fail(`expected 0.12.2, got ${msg.engineVersion}`);
       if (!fixtureDir) fail("latency mode requires a fixture dir argument");
       helloOk = true;
       latPhase = 1;
-      console.log("[test] hello OK (0.12.1) — scanning for the stand-in host plugin...");
+      console.log("[test] hello OK (0.12.2) — scanning for the stand-in host plugin...");
       ws.send(JSON.stringify({ type: "dispatch_log", enable: true }));   // Phase 2: the pre-fire proof is ledger-based
       ws.send(JSON.stringify({ type: "scan", dirs: [fixtureDir] }));
     } else if (msg.type === "scan_result" && latPhase === 1) {
@@ -2515,7 +2515,7 @@ ws.addEventListener("message", (event) => {
     if (msg.type === "hello" && !helloOk) {
       helloOk = true;
       if (msg.protocol !== 1) fail(`expected protocol 1, got ${msg.protocol}`);
-      if (msg.engineVersion !== "0.12.1") fail(`expected 0.12.1, got ${msg.engineVersion}`);
+      if (msg.engineVersion !== "0.12.2") fail(`expected 0.12.2, got ${msg.engineVersion}`);
       // Stage 3c close-out: the dispatch ledger streams what the engine
       // ACTUALLY dispatched — the replay-burst and re-attack asserts read it.
       ws.send(JSON.stringify({ type: "dispatch_log", enable: true }));
