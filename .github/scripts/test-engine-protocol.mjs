@@ -450,10 +450,15 @@ let d10Errors = [];
 const d10PluginOf = (iid) => (iid === "inst-a" ? d10ScanA : d10ScanB);
 const d10Other = (iid) => (iid === "inst-a" ? "inst-b" : "inst-a");
 const d10SendLoad = (seq, iid) => {
-  // The multiSendLoad grammar EXACTLY: events + channels + routing + plugins.
-  // Attempt 8's load (events + plugins, NO mapping) wedged the WS thread
-  // inside handle_load; every green load in the suite maps its tracks. The
-  // track t1 rides wire channel 1 on the live instance.
+  // The multiSendLoad grammar EXACTLY: events + meta + routing + plugins —
+  // and NOTHING else. The multi machine has shipped this shape green for
+  // every run; attempt 10 proved the `channels` key alongside a `plugins`
+  // array is the wedge trigger (the engine printed "perTrack none" — the
+  // plugins-array path never parsed the channels map — and the WS thread
+  // wedged between "[load] received" and "[plugin] init started" for 360 s,
+  // three attempts out of three, on a fresh runner at the suite's second
+  // test). The track t1 rides wire channel 1 on the live instance via
+  // routing alone.
   ws.send(JSON.stringify({
     type: "load", seq,
     events: [
@@ -461,7 +466,6 @@ const d10SendLoad = (seq, iid) => {
       { eventType: "NOTE_OFF", channel: 1, data1: 60, data2: 0, timestampTicks: 8447 },
     ],
     meta: D10_META,
-    channels: { t1: 1 },
     routing: { t1: { inst: iid, ch: 1 } },
     plugins: [d10PluginOf(iid)],
   }));
