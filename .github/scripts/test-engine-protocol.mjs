@@ -429,7 +429,14 @@ const edSendOpen = () => ws.send(JSON.stringify({ type: "openEditor", instanceId
 // window whose teardown runs under the loader lock at FreeLibrary.
 const D10_CYCLES = 60;                 // >= 50 per the TASK I brief
 const D10_SWAP_EVERY = 5;              // an orphaning mid-play diff load every 5 cycles
-const D10_META = { bpm: 120, ppqn: 960, timeSignature: { numerator: 4, denominator: 4 }, endTick: 345600 };
+// endTick 8448 — the SAME score grammar every green load in this suite uses
+// (the terminal machine, multi, strips, limiter). Attempt 8 (run 39607089059)
+// wedged the WS thread inside handle_load with endTick=345600 (loadAck sent,
+// then 360 s of silence; the init worker never dequeued; no crash, no dump):
+// the ONE load-shape delta vs every green load in that run. The transport
+// rolls PAST endTick freely (D4 states show tick 49391 with endTick 8448),
+// so the short score never stops the playback under the stress.
+const D10_META = { bpm: 120, ppqn: 960, timeSignature: { numerator: 4, denominator: 4 }, endTick: 8448 };
 let d10Phase = 0;                      // 0 hello, 1 scan, 2 loaded, 3 cycling, 4 stop
 let d10ScanA = null, d10ScanB = null, d10Falcon = null, d10Bbcso = null;
 let d10Cycle = 0;                      // completed open+close cycles
@@ -447,13 +454,20 @@ const d10SendLoad = (seq, iid) => {
     type: "load", seq,
     events: [
       { eventType: "NOTE_ON", channel: 1, data1: 60, data2: 100, timestampTicks: 480 },
-      { eventType: "NOTE_OFF", channel: 1, data1: 60, data2: 0, timestampTicks: 345599 },
+      { eventType: "NOTE_OFF", channel: 1, data1: 60, data2: 0, timestampTicks: 8447 },
     ],
     meta: D10_META,
     plugins: [d10PluginOf(iid)],
   }));
 };
 const d10Open = () => ws.send(JSON.stringify({ type: "openEditor", instanceId: d10Live }));
+// In-flight heartbeat (the attempt-8 lesson: a 360 s wedge inside the engine's
+// load path was invisible from the harness side — the timeout line alone
+// could not say WHERE the machine stood). One line every 20 s with the full
+// machine state; harmless on green runs, decisive on a wedged one.
+const d10Heartbeat = setInterval(() => {
+  console.log(`[test] stress heartbeat: phase=${d10Phase} cycles=${d10Cycle}/${D10_CYCLES} opened=${d10Opened} closed=${d10Closed} live=${d10Live} swapInFlight=${d10SwapInFlight} seq=${d10SwapSeq} peak=${d10Peak.toFixed(3)} errors=${d10Errors.length}`);
+}, 20000);
 
 const limiterOff = process.env.SCORCH_LIMITER_OFF != null;
 
@@ -1762,6 +1776,7 @@ ws.addEventListener("message", (event) => {
       }
     } else if (msg.type === "state" && d10Phase === 4 && msg.playing === false) {
       console.log(`[test] stop clean — stress complete: cycles=${d10Cycle} opened=${d10Opened} closed=${d10Closed} swaps=${d10SwapSeq - 10} benchFalcon=${d10Falcon ? "present" : "absent"} benchBbcso=${d10Bbcso ? "present" : "absent"}`);
+      clearInterval(d10Heartbeat);
       finishAndShutdown();
     }
   } else if (mode === "slowload") {
