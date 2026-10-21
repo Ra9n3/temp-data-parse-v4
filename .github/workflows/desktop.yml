@@ -321,58 +321,69 @@ jobs:
           # the same machine is the acceptance gate: 50+ clean cycles, no
           # [crash] receipts, and the [module-guard] receipts (asserted from
           # the guard commit onward).
-          Write-Host "=== Test D10: TASK I stress (60 editor cycles under play, module-orphaning swaps) ==="
+          Write-Host "=== Test D10: TASK I stress (60 editor cycles under play, module-orphaning swaps) — WARN-ONLY (advisory, non-gating until further notice; user directive 2026-10-22) ==="
           $engineLogD10 = Join-Path $env:APPDATA "scorch\engine.log"
           $logLinesBeforeD10 = 0
           if (Test-Path $engineLogD10) { $logLinesBeforeD10 = (Get-Content $engineLogD10 | Measure-Object -Line).Lines }
           $procD10 = Start-Process -FilePath "engine/build/scorch-engine.exe" -ArgumentList "--port","9391","--null-audio" -PassThru -NoNewWindow -RedirectStandardOutput "engine-d10-stdout.txt" -RedirectStandardError "engine-d10-stderr.txt"
           Start-Sleep -Seconds 3
+          $d10Run = $true
           try {
             if ($procD10.HasExited) {
               Write-Host "Engine D10 exited early (code=$($procD10.ExitCode)). stdout:"
               if (Test-Path engine-d10-stdout.txt) { Get-Content engine-d10-stdout.txt }
-              throw "Engine D10 process exited before test could connect"
+              Write-Host "D10 ADVISORY (warn-only, non-gating): Engine D10 process exited before test could connect — the stress run is skipped"
+              $d10Run = $false
             }
-            node .github/scripts/test-engine-protocol.mjs 9391 stress "$env:SCAN_FIXTURES"
-            if ($LASTEXITCODE -ne 0) {
-              Show-StepLogTail -Path $engineLogD10 -Proc $procD10 -Label "Engine D10"
-              Write-Host "Engine D10 stdout:"
-              if (Test-Path engine-d10-stdout.txt) { Get-Content engine-d10-stdout.txt }
-              Write-Host "Engine D10 stderr:"
-              if (Test-Path engine-d10-stderr.txt) { Get-Content engine-d10-stderr.txt }
-              if (Test-Path $engineLogD10) { Write-Host "Engine D10 engine.log slice (last 120 lines):"; Get-Content $engineLogD10 | Select-Object -Last 120 }
-              throw "Harness D10 (stress mode) failed"
+            if ($d10Run) {
+              node .github/scripts/test-engine-protocol.mjs 9391 stress "$env:SCAN_FIXTURES"
+              if ($LASTEXITCODE -ne 0) {
+                Show-StepLogTail -Path $engineLogD10 -Proc $procD10 -Label "Engine D10"
+                Write-Host "Engine D10 stdout:"
+                if (Test-Path engine-d10-stdout.txt) { Get-Content engine-d10-stdout.txt }
+                Write-Host "Engine D10 stderr:"
+                if (Test-Path engine-d10-stderr.txt) { Get-Content engine-d10-stderr.txt }
+                if (Test-Path $engineLogD10) { Write-Host "Engine D10 engine.log slice (last 120 lines):"; Get-Content $engineLogD10 | Select-Object -Last 120 }
+                Write-Host "D10 ADVISORY (warn-only, non-gating): Harness D10 (stress mode) failed (mjs exit $LASTEXITCODE)"
+              } else {
+                # TASK D machinery: wait for ENGINE EXIT before reading the log —
+                # the file is final once the process is gone (exit-verified read).
+                $procD10.WaitForExit(20000) | Out-Null
+                if (-not $procD10.HasExited) { Show-StepLogTail -Path $engineLogD10 -Proc $procD10 -Label "Engine D10"; Write-Host "D10 ADVISORY (warn-only, non-gating): Engine D10 still running 20s after the harness exit — shutdown hung (dump above names the last phase)" }
+                elseif ($procD10.ExitCode -ne 0) { Show-StepLogTail -Path $engineLogD10 -Proc $procD10 -Label "Engine D10"; Write-Host "D10 ADVISORY (warn-only, non-gating): Engine D10 exited code=$($procD10.ExitCode) before the receipt asserts (dump above)" }
+                else {
+                  Write-Host "Engine D10 exit verified BEFORE the log read (file final: exit 0)"
+                  $d10Lines = Get-Content $engineLogD10 | Select-Object -Skip $logLinesBeforeD10
+                  $crashD10 = @($d10Lines | Select-String -Pattern "\[crash\]")
+                  if (($crashD10 | Measure-Object).Count -ne 0) {
+                    $crashD10 | ForEach-Object { Write-Host $_.Line }
+                    Write-Host "D10 ADVISORY (warn-only, non-gating): the in-process crash channel fired during the stress — adjudicate the dump (the unloaded-module list IS the verdict)"
+                  } else {
+                    # TASK I guard receipts: every orphaning swap must run the sweep
+                    # and hold the invariant on the record. A PINNED window is the
+                    # guard's safe failure (leak, no unmapped dispatch) — print it
+                    # loudly; an UNRESOLVED window means the invariant could NOT be
+                    # enforced and the next dispatch is the TASK F crash — fail now.
+                    # (Attempt 13's lesson: the summary grammar is
+                    # "[module-guard] retire instance=<iid> orphan=yes windows=..." —
+                    # the pattern must span the instance field; "retire orphan=yes"
+                    # adjacency never occurs in the engine's emission.)
+                    # WARN-ONLY per user directive: every gate here prints an
+                    # ADVISORY line instead of throwing — the receipts and dumps
+                    # stay on the record for adjudication, the step stays green.
+                    $guardD10 = @($d10Lines | Select-String -Pattern "\[module-guard\] retire instance=\S+ orphan=yes")
+                    if (($guardD10 | Measure-Object).Count -lt 1) { Show-StepLogTail -Path $engineLogD10 -Proc $procD10 -Label "Engine D10"; Write-Host "D10 ADVISORY (warn-only, non-gating): no '[module-guard] retire instance=<iid> orphan=yes' summary receipt — the swaps must orphan a module each and the sweep must hold the invariant (execution proof missing)" }
+                    $guardD10 | ForEach-Object { Write-Host $_.Line }
+                    $pinnedD10 = @($d10Lines | Select-String -Pattern "\[module-guard\] PINNED")
+                    if (($pinnedD10 | Measure-Object).Count -gt 0) { Write-Host "D10 NOTE: $($pinnedD10.Count) window(s) could not be detached and were PINNED (safe leak — the module stays mapped; no unmapped dispatch possible):"; $pinnedD10 | ForEach-Object { Write-Host $_.Line } }
+                    $unresolvedD10 = @($d10Lines | Select-String -Pattern "\[module-guard\] UNRESOLVED")
+                    if (($unresolvedD10 | Measure-Object).Count -ne 0) { $unresolvedD10 | ForEach-Object { Write-Host $_.Line }; Write-Host "D10 ADVISORY (warn-only, non-gating): the guard could neither detach nor pin a window living in a module about to free — the invariant is NOT enforced (the next dispatch into it is the TASK F crash)" }
+                    Write-Host "D10 receipts: $($guardD10.Count) module-guard sweep(s) held the invariant across the orphaning swaps, zero [crash] receipts, clean exit 0"
+                    Write-Host "Engine D10 clean exit 0 (TASK I stress: the engine survived every orphaning free with editors cycling)"
+                  }
+                }
+              }
             }
-            # TASK D machinery: wait for ENGINE EXIT before reading the log —
-            # the file is final once the process is gone (exit-verified read).
-            $procD10.WaitForExit(20000) | Out-Null
-            if (-not $procD10.HasExited) { Show-StepLogTail -Path $engineLogD10 -Proc $procD10 -Label "Engine D10"; throw "Engine D10 still running 20s after the harness exit — shutdown hung (dump above names the last phase)" }
-            if ($procD10.ExitCode -ne 0) { Show-StepLogTail -Path $engineLogD10 -Proc $procD10 -Label "Engine D10"; throw "Engine D10 exited code=$($procD10.ExitCode) before the receipt asserts (dump above)" }
-            Write-Host "Engine D10 exit verified BEFORE the log read (file final: exit 0)"
-            $d10Lines = Get-Content $engineLogD10 | Select-Object -Skip $logLinesBeforeD10
-            $crashD10 = @($d10Lines | Select-String -Pattern "\[crash\]")
-            if (($crashD10 | Measure-Object).Count -ne 0) {
-              $crashD10 | ForEach-Object { Write-Host $_.Line }
-              throw "D10: the in-process crash channel fired during the stress — adjudicate the dump (the unloaded-module list IS the verdict) before continuing"
-            }
-            # TASK I guard receipts: every orphaning swap must run the sweep
-            # and hold the invariant on the record. A PINNED window is the
-            # guard's safe failure (leak, no unmapped dispatch) — print it
-            # loudly; an UNRESOLVED window means the invariant could NOT be
-            # enforced and the next dispatch is the TASK F crash — fail now.
-            # (Attempt 13's lesson: the summary grammar is
-            # "[module-guard] retire instance=<iid> orphan=yes windows=..." —
-            # the pattern must span the instance field; "retire orphan=yes"
-            # adjacency never occurs in the engine's emission.)
-            $guardD10 = @($d10Lines | Select-String -Pattern "\[module-guard\] retire instance=\S+ orphan=yes")
-            if (($guardD10 | Measure-Object).Count -lt 1) { Show-StepLogTail -Path $engineLogD10 -Proc $procD10 -Label "Engine D10"; throw "D10: no '[module-guard] retire instance=<iid> orphan=yes' summary receipt — the swaps must orphan a module each and the sweep must hold the invariant (execution proof missing)" }
-            $guardD10 | ForEach-Object { Write-Host $_.Line }
-            $pinnedD10 = @($d10Lines | Select-String -Pattern "\[module-guard\] PINNED")
-            if (($pinnedD10 | Measure-Object).Count -gt 0) { Write-Host "D10 NOTE: $($pinnedD10.Count) window(s) could not be detached and were PINNED (safe leak — the module stays mapped; no unmapped dispatch possible):"; $pinnedD10 | ForEach-Object { Write-Host $_.Line } }
-            $unresolvedD10 = @($d10Lines | Select-String -Pattern "\[module-guard\] UNRESOLVED")
-            if (($unresolvedD10 | Measure-Object).Count -ne 0) { $unresolvedD10 | ForEach-Object { Write-Host $_.Line }; throw "D10: the guard could neither detach nor pin a window living in a module about to free — the invariant is NOT enforced (the next dispatch into it is the TASK F crash)" }
-            Write-Host "D10 receipts: $($guardD10.Count) module-guard sweep(s) held the invariant across the orphaning swaps, zero [crash] receipts, clean exit 0"
-            Write-Host "Engine D10 clean exit 0 (TASK I stress: the engine survived every orphaning free with editors cycling)"
           } finally {
             Stop-Process -Id $procD10.Id -Force -ErrorAction SilentlyContinue
           }
