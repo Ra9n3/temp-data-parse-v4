@@ -3608,3 +3608,80 @@ Predictions on record:
   lists the unloaded module by name — expected the earlier Scorch Test
   Synth.vst3 mapping (zombie JUCE-infrastructure window). Attempt 6
   produced no dump; nothing about the crash track moved.
+
+CI harness family, TASK H — D6's zero-count adjudicated: a stale grep target
+again (the conditional name suffix), closed alongside the exit-verified read.
+
+ATTEMPT 7 RECORD (run 39588984189, push-triggered by TASK G): D5 passed the
+FULL terminal-receipt machine for the first time under the fixed harness
+(attempt 6's fix validated in-run; no crash — the race did not fire). D6 then
+threw at the [final at shutdown] exactly-one site: "expected, got 0".
+
+EVIDENCE CHAIN (the run's own step log + its last-40 engine.log dump):
+  (a) the 1 Hz deltas during play carried the name suffix — 43.383 "4 notes
+  dropped (t4)", 44.390 "4 notes dropped (t4)", 45.400 "5 notes dropped (t4)";
+  (b) the final drain @ 46.273 wrote "track 4 unmapped, 16 notes dropped
+  [final at shutdown]" — NO "(t4)";
+  (c) client disconnected @ 45.911, engine exit 0 @ 46.279, first harness
+  read ~47.7 — the file was PROVABLY FINAL at read time (not a race; the
+  bounded poll ran one step, saw HasExited, stopped, count still 0);
+  (d) the old final pattern demanded "(t4) [final at shutdown]" — could not
+  match (c)'s line. Same class as TASK G's H1: a grep target written for one
+  grammar shape, broken by a legal shape it never enumerated.
+
+MECHANISM (engine-audited, bytes untouched): both drop drains emit the name
+suffix CONDITIONALLY — `name = " (" + rt->trackNames[ds-1] + ")"` iff
+`rt != nullptr && ds <= rt->trackNames.size()` (delta @ ~7139, final @ ~8575).
+g_routing is a shared_ptr that is NEVER nulled (two stores: score-load,
+routing-apply); the D6 tables PRESERVE trackNames across applies (size >= 4 —
+hence the suffixed deltas). The R-6 refusal test then LOADS AN EMPTY SCORE
+("loaded 0 events ... perTrack none" @ 45.603 — the ch17 plugin-set refusal
+falls back to the test synth, but the SCORE still rebuilds the table), and a
+zero-event score yields trackNames size 0 — the live table no longer knows
+slot 4, so the final drain legitimately omits the suffix. The suffix is
+diagnostic; the COUNT is the contract.
+
+WHAT SHIPPED (harness only; engine + mjs bytes untouched):
+- Exit-verified final read (the TASK D machinery D5 uses): WaitForExit(10000)
+  + HasExited gate + clean-exit-0 gate BEFORE the first $d6Lines read. On
+  timeout (10 s) or nonzero exit: stdout + stderr + Show-StepLogTail
+  diagnostics, then FAIL — a hung shutdown can never surface as a silent
+  zero-count. The 2 s sleep and the bounded 5 s poll are RETIRED (their job
+  was race-compensating a snapshot read; the file is provably final now).
+- Show-ReceiptDiag wired into ALL SEVEN D6 counting sites (maps loop x3
+  versions, t1a/t1b rebinds, R1 unknown-instance reject, ch17 live-table
+  reject, ch17 load-path refusal, dropDeltas, dropFinal) fed by a 10-kind
+  $d6ReceiptDiag array — attempt 7's structural gap: D6 sat outside TASK G's
+  six D5 sites, so its zero-count threw with the tail dump alone (patterns +
+  slice bounds unprinted).
+- Pattern repair: the drop patterns' name suffix is now optional —
+  `( \(t4\))?` — for BOTH deltas and final. The exactly-one assertions, the
+  throw messages, and the [14,24] drop-total floor are byte-identical
+  (verified programmatically); the suffix is diagnostic, the count is the
+  contract. NOT a contract weakening: the engine's own grammar makes the
+  suffix conditional, and the receipt exists (in-file, final) in run 7.
+
+VALIDATION (scripts/taskh_verify.py, no local pwsh): yaml.safe_load OK; pwsh
+brace-balanced (never-negative depth); all 10 diag regexes byte-equal to the
+assert regexes (the maps loop resolved per $v); retire+order checks (poll
+gone, old patterns gone, 10 s gate strictly before the first read, 7 diag
+sites); contract byte-identity; diff locality (11 hunks, all inside the D6
+yml region — D5/D7/D8/D9 and engine untouched); offline replay of the run's
+own 40-line evidence dump: OLD final pattern = 0 (reproduces attempt 7's
+throw), NEW final = 1 with total 16 in [14,24]; deltas 3/3 under both; a
+synthetic suffix-LESS delta matches ONLY the widened pattern (the widening is
+real, not speculative); the other counting-site patterns replay green
+against the dump.
+
+Predictions on record:
+
+- (P6) attempt 8's D6 passes the [final at shutdown] exactly-one assert on
+  the exit-verified read; if any D6 receipt-count ever mismatches again, the
+  console carries the per-kind regexes + slice bounds BEFORE the throw.
+- (P1) UNCHANGED: the crash track stays armed (dump flags + map/exe
+  uploads); the next CRASHING run's dump names the unloaded module —
+  expected the earlier Scorch Test Synth.vst3 mapping (zombie
+  JUCE-infrastructure window). Attempt 7 produced no dump.
+- SCOPE NOTE: D7/D8/D8b/D9 counting sites remain outside Show-ReceiptDiag
+  (the brief scoped this pass to D6); close them on evidence if any of them
+  red-shifts with an in-file receipt and a zero count.
