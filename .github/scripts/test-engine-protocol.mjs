@@ -3088,8 +3088,24 @@ ws.addEventListener("close", () => {
       console.log(`  per-instance captures: ${[...multiCapIds].join(", ")}`);
       console.log("  engine.log grammar (set diff/instance kept-added-removed-changed/exactly-one terminals/plugin-side ordinals): asserted by desktop.yml");
       console.log("========================================");
+      // Attempt 14's lesson (run 39650302358, BOTH attempts): this branch was
+      // the ONLY close-handler path in the file without an explicit
+      // process.exit — it relied on the event loop draining (zero live
+      // handles after close). The TASK I stress work added the module-scope
+      // 5 s d10Heartbeat interval (deliberately mode-independent so any
+      // wedged mode names its position), which is a LIVE HANDLE: multi
+      // printed its PASS banner and then heartbeat phase=0 FOREVER (the
+      // close handler had already cleared the 120 s global failsafe via
+      // clearTimeout; d10Phase/d10ConnectedAt are stress-mode variables and
+      // stay 0 here). The ps1's synchronous node invocation never returned,
+      // D2's own ps1 receipts never printed, and the battery wedged at the
+      // D2->D3 seam for 32+ minutes — 3x past the summed per-mode timeout
+      // ceiling, which is what made it diagnosable as a hang rather than a
+      // slow run. Every other branch exits explicitly; multi now does too.
+      process.exit(0);
     } else {
       console.error(`FAILED: loaded=${JSON.stringify(multiLoadedCount)} acks=${[...multiAckSeqs].join(",")} caps=${JSON.stringify(multiCapsCount)} peak=${multiPeak.toFixed(3)} wide=${JSON.stringify(multiWide)} editors=${multiEdOpenA}/${multiEdOpenB}/${multiEdFocus}/${multiEdCloseA}/${multiEdCloseB} headless=${multiHeadlessSkip} captures=${[...multiCapIds].join(",")}`);
+      process.exit(1);
     }
   } else if (mode === "latency") {
     // ── Stage 3i close-time validation ──
