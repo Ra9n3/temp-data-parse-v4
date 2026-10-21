@@ -467,15 +467,43 @@ const d10SendLoad = (seq, iid) => {
   // record whether the payload left the harness intact or the keys were lost
   // in transit/parse. Engine bytes stay frozen; the fingerprint is harness
   // evidence.
+  //
+  // ATTEMPT 12 VERDICT (run 39642965060, the fingerprint did its job): the
+  // payload left the harness INTACT (567 bytes sent, 567 received) and the
+  // plugins array WAS in it — the loss was the PARSE. The engine's multi-
+  // instance grammar (Stage 3d-4, main.cpp handle_load) requires
+  // plugins[N].instanceId on EVERY entry: an entry without it sets
+  // channelsBad ("plugins[0].instanceId is required"), the entry is skipped,
+  // and with reqInstances empty the load sails through SCORE-ONLY. This
+  // harness had been sending the raw SCAN-CATALOG row (name/vendor/version/
+  // uid/isInstrument/classId/path — no instanceId), a shape no green mode
+  // ever used: the multi machine carries instanceId (proven), the latency
+  // machine carries {instanceId, uid, path, name} (proven). NAMED ENGINE
+  // RESIDUAL (frozen this phase): a malformed plugins[] under
+  // pluginRequested==false && channelsBad==true is accepted score-only with
+  // NO wire error and NO engine.log line — the REFUSED branch
+  // ("plugin set REFUSED: ...") only speaks when reqInstances is non-empty.
+  // That is a silent drop of a malformed plugin request — the exact class
+  // the terminal-receipt invariant forbids. Adjudicated separately; the fix
+  // here is the proven load-request shape.
+  //
+  // Events also carry trackId "t1" (the multi machine's discipline): the
+  // routing map's t1 → {inst, ch} only steers events that NAME the track —
+  // without trackId the note rides the built-in test synth and the plugin
+  // renders silence (perTrack "none" in the receipt, no perTrack
+  // "t1=2 [ch..]" routing proof).
   d10LoadPayload = JSON.stringify({
     type: "load", seq,
     events: [
-      { eventType: "NOTE_ON", channel: 1, data1: 60, data2: 100, timestampTicks: 480 },
-      { eventType: "NOTE_OFF", channel: 1, data1: 60, data2: 0, timestampTicks: 8447 },
+      { eventType: "NOTE_ON", channel: 1, data1: 60, data2: 100, timestampTicks: 480, trackId: "t1" },
+      { eventType: "NOTE_OFF", channel: 1, data1: 60, data2: 0, timestampTicks: 8447, trackId: "t1" },
     ],
     meta: D10_META,
     routing: { t1: { inst: iid, ch: 1 } },
-    plugins: [d10PluginOf(iid)],
+    plugins: [(() => {
+      const row = d10PluginOf(iid);   // the scan-catalog row (uid/path/name)
+      return { instanceId: iid, uid: row.uid, path: row.path, name: row.name };
+    })()],
   });
   console.log(`[test] stress load payload (${d10LoadPayload.length} bytes): ${d10LoadPayload}`);
   ws.send(d10LoadPayload);
