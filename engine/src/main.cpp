@@ -322,6 +322,7 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
+#include <functional>
 #include <iostream>
 #include <limits>
 #include <map>
@@ -536,7 +537,7 @@ namespace {
 // "openEditor":true); the lazy-device window is receipted (nominal fallback +
 // device-ready race re-prepare); matching requests coalesce into an in-flight
 // init instead of answering "reused" while it is still outstanding.
-constexpr const char* kEngineVersion = "0.13.0";   // TASK I: the module-guard — no module unload while a window's WNDPROC lives in it (detach into user32 or pin; the dangling-WNDPROC crash class is structurally closed)
+constexpr const char* kEngineVersion = "0.14.0";   // TASK J root fix: teardown ordering is load-bearing (destroy windows -> drain -> unload; owner-thread destroy via the init-worker teardown jobs), the module-guard is demoted to the fail-loud verify+PIN backstop (no detach — never the load-bearing mechanism); the dangling-WNDPROC crash class is closed by ORDERING, not by interception
 constexpr int kProtocolVersion = 1;
 constexpr int kDefaultPort = 9377;
 constexpr int kMaxVoices = 64;
@@ -4400,33 +4401,97 @@ std::vector<HWND> collectProcessWindows() {
     return out;
 }
 
-// THE GUARD. why: "retire" (the message-thread node removal — the deferred
-// free follows within ~500 ms) or "load-abort" (a pre-commit instance is
-// about to destruct on the worker). No nested message pump by design: the
-// editor tree is destroyed synchronously before this runs, and between here
-// and the deferred free the message thread pumps naturally.
-void sweepForModule(const std::string& iid, const std::string& pluginPath,
-                    const char* why) {
-    // TASK J STEP 3 — REPRO INSTRUMENT (branch task-j-engine-branch ONLY).
-    // The guard's mitigation (detach into user32 / pin the module) is
-    // DISABLED so the dangling-WNDPROC race can fire pre-fix (the brief:
-    // "use the un-stalled D10 to make the race fire pre-fix"). The sweep
-    // stays OBSERVATION-ONLY: the orphan gate + window classification +
-    // receipts remain, so the log still proves the ghost window exists in
-    // the retiring module at every orphaning free — without shielding it.
-    // The root-fix commits (step 2) DELETE this instrument and restore a
-    // real guard as a fail-loud backstop. Never ship outside the branch.
-    static const bool kReproInstrumentAnnounced = [] {
-        engineLog("[module-guard] REPRO INSTRUMENT ACTIVE — detach and pin DISABLED (TASK J step 3 pre-fix exposure; the root fix removes this instrument). A crash under this build IS the repro evidence; the P1 dump adjudicates it.");
-        return true;
-    }();
-    (void)kReproInstrumentAnnounced;
+// ─── TASK J root fix — the teardown machinery (design R1/R2, audit item W5) ──
+// The brief: "everywhere: destroy windows → drain/pump pending messages →
+// then unload the module." The only window that can outlive its module is W5
+// (docs/window-module-lifecycle.md §2) — the plugin DLL's private JUCE
+// infrastructure window, owned by whichever thread first touched the plugin's
+// GUI stack (in CI: the init worker, via the load's hasEditor view probe,
+// main.cpp's load-path comment names the exact point). The machinery:
+// classify the retiring module's windows by owning thread; destroy each on
+// its OWNER thread (DestroyWindow is same-thread-or-fail — the cross-thread
+// destroy inside the DLL's loader-lock static teardown is the confirmed
+// silent-failure mechanism); drain the owning thread's queue (bounded) so
+// pending messages dispatch while the module is still mapped; only then does
+// the free become schedulable (the retire's phase 2). The demoted guard's
+// fail-loud backstop lives in verifyForModule below (design R3).
 
-    // ORPHAN GATE — sweep only when the module can actually free: any other
-    // LIVE instance sharing the path keeps JUCE's module-cache refcount above
-    // zero, and so does an in-flight load of the SAME path (a same-path
-    // replace creates its instance before the old one is released — sweeping
-    // then could detach the INCOMING instance's windows out from under it).
+struct ModuleWindow { HWND hwnd; DWORD tid; std::wstring module; };
+
+// The init worker's thread id — set at plugin_init_thread start (the thread
+// the load's view probe boots the plugin's private JUCE stack on, i.e. the
+// W5 owner in CI). Zero until then (early retires have no worker-owned
+// windows to hand over — the classify step treats 0 as "unknown owner").
+std::atomic<uint32_t> g_initWorkerTid{0};
+
+// Collect + classify: every window of this process whose WNDPROC's module
+// file lives inside pluginPath (bundle-prefix match, case-insensitive — the
+// same rule the guard has always used).
+std::vector<ModuleWindow> collectModuleWindows(const std::string& pluginPath) {
+    std::vector<ModuleWindow> out;
+    const std::wstring wantKey = pathKey(utf8ToWide(pluginPath));
+    if (wantKey.empty()) return out;
+    for (const HWND hwnd : collectProcessWindows()) {
+        const LONG_PTR proc = GetWindowLongPtrW(hwnd, GWLP_WNDPROC);
+        if (proc == 0) continue;
+        wchar_t modPath[MAX_PATH] = {};
+        HMODULE mod = nullptr;
+        if (GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS |
+                                   GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                               reinterpret_cast<LPCWSTR>(proc), &mod) &&
+            mod != nullptr)
+            GetModuleFileNameW(mod, modPath, MAX_PATH);
+        const std::wstring modKey = pathKey(std::wstring(modPath));
+        if (modKey.empty() || modKey.rfind(wantKey, 0) != 0) continue;
+        out.push_back({hwnd, GetWindowThreadProcessId(hwnd, nullptr), std::wstring(modPath)});
+    }
+    return out;
+}
+
+// Same-thread destroy + bounded drain (audit item W5). Valid ONLY on the
+// window-owning thread: DestroyWindow delivers WM_DESTROY/WM_NCDESTROY
+// inline, and the drain then DISPATCHES whatever was already queued for this
+// thread's windows while the module is still mapped — the brief's
+// "drain/pump pending messages" before the unload. Bounded: 256 messages.
+// Skips (never destroys) windows whose owner is not the calling thread —
+// ownership was verified at classification, re-verified here against the
+// live window (a window can die between collect and destroy).
+int destroyAndDrainOnThisThread(const std::vector<ModuleWindow>& wins,
+                                const std::string& iid, const std::string& path) {
+    const DWORD self = GetCurrentThreadId();
+    int destroyed = 0;
+    for (const ModuleWindow& w : wins) {
+        if (w.tid != self) continue;   // not ours — never DestroyWindow cross-thread
+        DWORD liveTid = 0;
+        if (GetWindowThreadProcessId(w.hwnd, &liveTid) == 0 || liveTid != self) continue;
+        const BOOL ok = DestroyWindow(w.hwnd);
+        ++destroyed;
+        engineLog(std::string("[m[module-teardown] destroyed hwnd=") + hexAddr(reinterpret_cast<uintptr_t>(w.hwnd)) +
+                  " thread=" + std::to_string(self) +
+                  " (owner-thread destroy — WM_DESTROY delivered inline) ok=" + (ok ? "1" : "0") +
+                  " instance=" + iid + " module=" + wideToUtf8(w.module));
+    }
+    if (destroyed == 0) return 0;
+    int drained = 0;
+    MSG msg;
+    while (drained < 256 && PeekMessageW(&msg, nullptr, 0, 0, PM_REMOVE)) {
+        TranslateMessage(&msg);
+        DispatchMessageW(&msg);
+        ++drained;
+    }
+    if (drained > 0)
+        engineLog("[m[module-teardown] drained " + std::to_string(drained) +
+                  " queued message(s) on thread " + std::to_string(self) +
+                  " while the module is still mapped instance=" + iid + " module=" + path);
+    return destroyed;
+}
+
+// The shared-ownership lock (the brief's refcount/lock clause), factored:
+// true = no live instance and no in-flight load shares the path, so the
+// module CAN free — and only then may its windows be torn down (a live
+// instance keeps its windows; JUCE's module-cache refcount keeps the module
+// mapped for it). Logs the orphan=no receipt itself.
+bool moduleIsOrphaned(const std::string& iid, const std::string& pluginPath, const char* why) {
     int samePath = 0;
     if (auto set = liveSetSnapshot()) {
         for (HostedPlugin* m : set->bySlot) {
@@ -4442,52 +4507,154 @@ void sweepForModule(const std::string& iid, const std::string& pluginPath,
                            _stricmp(g_loadInFlightPath.c_str(), pluginPath.c_str()) == 0;
     }
     if (samePath > 0 || sameLoadInFlight) {
-        engineLog(std::string("[module-guard] ") + why + " instance=" + iid + " orphan=no (" +
+        engineLog(std::string("[m[module-teardown] ") + why + " instance=" + iid + " orphan=no (" +
                   std::string(samePath > 0
                                   ? std::to_string(samePath) + " live instance(s) share the module"
                                   : "a same-path load is in flight — its instance holds the module ref") +
-                  ") — the module cannot free; sweep skipped");
+                  ") — the module cannot free; teardown skipped");
+        return false;
+    }
+    return true;
+}
+
+// The worker job queue: retires of DIFFERENT modules can overlap (retireAll
+// loops); each carries its own window subset + its own MM continuation.
+struct TeardownJob {
+    std::string iid;
+    std::string path;
+    std::vector<ModuleWindow> windows;   // the worker-owned subset
+    std::function<void()> onDone;        // runs on the MM after the ack
+};
+std::mutex g_teardownMutex;
+std::vector<TeardownJob> g_teardownQueue;
+
+// Worker-side pump — called from the init worker's loop each pass (~100 ms
+// cadence). Destroys the job's windows on THIS thread (the owner), drains,
+// acks via the MM continuation (callAsync — phase 2 is always a fresh MM
+// dispatch). If the worker is mid-load, the job waits for the next pass: the
+// continuation (and thus the node removal that schedules the free) lands
+// later — ordering is never violated, only deferred.
+void runPendingTeardownJobs() {
+    std::vector<TeardownJob> jobs;
+    {
+        std::lock_guard<std::mutex> lock(g_teardownMutex);
+        jobs.swap(g_teardownQueue);
+    }
+    for (TeardownJob& job : jobs) {
+        const int destroyed = destroyAndDrainOnThisThread(job.windows, job.iid, job.path);
+        engineLog("[m[module-teardown] worker ack instance=" + job.iid + " module=" + job.path +
+                  " destroyed=" + std::to_string(destroyed) + " of " +
+                  std::to_string(job.windows.size()) + " worker-owned window(s)");
+        if (job.onDone) juce::MessageManager::callAsync(std::move(job.onDone));
+    }
+}
+
+// MM phase-1 (design R1): the orphan gate, then destroy what the CALLING
+// thread owns (synchronous — WM_DESTROY is inline), hand the init worker the
+// rest, and schedule onDone on the MM (via callAsync — phase 2 is always a
+// fresh dispatch, never inline re-entry). Windows owned by any OTHER thread
+// (a plugin's own window thread — W7 in the audit map) are left for
+// verifyForModule's fail-loud backstop. onDone runs even on every
+// short-circuit — phase 2 must always happen.
+void beginModuleTeardown(const std::string& iid, const std::string& pluginPath,
+                         const char* why, std::function<void()> onDone) {
+    if (!moduleIsOrphaned(iid, pluginPath, why)) {
+        if (onDone) juce::MessageManager::callAsync(std::move(onDone));
         return;
     }
-
-    const std::wstring wantKey = pathKey(utf8ToWide(pluginPath));
-    int matched = 0, detached = 0, pinned = 0, failed = 0;
-    for (const HWND hwnd : collectProcessWindows()) {
-        const LONG_PTR proc = GetWindowLongPtrW(hwnd, GWLP_WNDPROC);
-        if (proc == 0) continue;
-        wchar_t modPath[MAX_PATH] = {};
-        HMODULE mod = nullptr;
-        if (GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS |
-                                   GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
-                               reinterpret_cast<LPCWSTR>(proc), &mod) &&
-            mod != nullptr)
-            GetModuleFileNameW(mod, modPath, MAX_PATH);
-        const std::wstring modKey = pathKey(std::wstring(modPath));
-        // IN the retiring module: the WNDPROC's module file lives inside the
-        // plugin's path (bundle-dir loads nest the DLL under the bundle —
-        // prefix match, case-insensitive). An unresolved proc cannot be in
-        // the still-mapped module; skipping it here is correct (the module
-        // has not freed yet — resolution cannot legitimately fail).
-        if (modKey.empty() || wantKey.empty() || modKey.rfind(wantKey, 0) != 0) continue;
-        ++matched;
-        DWORD zTid = GetWindowThreadProcessId(hwnd, nullptr);
-        engineLog("[module-guard] window in the retiring module hwnd=" + hexAddr(reinterpret_cast<uintptr_t>(hwnd)) +
-                  " thread=" + std::to_string(zTid) +
-                  " module=" + wideToUtf8(modPath) +
-                  " — REPRO INSTRUMENT: mitigation INERT (no detach, no pin) — this window's WNDPROC is LEFT ARMED for the free that follows");
-        // TASK J repro instrument: the pre-fix engine did NOTHING here. No
-        // SetWindowLongPtrW, no GetModuleHandleExW PIN — the module frees
-        // with the window's WNDPROC pointing into it, exactly the exposure
-        // the TASK F dump died from. detached/pinned/failed stay 0 so the
-        // receipt grammar stays machine-readable (the D10 assert only reads
-        // the orphan=yes prefix; zero PINNED/UNRESOLVED lines keep the yml
-        // notes silent).
+    const std::vector<ModuleWindow> wins = collectModuleWindows(pluginPath);
+    std::vector<ModuleWindow> workerOwned;
+    const DWORD self = GetCurrentThreadId();
+    const uint32_t workerTid = g_initWorkerTid.load(std::memory_order_acquire);
+    int directCount = 0;
+    for (const ModuleWindow& w : wins) {
+        if (w.tid == self) { ++directCount; continue; }          // destroyed below, same thread
+        if (workerTid != 0 && w.tid == static_cast<DWORD>(workerTid))
+            workerOwned.push_back(w);                            // handed to the worker
+        // other-owner (W7): not destroyable from here — the verify backstop
+        // refuses the unload if it survives.
     }
-    engineLog(std::string("[module-guard] ") + why + " instance=" + iid + " orphan=yes windows=" +
-              std::to_string(matched) + " detached=" + std::to_string(detached) +
-              " pinned=" + std::to_string(pinned) + " failed=" + std::to_string(failed) +
-              " module=" + pluginPath +
-              " — mitigation=INERT (TASK J repro instrument): the module frees with any live WNDPROC in it armed");
+    const size_t workerCount = workerOwned.size();
+    int destroyedDirect = 0;
+    if (directCount > 0)
+        destroyedDirect = destroyAndDrainOnThisThread(wins, iid, pluginPath);
+    engineLog(std::string("[m[module-teardown] ") + why + " instance=" + iid +
+              " module=" + pluginPath + " calling-thread destroyed=" +
+              std::to_string(destroyedDirect) + " handed-to-worker=" +
+              std::to_string(workerCount) +
+              " (destroy windows + drain BEFORE the node removal schedules the free)");
+    if (workerCount > 0) {
+        TeardownJob job;
+        job.iid = iid;
+        job.path = pluginPath;
+        job.windows = std::move(workerOwned);
+        job.onDone = std::move(onDone);
+        {
+            std::lock_guard<std::mutex> lock(g_teardownMutex);
+            g_teardownQueue.push_back(std::move(job));
+        }
+        return;   // the worker's ack continues via callAsync
+    }
+    if (onDone) juce::MessageManager::callAsync(std::move(onDone));
+}
+
+// THE DEMOTED GUARD (design R3, audit item §3): the fail-loud backstop.
+// Runs AFTER the teardown (destroy+drain) and BEFORE the free becomes
+// schedulable. Every window still living in the module is a teardown-order
+// DEFECT: log loudly and PIN the module (GetModuleHandleExW PIN — the
+// refuse-unload semantics: the FreeLibrary becomes a refcount decrement that
+// can never unmap). The leak is the safe failure, receipted; the crash class
+// stays structurally closed. NO detach — the guard never carries the
+// teardown again (the brief: "never the load-bearing mechanism").
+void verifyForModule(const std::string& iid, const std::string& pluginPath, const char* why) {
+    if (!moduleIsOrphaned(iid, pluginPath, why)) return;
+    const std::vector<ModuleWindow> wins = collectModuleWindows(pluginPath);
+    int pinned = 0, failed = 0;
+    for (const ModuleWindow& w : wins) {
+        engineLog(std::string("[m[module-guard] TEARDOWN-ORDER RESIDUE hwnd=") +
+                  hexAddr(reinterpret_cast<uintptr_t>(w.hwnd)) +
+                  " thread=" + std::to_string(w.tid) +
+                  " module=" + wideToUtf8(w.module) +
+                  " — the destroy+drain did not clear this window; REFUSING the unload");
+        const LONG_PTR proc = GetWindowLongPtrW(w.hwnd, GWLP_WNDPROC);
+        HMODULE pinMod = nullptr;
+        if (proc != 0 &&
+            GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS |
+                                   GET_MODULE_HANDLE_EX_FLAG_PIN,
+                               reinterpret_cast<LPCWSTR>(proc), &pinMod) &&
+            pinMod != nullptr) {
+            ++pinned;
+            engineLog("[m[module-guard] PINNED module=" + wideToUtf8(w.module) +
+                      " — stays mapped for process life (safe leak, unmapped dispatch impossible)");
+        } else {
+            ++failed;
+            engineLog("[m[module-guard] UNRESOLVED hwnd=" + hexAddr(reinterpret_cast<uintptr_t>(w.hwnd)) +
+                      " module=" + wideToUtf8(w.module) +
+                      " — PIN failed (err=" + std::to_string(GetLastError()) +
+                      ") — the crash window stays armed; the next dump names this module");
+        }
+    }
+    engineLog(std::string("[m[module-guard] ") + why + " instance=" + iid + " orphan=yes windows=" +
+              std::to_string(wins.size()) + " pinned=" + std::to_string(pinned) +
+              " failed=" + std::to_string(failed) + " module=" + pluginPath +
+              (wins.empty()
+                   ? " — teardown verified: no window's WNDPROC lives in the module; the free may proceed"
+                   : " — TEARDOWN-ORDER RESIDUE: unload REFUSED (the module is pinned for process life; the leak is the safe failure)"));
+}
+
+// Load-abort teardown (design R2, audit item §3-load-abort): same-thread
+// destroy + drain, then the verify backstop. Runs on the init worker — the
+// same thread the load's view probe booted the plugin's private JUCE stack
+// on — so the DLL's loader-lock static teardown at the destructor's
+// FreeLibrary finds its window already gone.
+void teardownModuleWindowsForLoadAbort(const std::string& iid, const std::string& pluginPath) {
+    if (!moduleIsOrphaned(iid, pluginPath, "load-abort")) return;
+    const std::vector<ModuleWindow> wins = collectModuleWindows(pluginPath);
+    const int destroyed = destroyAndDrainOnThisThread(wins, iid, pluginPath);
+    engineLog("[m[module-teardown] load-abort instance=" + iid + " module=" + pluginPath +
+              " destroyed=" + std::to_string(destroyed) + " of " + std::to_string(wins.size()) +
+              " window(s) on this thread (the free runs here — same-thread teardown before FreeLibrary)");
+    verifyForModule(iid, pluginPath, "load-abort");
 }
 
 } // namespace scorchguard
@@ -4556,21 +4723,24 @@ std::string loadHostedPlugin(const juce::var& pluginVar, const std::string& inst
         auto inst = mgr.createPluginInstance(*chosen, 44100.0, 512, err);
         if (inst == nullptr) return "createPluginInstance failed: " + err.toStdString();
 #ifdef _WIN32
-        // TASK I: any death from HERE to the success commit leaves the
-        // instance engine-owned; its destructor may free the DLL. The sweep
-        // runs at scope exit BEFORE that destruction (declared after, so it
-        // destructs first). A no-output-bus refusal or an exception during
-        // capability capture (the view probe — the point where the plugin's
-        // private JUCE copy boots its infrastructure window) both land here.
-        struct PreCommitSweepInst {
+        // TASK J root fix (design R2, audit item §3-load-abort): any death
+        // from HERE to the success commit leaves the instance engine-owned;
+        // its destructor frees the DLL ON THIS THREAD (the worker). The
+        // teardown runs at scope exit BEFORE that destruction (declared
+        // after, so it destructs first): destroy the module's windows on
+        // this — their OWNING — thread + drain, then the fail-loud verify.
+        // A no-output-bus refusal or an exception during capability capture
+        // (the view probe — the point where the plugin's private JUCE copy
+        // boots its infrastructure window) both land here.
+        struct PreCommitTeardownInst {
             const std::string* iidRef;
             const std::string* pathRef;
             const std::unique_ptr<juce::AudioPluginInstance>* instRef;
-            ~PreCommitSweepInst() {
+            ~PreCommitTeardownInst() {
                 if (instRef->get() != nullptr)
-                    scorchguard::sweepForModule(*iidRef, *pathRef, "load-abort");
+                    scorchguard::teardownModuleWindowsForLoadAbort(*iidRef, *pathRef);
             }
-        } preCommitSweepInst{&instanceId, &path, &inst};
+        } preCommitTeardownInst{&instanceId, &path, &inst};
 #endif
         // Stage 3e-2 — the instance gets the engine's playhead BEFORE any
         // prepare (plugins cache the pointer; the audio callback publishes
@@ -4625,19 +4795,20 @@ std::string loadHostedPlugin(const juce::var& pluginVar, const std::string& inst
         auto hosted = std::make_unique<HostedPlugin>();
         hosted->instance = std::move(inst);
 #ifdef _WIN32
-        // TASK I: the same guard for the post-move window — a throw while
-        // `hosted` holds the instance (the probe-queue or channel-table
-        // block) still frees the DLL at scope exit. Runs BEFORE that
-        // destruction (reverse declaration order).
-        struct PreCommitSweepHosted {
+        // TASK J root fix (design R2, audit item §3-load-abort): the same
+        // teardown for the post-move window — a throw while `hosted` holds
+        // the instance (the probe-queue or channel-table block) still frees
+        // the DLL at scope exit, ON THIS THREAD. Runs BEFORE that destruction
+        // (reverse declaration order).
+        struct PreCommitTeardownHosted {
             const std::string* iidRef;
             const std::string* pathRef;
             const std::unique_ptr<HostedPlugin>* hostedRef;
-            ~PreCommitSweepHosted() {
+            ~PreCommitTeardownHosted() {
                 if (hostedRef->get() != nullptr && (*hostedRef)->instance != nullptr)
-                    scorchguard::sweepForModule(*iidRef, *pathRef, "load-abort");
+                    scorchguard::teardownModuleWindowsForLoadAbort(*iidRef, *pathRef);
             }
-        } preCommitSweepHosted{&instanceId, &path, &hosted};
+        } preCommitTeardownHosted{&instanceId, &path, &hosted};
 #endif
         hosted->name = chosen->name.toStdString();
         hosted->vendor = chosen->manufacturerName.toStdString();
@@ -6775,30 +6946,27 @@ void handle_capture_state() {
 // is seconds-class and must never run inside a message-thread job. Editor
 // close stays here: window teardown is message-thread property and is not
 // seconds-class.
-void retireInstanceNodeOnMessageThread(const std::string& iid) {
-    MmNamedJob _mmNamedJob("retireNode(" + iid + ")");   // field-gate B-2
+// TASK J root fix (design R1, audit item §3-retire) — retire phase 2: runs
+// on the MM as a FRESH dispatch after the module teardown acks (the retire's
+// windows destroyed on their OWNER threads + drained). The invariant chain:
+// destroy → drain → verify (pin-on-residue) → node removal → free scheduled.
+// The free (RenderSequenceExchange) is a LATER dispatch on this same thread,
+// so it can never precede the teardown.
+void finishRetireInstanceNode(const std::string& iid,
+                              std::chrono::steady_clock::time_point t0) {
+    MmNamedJob _mmNamedJob("retireFinish(" + iid + ")");   // field-gate B-2
     HostedPlugin* old = findLiveInstance(iid);
-    if (old == nullptr || old->rawInstance.load(std::memory_order_acquire) == nullptr) {
-        engineLog("[plugin] retire SKIPPED — instance not live at message-thread run (requested id \"" +
-                  iid + "\")");
-        return;
-    }
-    destroyEditorWindow(old->instanceId, false);   // the editor must not outlive the node
+    if (old == nullptr || old->rawInstance.load(std::memory_order_acquire) == nullptr)
+        return;   // retired by another path while the teardown was in flight
+    // An editor opened during the teardown gap (the instance was still
+    // published) is closed here — idempotent when there is none.
+    destroyEditorWindow(old->instanceId, false);
 #ifdef _WIN32
-    // TASK I: the node removal below can orphan this instance's DLL (the
-    // last instance of its path) — JUCE frees it within ~500 ms on this
-    // thread (RenderSequenceExchange). Invariant FIRST: no module unload
-    // while a window's WNDPROC lives in it — detach into user32 or pin.
-    scorchguard::sweepForModule(old->instanceId, old->path, "retire");
+    // The demoted guard (design R3): verify the teardown cleared the module;
+    // any residue is a teardown-order defect — PIN the module (refuse the
+    // unload), never the load-bearing mechanism.
+    scorchguard::verifyForModule(old->instanceId, old->path, "retire");
 #endif
-    const auto t0 = std::chrono::steady_clock::now();
-    // M3 PR2 (R2/R4): tear down this instance's ACTIVE strips BEFORE the
-    // plugin node removal — receipts name every strip; the table entries
-    // survive (inactive) for the next load. The R4 note hygiene rides the
-    // audio-side slot wipe this retire triggers (g_slotStateClearPending set
-    // by the worker's removal/unload paths): the wipe counts the abandoned
-    // held notes it clears and the worker speaks the teardown-flush receipt.
-    teardownStripsForInstanceOnMessageThread(iid);
     // Milestone 2: remove the PLUGIN node AND its selector (the MIDI bridge)
     // — the vendor disconnects both automatically.
     auto selNode = g_host.removeNodeByID(old->selectorNodeID);
@@ -6821,6 +6989,37 @@ void retireInstanceNodeOnMessageThread(const std::string& iid) {
     else
         engineLog("[plugin] node remove SKIPPED instance=" + old->instanceId +
                   " (no live node in the graph) removeMs=" + std::to_string(ms) + "ms");
+}
+
+void retireInstanceNodeOnMessageThread(const std::string& iid) {
+    MmNamedJob _mmNamedJob("retireNode(" + iid + ")");   // field-gate B-2
+    HostedPlugin* old = findLiveInstance(iid);
+    if (old == nullptr || old->rawInstance.load(std::memory_order_acquire) == nullptr) {
+        engineLog("[plugin] retire SKIPPED — instance not live at message-thread run (requested id \"" +
+                  iid + "\")");
+        return;
+    }
+    destroyEditorWindow(old->instanceId, false);   // the editor must not outlive the node
+    const auto t0 = std::chrono::steady_clock::now();
+    // M3 PR2 (R2/R4): tear down this instance's ACTIVE strips BEFORE the
+    // plugin node removal — receipts name every strip; the table entries
+    // survive (inactive) for the next load. The R4 note hygiene rides the
+    // audio-side slot wipe this retire triggers (g_slotStateClearPending set
+    // by the worker's removal/unload paths): the wipe counts the abandoned
+    // held notes it clears and the worker speaks the teardown-flush receipt.
+    teardownStripsForInstanceOnMessageThread(iid);
+#ifdef _WIN32
+    // TASK J root fix (design R1, audit item §3-retire): the node removal in
+    // phase 2 schedules the module free (RenderSequenceExchange, ≤~500 ms,
+    // this thread). BEFORE it: destroy the retiring module's windows on
+    // their OWNER threads and drain pending messages — the brief's ordering
+    // (destroy → drain → unload) made structural: phase 2 cannot run until
+    // the teardown acks, and the free cannot be scheduled before phase 2.
+    scorchguard::beginModuleTeardown(old->instanceId, old->path, "retire",
+                                     [iid, t0] { finishRetireInstanceNode(iid, t0); });
+#else
+    finishRetireInstanceNode(iid, t0);
+#endif
 }
 
 // The ALL-instance form (unload everything: the superseded-commit path and
@@ -7194,6 +7393,14 @@ int main(int argc, char** argv) {
     // engine.log receipts are emitted on completion. Joined after
     // server.stop() like the state broadcaster, so sends stay valid.
     std::thread plugin_init_thread([&server]() {
+#ifdef _WIN32
+        // TASK J root fix (design R1): this thread owns the plugin's private
+        // JUCE infrastructure window (the load's hasEditor view probe boots
+        // it HERE) — the teardown handoff targets it, and the worker pumps
+        // the pending module-teardown jobs each pass (~100 ms cadence).
+        scorchguard::g_initWorkerTid.store(static_cast<uint32_t>(GetCurrentThreadId()),
+                                           std::memory_order_release);
+#endif
         uint64_t seenGen = 0;
         // M2 output-guard janitor state (this thread only).
         uint64_t janitorLastClips = 0;
@@ -7202,6 +7409,12 @@ int main(int argc, char** argv) {
         float janitorLastGr = 0.0f;
         std::chrono::steady_clock::time_point janitorLastGrEmit{};
         while (!g_should_exit.load()) {
+#ifdef _WIN32
+            // TASK J root fix (design R1): the module-teardown pump — destroy
+            // retired modules' worker-owned windows on THIS (owning) thread +
+            // bounded drain, then ack the retire's phase 2 on the MM.
+            scorchguard::runPendingTeardownJobs();
+#endif
             // Stage 3c-polish (D2): retire aged publications FIRST — Stage 3h
             // replaced the fixed 250 ms grace with a PROOF: the audio
             // callback's buffer-sequence counter (see the retirement-queue
