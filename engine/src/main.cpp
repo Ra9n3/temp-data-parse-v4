@@ -4483,7 +4483,7 @@ int destroyAndDrainOnThisThread(const std::vector<ModuleWindow>& wins,
         if (GetWindowThreadProcessId(w.hwnd, &liveTid) == 0 || liveTid != self) continue;
         const BOOL ok = DestroyWindow(w.hwnd);
         ++destroyed;
-        engineLog(std::string("[m[module-teardown] destroyed hwnd=") + hexAddr(reinterpret_cast<uintptr_t>(w.hwnd)) +
+        engineLog(std::string("[module-teardown] destroyed hwnd=") + hexAddr(reinterpret_cast<uintptr_t>(w.hwnd)) +
                   " thread=" + std::to_string(self) +
                   " (owner-thread destroy — WM_DESTROY delivered inline) ok=" + (ok ? "1" : "0") +
                   " instance=" + iid + " module=" + wideToUtf8(w.module));
@@ -4497,7 +4497,7 @@ int destroyAndDrainOnThisThread(const std::vector<ModuleWindow>& wins,
         ++drained;
     }
     if (drained > 0)
-        engineLog("[m[module-teardown] drained " + std::to_string(drained) +
+        engineLog("[module-teardown] drained " + std::to_string(drained) +
                   " queued message(s) on thread " + std::to_string(self) +
                   " while the module is still mapped instance=" + iid + " module=" + path);
     return destroyed;
@@ -4524,7 +4524,7 @@ bool moduleIsOrphaned(const std::string& iid, const std::string& pluginPath, con
                            _stricmp(g_loadInFlightPath.c_str(), pluginPath.c_str()) == 0;
     }
     if (samePath > 0 || sameLoadInFlight) {
-        engineLog(std::string("[m[module-teardown] ") + why + " instance=" + iid + " orphan=no (" +
+        engineLog(std::string("[module-teardown] ") + why + " instance=" + iid + " orphan=no (" +
                   std::string(samePath > 0
                                   ? std::to_string(samePath) + " live instance(s) share the module"
                                   : "a same-path load is in flight — its instance holds the module ref") +
@@ -4559,9 +4559,9 @@ void runPendingTeardownJobs() {
     }
     for (TeardownJob& job : jobs) {
         const int destroyed = destroyAndDrainOnThisThread(job.windows, job.iid, job.path);
-        engineLog("[m[module-teardown] worker ack instance=" + job.iid + " module=" + job.path +
+        engineLog("[module-teardown] worker ack instance=" + job.iid + " module=" + job.path +
                   " destroyed=" + std::to_string(destroyed) + " of " +
-                  std::to_string(job.windows.size()) + " worker-owned window(s)");
+                  std::to_string(job.windows.size()) + " handed window(s) (a window the worker does not own is named in the found receipts and refused by the phase-2 verify)");
         if (job.onDone) juce::MessageManager::callAsync(std::move(job.onDone));
     }
 }
@@ -4585,20 +4585,39 @@ void beginModuleTeardown(const std::string& iid, const std::string& pluginPath,
     const uint32_t workerTid = g_initWorkerTid.load(std::memory_order_acquire);
     int directCount = 0;
     for (const ModuleWindow& w : wins) {
-        if (w.tid == self) { ++directCount; continue; }          // destroyed below, same thread
-        if (workerTid != 0 && w.tid == static_cast<DWORD>(workerTid))
-            workerOwned.push_back(w);                            // handed to the worker
-        // other-owner (W7): not destroyable from here — the verify backstop
-        // refuses the unload if it survives.
+        // OBSERVABILITY (the d7f5778 acceptance run's lesson: phase 1 printed
+        // destroyed=0 handed-to-worker=0 while phase 2 pinned the ghost 15 ms
+        // later - the per-window classification was invisible). One line per
+        // found window, with the classification and the stored worker tid.
+        const char* klass = w.tid == self ? "mm-owned (destroyed on this thread)"
+                          : (workerTid != 0 && w.tid == static_cast<DWORD>(workerTid))
+                                ? "init-worker-owned (handed to the worker)"
+                                : "other-owner (handed to the worker; the worker destroys it only if it owns it - else phase 2 refuses the unload)";
+        engineLog(std::string("[module-teardown] found hwnd=") +
+                  hexAddr(reinterpret_cast<uintptr_t>(w.hwnd)) +
+                  " thread=" + std::to_string(w.tid) +
+                  " workerTid=" + std::to_string(workerTid) +
+                  " module=" + wideToUtf8(w.module) +
+                  " - " + klass);
+        if (w.tid == self) { ++directCount; continue; }
+        // EVERY non-MM window is handed to the worker - the worker
+        // re-verifies ownership per window (destroyAndDrainOnThisThread only
+        // ever destroys windows of ITS OWN thread) and the job receipt names
+        // anything it had to leave. This removes the g_initWorkerTid
+        // single-point-of-failure from the destroy path: a window owned by
+        // the init worker is destroyed even if the stored tid were stale or
+        // zero; a window owned by a foreign plugin thread cannot be
+        // destroyed from here at all and lands in phase 2's fail-loud pin.
+        workerOwned.push_back(w);
     }
     const size_t workerCount = workerOwned.size();
     int destroyedDirect = 0;
     if (directCount > 0)
         destroyedDirect = destroyAndDrainOnThisThread(wins, iid, pluginPath);
-    engineLog(std::string("[m[module-teardown] ") + why + " instance=" + iid +
-              " module=" + pluginPath + " calling-thread destroyed=" +
-              std::to_string(destroyedDirect) + " handed-to-worker=" +
-              std::to_string(workerCount) +
+    engineLog(std::string("[module-teardown] ") + why + " instance=" + iid +
+              " module=" + pluginPath + " found=" + std::to_string(wins.size()) +
+              " calling-thread destroyed=" + std::to_string(destroyedDirect) +
+              " handed-to-worker=" + std::to_string(workerCount) +
               " (destroy windows + drain BEFORE the node removal schedules the free)");
     if (workerCount > 0) {
         TeardownJob job;
@@ -4628,7 +4647,7 @@ void verifyForModule(const std::string& iid, const std::string& pluginPath, cons
     const std::vector<ModuleWindow> wins = collectModuleWindows(pluginPath);
     int pinned = 0, failed = 0;
     for (const ModuleWindow& w : wins) {
-        engineLog(std::string("[m[module-guard] TEARDOWN-ORDER RESIDUE hwnd=") +
+        engineLog(std::string("[module-guard] TEARDOWN-ORDER RESIDUE hwnd=") +
                   hexAddr(reinterpret_cast<uintptr_t>(w.hwnd)) +
                   " thread=" + std::to_string(w.tid) +
                   " module=" + wideToUtf8(w.module) +
@@ -4641,17 +4660,17 @@ void verifyForModule(const std::string& iid, const std::string& pluginPath, cons
                                reinterpret_cast<LPCWSTR>(proc), &pinMod) &&
             pinMod != nullptr) {
             ++pinned;
-            engineLog("[m[module-guard] PINNED module=" + wideToUtf8(w.module) +
+            engineLog("[module-guard] PINNED module=" + wideToUtf8(w.module) +
                       " — stays mapped for process life (safe leak, unmapped dispatch impossible)");
         } else {
             ++failed;
-            engineLog("[m[module-guard] UNRESOLVED hwnd=" + hexAddr(reinterpret_cast<uintptr_t>(w.hwnd)) +
+            engineLog("[module-guard] UNRESOLVED hwnd=" + hexAddr(reinterpret_cast<uintptr_t>(w.hwnd)) +
                       " module=" + wideToUtf8(w.module) +
                       " — PIN failed (err=" + std::to_string(GetLastError()) +
                       ") — the crash window stays armed; the next dump names this module");
         }
     }
-    engineLog(std::string("[m[module-guard] ") + why + " instance=" + iid + " orphan=yes windows=" +
+    engineLog(std::string("[module-guard] ") + why + " instance=" + iid + " orphan=yes windows=" +
               std::to_string(wins.size()) + " pinned=" + std::to_string(pinned) +
               " failed=" + std::to_string(failed) + " module=" + pluginPath +
               (wins.empty()
@@ -4668,7 +4687,7 @@ void teardownModuleWindowsForLoadAbort(const std::string& iid, const std::string
     if (!moduleIsOrphaned(iid, pluginPath, "load-abort")) return;
     const std::vector<ModuleWindow> wins = collectModuleWindows(pluginPath);
     const int destroyed = destroyAndDrainOnThisThread(wins, iid, pluginPath);
-    engineLog("[m[module-teardown] load-abort instance=" + iid + " module=" + pluginPath +
+    engineLog("[module-teardown] load-abort instance=" + iid + " module=" + pluginPath +
               " destroyed=" + std::to_string(destroyed) + " of " + std::to_string(wins.size()) +
               " window(s) on this thread (the free runs here — same-thread teardown before FreeLibrary)");
     verifyForModule(iid, pluginPath, "load-abort");
