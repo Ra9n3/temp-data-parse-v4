@@ -355,7 +355,19 @@ jobs:
               $crashD10 | ForEach-Object { Write-Host $_.Line }
               throw "D10: the in-process crash channel fired during the stress — adjudicate the dump (the unloaded-module list IS the verdict) before continuing"
             }
-            Write-Host "D10 receipts: 60 editor cycles under active playback, 11 module-orphaning swaps, zero [crash] receipts, clean exit 0"
+            # TASK I guard receipts: every orphaning swap must run the sweep
+            # and hold the invariant on the record. A PINNED window is the
+            # guard's safe failure (leak, no unmapped dispatch) — print it
+            # loudly; an UNRESOLVED window means the invariant could NOT be
+            # enforced and the next dispatch is the TASK F crash — fail now.
+            $guardD10 = @($d10Lines | Select-String -Pattern "\[module-guard\] retire orphan=yes")
+            if (($guardD10 | Measure-Object).Count -lt 1) { Show-StepLogTail -Path $engineLogD10 -Proc $procD10 -Label "Engine D10"; throw "D10: no '[module-guard] retire orphan=yes' summary receipt — the swaps must orphan a module each and the sweep must hold the invariant (execution proof missing)" }
+            $guardD10 | ForEach-Object { Write-Host $_.Line }
+            $pinnedD10 = @($d10Lines | Select-String -Pattern "\[module-guard\] PINNED")
+            if (($pinnedD10 | Measure-Object).Count -gt 0) { Write-Host "D10 NOTE: $($pinnedD10.Count) window(s) could not be detached and were PINNED (safe leak — the module stays mapped; no unmapped dispatch possible):"; $pinnedD10 | ForEach-Object { Write-Host $_.Line } }
+            $unresolvedD10 = @($d10Lines | Select-String -Pattern "\[module-guard\] UNRESOLVED")
+            if (($unresolvedD10 | Measure-Object).Count -ne 0) { $unresolvedD10 | ForEach-Object { Write-Host $_.Line }; throw "D10: the guard could neither detach nor pin a window living in a module about to free — the invariant is NOT enforced (the next dispatch into it is the TASK F crash)" }
+            Write-Host "D10 receipts: $($guardD10.Count) module-guard sweep(s) held the invariant across the orphaning swaps, zero [crash] receipts, clean exit 0"
             Write-Host "Engine D10 clean exit 0 (TASK I stress: the engine survived every orphaning free with editors cycling)"
           } finally {
             Stop-Process -Id $procD10.Id -Force -ErrorAction SilentlyContinue

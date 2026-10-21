@@ -382,6 +382,7 @@ std::atomic<uint64_t> scorchhost::g_selectorBlockCount[scorchhost::kMaxInstances
 #include <csignal>
 #include <shlobj.h>
 #include <dbghelp.h>
+#include <tlhelp32.h>   // TASK I module-guard: TH32CS_SNAPTHREAD (message-only windows live per-thread)
 #pragma comment(lib, "shell32.lib")
 
 namespace scorchcrash {
@@ -535,7 +536,7 @@ namespace {
 // "openEditor":true); the lazy-device window is receipted (nominal fallback +
 // device-ready race re-prepare); matching requests coalesce into an in-flight
 // init instead of answering "reused" while it is still outstanding.
-constexpr const char* kEngineVersion = "0.12.3";   // field receipt-grammar fix: perTrack prints wire ch + slot + wide ([ch17] misread), perChannel -> ownChannel, the silent event-channel clamp is NAMED
+constexpr const char* kEngineVersion = "0.13.0";   // TASK I: the module-guard — no module unload while a window's WNDPROC lives in it (detach into user32 or pin; the dangling-WNDPROC crash class is structurally closed)
 constexpr int kProtocolVersion = 1;
 constexpr int kDefaultPort = 9377;
 constexpr int kMaxVoices = 64;
@@ -4288,6 +4289,218 @@ std::string buildCapabilityFields(juce::AudioPluginInstance& inst,
     return s;
 }
 
+// ─── TASK I — the module-guard: no module unload while a window's WNDPROC ───
+// lives in that module. Verdict being acted on (TASK F, dump
+// 20261021-075340): user32 message dispatch called a WNDPROC whose code
+// region was already unmapped (0xC0000005 EXECUTE at RIP=the window's proc,
+// inside user32 dispatch). The audit (docs/wndproc-audit.md) reduced the
+// in-process unload inventory to ONE site: the hosted plugin DLL, freed by
+// JUCE's VST3 module-handle cache when the last instance of its path retires
+// (the D5 CI finding) — and the windows that can carry a WNDPROC inside it
+// are the plugin's own: its editor tree, and — the ghost — the infrastructure
+// window of the plugin DLL's PRIVATE JUCE copy (the fixture is JUCE-linked;
+// its second MessageManager boots at the load's hasEditor view probe and
+// survives until the DLL's loader-lock static teardown at FreeLibrary, where
+// DestroyWindow is documented-unreliable). The guard runs BEFORE the free
+// trigger: any window whose WNDPROC resolves into the retiring plugin's path
+// gets its dispatch detached into user32 (DefWindowProcW — never unmaps); a
+// window that cannot be detached PINS its module (GetModuleHandleExW PIN —
+// the code region can never unmap; the leak is the safe failure, receipted).
+// Windows-only: the crash class is user32 dispatch into unmapped code.
+#ifdef _WIN32
+namespace scorchguard {
+
+// The load path currently being instantiated (the pre-commit instance holds
+// a module-cache reference the live set cannot see). Set inside
+// loadHostedPlugin, cleared at its scope exit; the orphan gate reads it so a
+// same-path replace never sweeps the INCOMING instance's windows.
+std::mutex g_loadPathMutex;
+std::string g_loadInFlightPath;
+
+std::string wideToUtf8(const wchar_t* w) {
+    if (w == nullptr) return {};
+    return juce::String(w).toStdString();
+}
+
+std::wstring utf8ToWide(const std::string& s) {
+    const juce::String js(s.c_str());
+    return std::wstring(static_cast<const wchar_t*>(js.toUTF16()));
+}
+
+// Case-insensitive, slash-normalized comparison key; a trailing separator is
+// stripped so a bundle DIRECTORY path prefixes its inner DLL path cleanly.
+std::wstring pathKey(const std::wstring& p) {
+    std::wstring k;
+    k.reserve(p.size());
+    for (const wchar_t c : p) {
+        wchar_t lc = c;
+        if (lc >= L'A' && lc <= L'Z') lc = lc - L'A' + L'a';
+        k.push_back(lc == L'/' ? L'\\' : lc);
+    }
+    while (!k.empty() && k.back() == L'\\') k.pop_back();
+    return k;
+}
+
+std::string hexAddr(uintptr_t v) {
+    char buf[32];
+    std::snprintf(buf, sizeof(buf), "0x%llx", static_cast<unsigned long long>(v));
+    return buf;
+}
+
+// thread_local: the MM thread (retire) and the init worker (load-abort) can
+// sweep concurrently — EnumWindows/EnumThreadWindows call back ON the calling
+// thread, so the collection pointer never crosses threads.
+thread_local std::vector<HWND>* g_sweepOut = nullptr;
+
+BOOL CALLBACK sweepChildEnumProc(HWND hwnd, LPARAM) {
+    g_sweepOut->push_back(hwnd);
+    EnumChildWindows(hwnd, sweepChildEnumProc, 0);   // recurse the full tree
+    return TRUE;
+}
+
+BOOL CALLBACK sweepTopEnumProc(HWND hwnd, LPARAM) {
+    DWORD pid = 0;
+    GetWindowThreadProcessId(hwnd, &pid);
+    if (pid == GetCurrentProcessId()) {
+        g_sweepOut->push_back(hwnd);
+        EnumChildWindows(hwnd, sweepChildEnumProc, 0);
+    }
+    return TRUE;
+}
+
+BOOL CALLBACK sweepThreadEnumProc(HWND hwnd, LPARAM) {
+    // Message-only windows (the JUCE-infrastructure shape) are invisible to
+    // EnumWindows; every thread of this process contributes them here.
+    DWORD pid = 0;
+    GetWindowThreadProcessId(hwnd, &pid);
+    if (pid == GetCurrentProcessId()) {
+        g_sweepOut->push_back(hwnd);
+        EnumChildWindows(hwnd, sweepChildEnumProc, 0);
+    }
+    return TRUE;
+}
+
+std::vector<HWND> collectProcessWindows() {
+    std::vector<HWND> out;
+    g_sweepOut = &out;
+    EnumWindows(sweepTopEnumProc, 0);
+    const HANDLE snap = CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0);
+    if (snap != INVALID_HANDLE_VALUE) {
+        THREADENTRY32 te {};
+        te.dwSize = sizeof(te);
+        if (Thread32First(snap, &te)) {
+            do {
+                if (te.th32OwnerProcessID != GetCurrentProcessId()) continue;
+                EnumThreadWindows(te.th32ThreadID, sweepThreadEnumProc, 0);
+            } while (Thread32Next(snap, &te));
+        }
+        CloseHandle(snap);
+    }
+    g_sweepOut = nullptr;
+    return out;
+}
+
+// THE GUARD. why: "retire" (the message-thread node removal — the deferred
+// free follows within ~500 ms) or "load-abort" (a pre-commit instance is
+// about to destruct on the worker). No nested message pump by design: the
+// editor tree is destroyed synchronously before this runs, and between here
+// and the deferred free the message thread pumps naturally.
+void sweepForModule(const std::string& iid, const std::string& pluginPath,
+                    const char* why) {
+    // ORPHAN GATE — sweep only when the module can actually free: any other
+    // LIVE instance sharing the path keeps JUCE's module-cache refcount above
+    // zero, and so does an in-flight load of the SAME path (a same-path
+    // replace creates its instance before the old one is released — sweeping
+    // then could detach the INCOMING instance's windows out from under it).
+    int samePath = 0;
+    if (auto set = liveSetSnapshot()) {
+        for (HostedPlugin* m : set->bySlot) {
+            if (m == nullptr || m->instanceId == iid) continue;
+            if (m->rawInstance.load(std::memory_order_acquire) == nullptr) continue;
+            if (_stricmp(m->path.c_str(), pluginPath.c_str()) == 0) ++samePath;
+        }
+    }
+    bool sameLoadInFlight = false;
+    {
+        std::lock_guard<std::mutex> lock(g_loadPathMutex);
+        sameLoadInFlight = g_pluginLoadActive.load(std::memory_order_acquire) &&
+                           _stricmp(g_loadInFlightPath.c_str(), pluginPath.c_str()) == 0;
+    }
+    if (samePath > 0 || sameLoadInFlight) {
+        engineLog(std::string("[module-guard] ") + why + " instance=" + iid + " orphan=no (" +
+                  std::string(samePath > 0
+                                  ? std::to_string(samePath) + " live instance(s) share the module"
+                                  : "a same-path load is in flight — its instance holds the module ref") +
+                  ") — the module cannot free; sweep skipped");
+        return;
+    }
+
+    const std::wstring wantKey = pathKey(utf8ToWide(pluginPath));
+    int matched = 0, detached = 0, pinned = 0, failed = 0;
+    for (const HWND hwnd : collectProcessWindows()) {
+        const LONG_PTR proc = GetWindowLongPtrW(hwnd, GWLP_WNDPROC);
+        if (proc == 0) continue;
+        wchar_t modPath[MAX_PATH] = {};
+        HMODULE mod = nullptr;
+        if (GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS |
+                                   GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                               reinterpret_cast<LPCWSTR>(proc), &mod) &&
+            mod != nullptr)
+            GetModuleFileNameW(mod, modPath, MAX_PATH);
+        const std::wstring modKey = pathKey(std::wstring(modPath));
+        // IN the retiring module: the WNDPROC's module file lives inside the
+        // plugin's path (bundle-dir loads nest the DLL under the bundle —
+        // prefix match, case-insensitive). An unresolved proc cannot be in
+        // the still-mapped module; skipping it here is correct (the module
+        // has not freed yet — resolution cannot legitimately fail).
+        if (modKey.empty() || wantKey.empty() || modKey.rfind(wantKey, 0) != 0) continue;
+        ++matched;
+        DWORD zTid = GetWindowThreadProcessId(hwnd, nullptr);
+        engineLog("[module-guard] window in the retiring module hwnd=" + hexAddr(reinterpret_cast<uintptr_t>(hwnd)) +
+                  " thread=" + std::to_string(zTid) +
+                  " module=" + wideToUtf8(modPath) +
+                  " — detaching the WNDPROC into user32 (never unmaps) before the module free");
+        const LONG_PTR prev = SetWindowLongPtrW(hwnd, GWLP_WNDPROC,
+                                                reinterpret_cast<LONG_PTR>(DefWindowProcW));
+        if (prev != 0) {
+            ++detached;
+            engineLog("[module-guard] detached hwnd=" + hexAddr(reinterpret_cast<uintptr_t>(hwnd)) +
+                      " — dispatch target is user32!DefWindowProcW for process life; the free can never strand it");
+        } else {
+            const DWORD detachErr = GetLastError();
+            // Cross-thread detach refused — pin the module instead: the code
+            // region stays mapped for process life, so the zombie window can
+            // dispatch into LIVE code forever. The leak is the safe failure.
+            HMODULE pinMod = nullptr;
+            if (GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS |
+                                       GET_MODULE_HANDLE_EX_FLAG_PIN,
+                                   reinterpret_cast<LPCWSTR>(proc), &pinMod) &&
+                pinMod != nullptr) {
+                ++pinned;
+                engineLog("[module-guard] PINNED hwnd=" + hexAddr(reinterpret_cast<uintptr_t>(hwnd)) +
+                          " module=" + wideToUtf8(modPath) +
+                          " — detach failed (GetLastError=" + std::to_string(detachErr) +
+                          "); the module stays mapped for process life (safe leak, unmapped dispatch impossible)");
+            } else {
+                ++failed;
+                engineLog("[module-guard] UNRESOLVED hwnd=" + hexAddr(reinterpret_cast<uintptr_t>(hwnd)) +
+                          " module=" + wideToUtf8(modPath) +
+                          " — detach (err=" + std::to_string(detachErr) + ") AND pin (err=" +
+                          std::to_string(GetLastError()) +
+                          ") failed — the crash window stays armed; the next dump names this module");
+            }
+        }
+    }
+    engineLog(std::string("[module-guard] ") + why + " instance=" + iid + " orphan=yes windows=" +
+              std::to_string(matched) + " detached=" + std::to_string(detached) +
+              " pinned=" + std::to_string(pinned) + " failed=" + std::to_string(failed) +
+              " module=" + pluginPath +
+              " — invariant held: no module unload while a window's WNDPROC lives in it");
+}
+
+} // namespace scorchguard
+#endif // _WIN32
+
 // Host a VST3 by id/path (Stage 3c-2; 3d-4: one INSTANCE of possibly many —
 // identity = the frontend's libraryGroup id, "hosted" for the legacy field).
 // Stage 3e-3: routing (optional per-load outputRouting) rides in and lands
@@ -4305,6 +4518,22 @@ std::string loadHostedPlugin(const juce::var& pluginVar, const std::string& inst
     if (path.empty()) return "plugin.path is required";
     if (instanceId.empty()) return "plugin.instanceId is required (multi-instance hosting)";
     try {
+#ifdef _WIN32
+        // TASK I: announce the load path for the module-guard's orphan gate —
+        // a pre-commit instance holds a module-cache reference the live set
+        // cannot see, and a same-path replace must never sweep the INCOMING
+        // instance's windows out from under it.
+        struct LoadPathAnnounce {
+            explicit LoadPathAnnounce(const std::string& p) {
+                std::lock_guard<std::mutex> lock(scorchguard::g_loadPathMutex);
+                scorchguard::g_loadInFlightPath = p;
+            }
+            ~LoadPathAnnounce() {
+                std::lock_guard<std::mutex> lock(scorchguard::g_loadPathMutex);
+                scorchguard::g_loadInFlightPath.clear();
+            }
+        } loadPathAnnounce(path);
+#endif
         juce::AudioPluginFormatManager mgr;
         mgr.addDefaultFormats();  // VST3 registered when JUCE_PLUGINHOST_VST3=1
         juce::VST3PluginFormat vst3;
@@ -4334,6 +4563,23 @@ std::string loadHostedPlugin(const juce::var& pluginVar, const std::string& inst
         juce::String err;
         auto inst = mgr.createPluginInstance(*chosen, 44100.0, 512, err);
         if (inst == nullptr) return "createPluginInstance failed: " + err.toStdString();
+#ifdef _WIN32
+        // TASK I: any death from HERE to the success commit leaves the
+        // instance engine-owned; its destructor may free the DLL. The sweep
+        // runs at scope exit BEFORE that destruction (declared after, so it
+        // destructs first). A no-output-bus refusal or an exception during
+        // capability capture (the view probe — the point where the plugin's
+        // private JUCE copy boots its infrastructure window) both land here.
+        struct PreCommitSweepInst {
+            const std::string* iidRef;
+            const std::string* pathRef;
+            const std::unique_ptr<juce::AudioPluginInstance>* instRef;
+            ~PreCommitSweepInst() {
+                if (instRef->get() != nullptr)
+                    scorchguard::sweepForModule(*iidRef, *pathRef, "load-abort");
+            }
+        } preCommitSweepInst{&instanceId, &path, &inst};
+#endif
         // Stage 3e-2 — the instance gets the engine's playhead BEFORE any
         // prepare (plugins cache the pointer; the audio callback publishes
         // positions through it every buffer). One stable address: the
@@ -4386,6 +4632,21 @@ std::string loadHostedPlugin(const juce::var& pluginVar, const std::string& inst
         const std::string capsFields = buildCapabilityFields(*inst, *chosen);
         auto hosted = std::make_unique<HostedPlugin>();
         hosted->instance = std::move(inst);
+#ifdef _WIN32
+        // TASK I: the same guard for the post-move window — a throw while
+        // `hosted` holds the instance (the probe-queue or channel-table
+        // block) still frees the DLL at scope exit. Runs BEFORE that
+        // destruction (reverse declaration order).
+        struct PreCommitSweepHosted {
+            const std::string* iidRef;
+            const std::string* pathRef;
+            const std::unique_ptr<HostedPlugin>* hostedRef;
+            ~PreCommitSweepHosted() {
+                if (hostedRef->get() != nullptr && (*hostedRef)->instance != nullptr)
+                    scorchguard::sweepForModule(*iidRef, *pathRef, "load-abort");
+            }
+        } preCommitSweepHosted{&instanceId, &path, &hosted};
+#endif
         hosted->name = chosen->name.toStdString();
         hosted->vendor = chosen->manufacturerName.toStdString();
         hosted->latencySamples = hosted->instance->getLatencySamples();
@@ -6531,6 +6792,13 @@ void retireInstanceNodeOnMessageThread(const std::string& iid) {
         return;
     }
     destroyEditorWindow(old->instanceId, false);   // the editor must not outlive the node
+#ifdef _WIN32
+    // TASK I: the node removal below can orphan this instance's DLL (the
+    // last instance of its path) — JUCE frees it within ~500 ms on this
+    // thread (RenderSequenceExchange). Invariant FIRST: no module unload
+    // while a window's WNDPROC lives in it — detach into user32 or pin.
+    scorchguard::sweepForModule(old->instanceId, old->path, "retire");
+#endif
     const auto t0 = std::chrono::steady_clock::now();
     // M3 PR2 (R2/R4): tear down this instance's ACTIVE strips BEFORE the
     // plugin node removal — receipts name every strip; the table entries
