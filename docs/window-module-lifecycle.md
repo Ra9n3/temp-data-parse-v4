@@ -39,7 +39,7 @@ exposure (documented policy, `main.cpp:8856-8863`).
 | W2 | `PluginEditorWindow` (juce::DocumentWindow per editor) | engine, MM thread, on openEditor (`main.cpp:2007`) | engine exe | `destroyEditorWindow` — `delete win`, synchronous on the MM (`main.cpp:2056`); retire head (`:6794`), close button (async MM job), shutdown close-all | **No** — engine-owned, closed before the node removal; the exe never unmaps. |
 | W3 | Host-owner chain (GWLP_HWNDPARENT → the Tauri/WinForms shell window) | engine, at editor show (`applyHostWindowOwner`) | (owner is another process) | user32 drops the owner link when either side dies | n/a. |
 | W4 | Plugin editor peer HWND (the `AudioProcessorEditor`'s native peers) | **the plugin DLL's code**, MM thread, during `createEditorIfNeeded` inside openEditor | **the plugin DLL** | the `delete win` cascade (`setContentOwned(ed,true)` → editor destructor → DestroyWindow cascade) — **same-thread (MM), synchronous**, completed before `destroyEditorWindow` returns | Only via a defect — the destroy is same-thread and synchronous, and retire destroys the editor before removing the node. |
-| W5 | **The plugin DLL's private JUCE infrastructure window** (the second, independent MessageManager's internal window — timers, async-updater targets) | **the plugin DLL's own JUCE copy**, lazily on first GUI-stack use. In CI this is the LOAD's capability capture: the hasEditor view probe — "the point where the plugin's private JUCE copy boots its infrastructure window" (`main.cpp:4571-4572`) — **on the init worker**. In the field the first GUI touch can instead be openEditor (→ MM-thread-owned). | **the plugin DLL** | NOBODY destroys it deliberately. Its only destroyer is the DLL's own static teardown at FreeLibrary: DllMain(PROCESS_DETACH) → CRT atexit → `MessageManager::deleteInstance` → DestroyWindow **under the loader lock**. On the retire path that destroy is **cross-thread** (window owned by the init worker, FreeLibrary called on the MM thread) → silently fails. | **YES — this is the ghost.** Empirical: the D10 stress found `windows=1` in the retiring module on **all eleven** orphaning retires (run 39650302358 attempt 2). Today it survives the free only because the TASK I guard DETACHES its dispatch first — the load-bearing mechanism TASK J step 2 removes. |
+| W5 | **The plugin DLL's private JUCE infrastructure window** (the second, independent MessageManager's internal window — timers, async-updater targets) | **the plugin DLL's own JUCE copy**, lazily on first GUI-stack use. AS-PROVEN BY THE TASK J ACCEPTANCE RUNS (39687874816/39691120338 classification receipts: the ghost's owner IS the thread running the retire): in this engine the ghost boots on the **MM pump thread** — the first GUI touch is the editor attach at openEditor (the W5 field shape), not the load's view probe. The TASK I-era init-worker assumption is corrected here; the load-path comment still names the view probe as A GUI-stack touch, but the MM window the retire actually finds is created at the first editor attach on the MM. | **the plugin DLL** | NOBODY destroys it deliberately. Its only destroyer is the DLL's own static teardown at FreeLibrary: DllMain(PROCESS_DETACH) → CRT atexit → `MessageManager::deleteInstance` → DestroyWindow **under the loader lock**. On the retire path that destroy is **cross-thread** (window owned by the init worker, FreeLibrary called on the MM thread) → silently fails. | **YES — this is the ghost.** Empirical: the D10 stress found `windows=1` in the retiring module on **all eleven** orphaning retires (run 39650302358 attempt 2). Today it survives the free only because the TASK I guard DETACHES its dispatch first — the load-bearing mechanism TASK J step 2 removes. |
 | W6 | COM/OLE stub windows (OleMainThreadWndClass et al.) | ole32 (COM init) | ole32 (system) | process life | **No** — system module, never freed. |
 | W7 | Plugin-spawned windows from a plugin's own thread (field-only shape, unseen in CI) | the plugin | the plugin DLL | none the engine controls | **Potentially yes** — a window on a thread the engine does not own cannot be destroyed by the engine. Covered by the fail-loud pin (refuse-unload), never by a silent pass. |
 
@@ -171,11 +171,18 @@ hit the dangling proc.
 **Why it does not reproduce on this bench — the dispatch-vector analysis
 (this map is the evidence, per the brief):**
 
-1. The instrument receipts name the ghost's owner: `hwnd=0x4007c
-   thread=3180` — the **init worker** (the load's hasEditor view probe boots
-   the plugin's private JUCE stack there, exactly as §2 W5 predicts). The
-   init worker is a ~100 ms poll loop (`main.cpp` worker lambda) that **never
-   pumps Windows messages**.
+1. **CORRECTED BY THE LATER RUNS (39687874816/39691120338): the ghost is
+   MM-PUMP-OWNED** (`thread=1808` = the thread running the retire — the MM
+   pump), not init-worker-owned as this analysis first assumed from the
+   instrument run's `thread=3180`. The pump thread pumps FOREVER, so the
+   crash exposure is HIGHER than this analysis claimed — every queued or
+   broadcast message for that window dispatches on the pump thread. The
+   instrument run's survival (23 armed frees, zero dispatch into the
+   dangling proc) is therefore TIMING, not dormancy: no dispatch traffic for
+   that window happened to land in the free windows of that run. That is
+   exactly the brief's "race-dependent" shape — and why the fix must (and
+   now does) DESTROY the window before the free instead of relying on
+   dispatch luck.
 2. A WNDPROC executes only when its window's messages are DISPATCHED:
    - the owning thread must pump (`GetMessage`/`PeekMessage`) for queued or
      broadcast traffic — the init worker never does;
@@ -189,18 +196,19 @@ hit the dangling proc.
      queue;
    - thread-exit cleanup (user32 destroys a dying thread's windows, calling
      their procs) cannot fire — the init worker lives for process life.
-3. So on the CI bench the armed zombie is **dormant**: the free strands a
-   WNDPROC that nothing will ever call. The TASK F crash (dump
-   20261021-075340) required a dispatch vector that this harness shape does
-   not produce — a ghost on a PUMPING thread (the MM pump thread pumps every
-   window it owns, forever), or a teardown path where the owning thread
-   exits or pumps after the unmap. The field benches (Falcon/BBCSO — plugins
-   whose GUI stack boots on the MM thread at openEditor, and whose editors
-   drive real message traffic) are where that vector lives; the
-   identity-free CI fixture exercises the lifecycle but not the dispatch.
-4. Timing/seed variation cannot create a dispatch into a non-pumping
-   thread's window — no seed makes this bench crash. The won't-reproduce
-   verdict is MECHANISM-level, not a sample-size statement.
+3. **CORRECTED:** the armed zombie is NOT dormant — it sits on the pumping
+   MM thread — but no dispatch for it landed during the instrument run's
+   free windows. The TASK F crash (dump 20261021-075340) is that race LOST:
+   the right message, the right microsecond, the freed module. The fix does
+   not gamble on the race: the ghost is destroyed (owner-thread
+   DestroyWindow + drain) BEFORE the free is even schedulable, and the
+   phase-2 verify refuses the unload on any residue.
+4. The repro verdict stands with the correction: the instrument cannot make
+   the dispatch fire on demand (the traffic is runner-weather), so
+   pre-fix-crash repro is not achievable deterministically on this bench —
+   the audit map + the armed-free receipts ARE the evidence per the brief,
+   and the post-fix runs prove the vector is closed: the window is GONE
+   before every free.
 
 **Evidence package for the fix (all on the record):** the ghost exists (11×
 `windows=1` under the TASK I guard, run 39650302358 attempt 2; 23× `windows=2`
@@ -216,6 +224,40 @@ cannot dispatch.
 Post-fix silence on this same amplified machine (the acceptance run) closes
 the loop: 50+ clean iterations per bench, `windows=0` verification receipts,
 zero `[crash]`, clean exit 0.
+
+### The step-4 acceptance record (run 39691120338, 7f345e6 — GREEN)
+
+Desktop run 39691120338 (engine 0.14.0, the root fix complete): **the whole
+battery PASSED** (hello/scan/host/multi/latency/slowload/terminal/routing/
+strips/limiter×2/editor-queue/scale — 14 suite banners), the D10 stress ran
+**120/120 editor cycles under active playback** (2× the brief's 50+), 23
+module-orphaning diff swaps, and the teardown-ordering receipts are the
+acceptance proof:
+
+- **25 owner-thread destroys** (`[module-teardown] destroyed hwnd=…
+  (current-thread destroy — WM_DESTROY delivered inline) ok=1`) — the ghost
+  is destroyed before every free;
+- **20 bounded drains** (`drained 1 queued message(s) … while the module is
+  still mapped`) — the drain discipline ran at every destroy;
+- **60× `[module-guard] … orphan=yes windows=0 pinned=0 failed=0 … teardown
+  verified: no window's WNDPROC lives in the module; the free may proceed`**
+  — every free in the battery (23 stress + 37 other-mode retires) preceded
+  by a verified-clear module;
+- **ZERO engine-side PINNED / UNRESOLVED / [crash] receipts** (the only
+  pattern hits in the run log are the echoed pwsh script source); clean
+  exit 0.
+
+The evidence arc across the four acceptance runs: 39683449963 = compile
+C2664 (the wideToUtf8 overload fix); 39684643039 = battery green, 23×
+pinned (the classify-then-handoff gate never handed the ghost off);
+39687874816 = battery green, the per-window classification receipts proved
+the ghost is CURRENT-THREAD-owned at retire (the MM pump thread) — and
+unmasked the GetWindowThreadProcessId process/thread confusion that made
+the destroy loop skip every window (46× windows=1 pinned=1); 39691120338 =
+the one-line API fix, and the root fix works end to end. The invariant held
+in EVERY run (zero [crash] across all four) — the backstop earned its keep
+exactly as the brief specified, and then handed the load-bearing role back
+to the ordering.
 
 ## 6. Acceptance mapping (TASK J step 4)
 
