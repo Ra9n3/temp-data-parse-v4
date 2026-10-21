@@ -427,8 +427,25 @@ const edSendOpen = () => ws.send(JSON.stringify({ type: "openEditor", instanceId
 // engine/testvst/CMakeLists.txt) and the mechanism stays identity-free: any
 // JUCE-linked plugin DLL carries the same second-JUCE-copy infrastructure
 // window whose teardown runs under the loader lock at FreeLibrary.
-const D10_CYCLES = 60;                 // >= 50 per the TASK I brief
+const D10_CYCLES = 120;                // TASK J step 3 amplification: 2x the TASK I brief's 50+ (23 orphaning swaps)
 const D10_SWAP_EVERY = 5;              // an orphaning mid-play diff load every 5 cycles
+// TASK J step 3 (the brief: "raise iterations, vary timing/seed"): a SEEDED
+// PRNG jitters the editor-cycle timing so consecutive attempts cross the
+// retired module's deferred-free window at different phases. Deterministic
+// per seed (the run stays reproducible from its log), variable across
+// attempts (SCORCH_D10_SEED). No wall-clock dependence.
+const D10_SEED = Number(process.env.SCORCH_D10_SEED ?? 20261022);
+const d10Rand = (() => {
+  let s = D10_SEED >>> 0;
+  return () => {                       // mulberry32
+    s = (s + 0x6D2B79F5) | 0;
+    let t = Math.imul(s ^ (s >>> 15), 1 | s);
+    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
+})();
+const d10CloseDelayMs = () => 150 + Math.floor(d10Rand() * 251);   // 150..400 ms — the open→close gap sweeps the ~500 ms free window
+const d10OpenDelayMs = () => Math.floor(d10Rand() * 121);          // 0..120 ms — the close→next-open gap varies the cycle phase
 // endTick 8448 — the SAME score grammar every green load in this suite uses
 // (the terminal machine, multi, strips, limiter). Attempt 8 (run 39607089059)
 // wedged the WS thread inside handle_load with endTick=345600 (loadAck sent,
@@ -1780,7 +1797,7 @@ ws.addEventListener("message", (event) => {
       // and the stress allOk gate includes it. Every other mode sets
       // helloOk here; the stress was the one branch that forgot.
       helloOk = true;
-      console.log(`[test] hello OK (0.13.0) — TASK I stress: ${D10_CYCLES} editor cycles under play, a module-orphaning diff swap every ${D10_SWAP_EVERY} — scanning...`);
+      console.log(`[test] hello OK (0.13.0) — TASK J repro stress: ${D10_CYCLES} editor cycles under play, a module-orphaning diff swap every ${D10_SWAP_EVERY}, seed=${D10_SEED} (close delay 150-400 ms, open delay 0-120 ms — the race timing is varied per the brief) — scanning...`);
       d10Phase = 1;
       ws.send(JSON.stringify({ type: "scan", dirs: [fixtureDir] }));
     } else if (msg.type === "scan_result" && d10Phase === 1) {
@@ -1829,7 +1846,7 @@ ws.addEventListener("message", (event) => {
       d10SwapInFlight = null;
       d10Stamp();
       console.log(`[test] swap complete — cycling resumes on ${d10Live} (the retired module frees inside this window)`);
-      d10Open();
+      setTimeout(d10Open, d10OpenDelayMs());
     } else if (msg.type === "state" && d10Phase === 3 && msg.playing) {
       d10Peak = Math.max(d10Peak, msg.peak ?? 0);
       d10Stamp();
@@ -1840,7 +1857,7 @@ ws.addEventListener("message", (event) => {
         fail(`stress: editorOpened for "${msg.instanceId}", expected "${d10Live}"`);
       setTimeout(() => {
         ws.send(JSON.stringify({ type: "closeEditor", instanceId: d10Live }));
-      }, 150);
+      }, d10CloseDelayMs());
     } else if (msg.type === "editorClosed" && d10Phase >= 3) {
       d10Closed++;
       d10Cycle++;
@@ -1861,7 +1878,7 @@ ws.addEventListener("message", (event) => {
         d10SwapInFlight = next;
         d10SendLoad(++d10SwapSeq, next);
       } else {
-        d10Open();
+        setTimeout(d10Open, d10OpenDelayMs());
       }
     } else if (msg.type === "state" && d10Phase === 4 && msg.playing === false) {
       console.log(`[test] stop clean — stress complete: cycles=${d10Cycle} opened=${d10Opened} closed=${d10Closed} swaps=${d10SwapSeq - 10} benchFalcon=${d10Falcon ? "present" : "absent"} benchBbcso=${d10Bbcso ? "present" : "absent"}`);

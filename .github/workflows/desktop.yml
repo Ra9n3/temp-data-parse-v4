@@ -307,21 +307,23 @@ jobs:
 
           Write-Host "All engine protocol tests passed (audio-capable build, graceful headless behavior)"
 
-          # Test D10 — TASK I: the editor-open-under-play stress (the
-          # dangling-WNDPROC race). 60 editor open/close cycles UNDER ACTIVE
-          # PLAYBACK (--null-audio pacing), with a mid-play diff swap every 5
-          # cycles that orphans the outgoing instance's module — JUCE frees a
-          # plugin DLL when the last instance of its path dies (the D5 CI
-          # finding) — and loads the survivor under play. The survivor's next
-          # editor cycle runs INSIDE the freed module's deferred-free window:
-          # the exact shape the TASK F dump died in (user32 dispatch into an
-          # unmapped WNDPROC, race-dependent — attempts 2-5). Pre-guard this
-          # run is the REPRO attempt (a crash here is the required evidence;
-          # the P1 dump's unloaded-module list names the ghost). Post-guard
-          # the same machine is the acceptance gate: 50+ clean cycles, no
-          # [crash] receipts, and the [module-guard] receipts (asserted from
-          # the guard commit onward).
-          Write-Host "=== Test D10: TASK I stress (60 editor cycles under play, module-orphaning swaps) — WARN-ONLY (advisory, non-gating until further notice; user directive 2026-10-22) ==="
+          # Test D10 — TASK I → TASK J: the editor-open-under-play stress (the
+          # dangling-WNDPROC race). 120 editor open/close cycles UNDER ACTIVE
+          # PLAYBACK (--null-audio pacing; TASK J step-3 amplification, seeded
+          # timing jitter), with a mid-play diff swap every 5 cycles that
+          # orphans the outgoing instance's module — JUCE frees a plugin DLL
+          # when the last instance of its path dies (the D5 CI finding) — and
+          # loads the survivor under play. The survivor's next editor cycle
+          # runs INSIDE the freed module's deferred-free window: the exact
+          # shape the TASK F dump died in (user32 dispatch into an unmapped
+          # WNDPROC, race-dependent — attempts 2-5). THIS RUN IS THE PRE-FIX
+          # REPRO ATTEMPT: the branch build carries the TASK J repro
+          # instrument (the module-guard's detach/pin is INERT — a crash here
+          # IS the required evidence; the P1 dump's unloaded-module list names
+          # the ghost). The root fix removes the instrument; the same machine
+          # is then the acceptance gate: 50+ clean cycles, no [crash]
+          # receipts, windows=0 verification receipts.
+          Write-Host "=== Test D10: TASK J repro stress (120 editor cycles under play, module-orphaning swaps, seeded jitter) — WARN-ONLY (advisory, non-gating until further notice; user directive 2026-10-22) ==="
           $engineLogD10 = Join-Path $env:APPDATA "scorch\engine.log"
           $logLinesBeforeD10 = 0
           if (Test-Path $engineLogD10) { $logLinesBeforeD10 = (Get-Content $engineLogD10 | Measure-Object -Line).Lines }
@@ -1867,6 +1869,35 @@ jobs:
       # module and carries per-thread state. Its ABSENCE here is still
       # evidence (an abort/terminate path that bypasses the in-process
       # filters, or a crash inside them).
+      # TASK J step 3 (repro instrument): D10 is warn-only, so a pre-fix
+      # repro crash leaves the JOB green — the failure()-gated upload steps
+      # below would never run and the P1 dump would be lost. This step
+      # uploads the dump + crash log + the stress engine surfaces ALWAYS, so
+      # a wild crash under the inert-guard build lands its evidence as an
+      # artifact (the brief: HALT, adjudicate the dump, then continue).
+      # engine.log lives under %APPDATA% (not in the Actions env context) —
+      # stage it to the repo root so the always-on upload below can carry it.
+      - name: Stage engine.log for the stress-dump artifact
+        if: always()
+        shell: pwsh
+        run: |
+          $src = Join-Path $env:APPDATA 'scorch\engine.log'
+          if (Test-Path $src) { Copy-Item $src 'engine-d10-engine.log' -Force; Write-Host "engine.log staged ($((Get-Item 'engine-d10-engine.log').Length) bytes)" } else { Write-Host "no engine.log at $src" }
+
+      - name: Upload stress dumps (TASK J repro instrument — always on)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: stress-dumps-taskj-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            ${{ env.SCORCH_CRASH_DIR }}\*.dmp
+            ${{ env.SCORCH_CRASH_LOG }}
+            engine-d10-engine.log
+            engine-d10-stdout.txt
+            engine-d10-stderr.txt
+          if-no-files-found: ignore
+          retention-days: 30
+
       - name: Show engine crash receipts (in-engine [crash] channel, if it fired)
         if: failure() || cancelled()
         shell: pwsh

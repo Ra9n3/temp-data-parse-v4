@@ -4407,6 +4407,21 @@ std::vector<HWND> collectProcessWindows() {
 // and the deferred free the message thread pumps naturally.
 void sweepForModule(const std::string& iid, const std::string& pluginPath,
                     const char* why) {
+    // TASK J STEP 3 — REPRO INSTRUMENT (branch task-j-engine-branch ONLY).
+    // The guard's mitigation (detach into user32 / pin the module) is
+    // DISABLED so the dangling-WNDPROC race can fire pre-fix (the brief:
+    // "use the un-stalled D10 to make the race fire pre-fix"). The sweep
+    // stays OBSERVATION-ONLY: the orphan gate + window classification +
+    // receipts remain, so the log still proves the ghost window exists in
+    // the retiring module at every orphaning free — without shielding it.
+    // The root-fix commits (step 2) DELETE this instrument and restore a
+    // real guard as a fail-loud backstop. Never ship outside the branch.
+    static const bool kReproInstrumentAnnounced = [] {
+        engineLog("[module-guard] REPRO INSTRUMENT ACTIVE — detach and pin DISABLED (TASK J step 3 pre-fix exposure; the root fix removes this instrument). A crash under this build IS the repro evidence; the P1 dump adjudicates it.");
+        return true;
+    }();
+    (void)kReproInstrumentAnnounced;
+
     // ORPHAN GATE — sweep only when the module can actually free: any other
     // LIVE instance sharing the path keeps JUCE's module-cache refcount above
     // zero, and so does an in-flight load of the SAME path (a same-path
@@ -4459,43 +4474,20 @@ void sweepForModule(const std::string& iid, const std::string& pluginPath,
         engineLog("[module-guard] window in the retiring module hwnd=" + hexAddr(reinterpret_cast<uintptr_t>(hwnd)) +
                   " thread=" + std::to_string(zTid) +
                   " module=" + wideToUtf8(modPath) +
-                  " — detaching the WNDPROC into user32 (never unmaps) before the module free");
-        const LONG_PTR prev = SetWindowLongPtrW(hwnd, GWLP_WNDPROC,
-                                                reinterpret_cast<LONG_PTR>(DefWindowProcW));
-        if (prev != 0) {
-            ++detached;
-            engineLog("[module-guard] detached hwnd=" + hexAddr(reinterpret_cast<uintptr_t>(hwnd)) +
-                      " — dispatch target is user32!DefWindowProcW for process life; the free can never strand it");
-        } else {
-            const DWORD detachErr = GetLastError();
-            // Cross-thread detach refused — pin the module instead: the code
-            // region stays mapped for process life, so the zombie window can
-            // dispatch into LIVE code forever. The leak is the safe failure.
-            HMODULE pinMod = nullptr;
-            if (GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS |
-                                       GET_MODULE_HANDLE_EX_FLAG_PIN,
-                                   reinterpret_cast<LPCWSTR>(proc), &pinMod) &&
-                pinMod != nullptr) {
-                ++pinned;
-                engineLog("[module-guard] PINNED hwnd=" + hexAddr(reinterpret_cast<uintptr_t>(hwnd)) +
-                          " module=" + wideToUtf8(modPath) +
-                          " — detach failed (GetLastError=" + std::to_string(detachErr) +
-                          "); the module stays mapped for process life (safe leak, unmapped dispatch impossible)");
-            } else {
-                ++failed;
-                engineLog("[module-guard] UNRESOLVED hwnd=" + hexAddr(reinterpret_cast<uintptr_t>(hwnd)) +
-                          " module=" + wideToUtf8(modPath) +
-                          " — detach (err=" + std::to_string(detachErr) + ") AND pin (err=" +
-                          std::to_string(GetLastError()) +
-                          ") failed — the crash window stays armed; the next dump names this module");
-            }
-        }
+                  " — REPRO INSTRUMENT: mitigation INERT (no detach, no pin) — this window's WNDPROC is LEFT ARMED for the free that follows");
+        // TASK J repro instrument: the pre-fix engine did NOTHING here. No
+        // SetWindowLongPtrW, no GetModuleHandleExW PIN — the module frees
+        // with the window's WNDPROC pointing into it, exactly the exposure
+        // the TASK F dump died from. detached/pinned/failed stay 0 so the
+        // receipt grammar stays machine-readable (the D10 assert only reads
+        // the orphan=yes prefix; zero PINNED/UNRESOLVED lines keep the yml
+        // notes silent).
     }
     engineLog(std::string("[module-guard] ") + why + " instance=" + iid + " orphan=yes windows=" +
               std::to_string(matched) + " detached=" + std::to_string(detached) +
               " pinned=" + std::to_string(pinned) + " failed=" + std::to_string(failed) +
               " module=" + pluginPath +
-              " — invariant held: no module unload while a window's WNDPROC lives in it");
+              " — mitigation=INERT (TASK J repro instrument): the module frees with any live WNDPROC in it armed");
 }
 
 } // namespace scorchguard
