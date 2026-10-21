@@ -1772,6 +1772,14 @@ ws.addEventListener("message", (event) => {
       if (msg.protocol !== 1) fail(`expected protocol 1, got ${msg.protocol}`);
       if (msg.engineVersion !== "0.13.0") fail(`expected 0.13.0, got ${msg.engineVersion}`);
       if (!fixtureDir) fail("stress mode requires a fixture dir argument");
+      // Attempt 13's lesson (run 39646941112): the stress ran the FULL
+      // machine — 60/60 cycles, 60 opens, 60 closes, 11 orphaning swaps,
+      // stop clean, engine exit 0, the odule-guard] retire orphan=yes
+      // receipts ON THE RECORD — and then FAILED ITSELF on helloOk=false:
+      // this branch validates protocol + version but never set helloOk,
+      // and the stress allOk gate includes it. Every other mode sets
+      // helloOk here; the stress was the one branch that forgot.
+      helloOk = true;
       console.log(`[test] hello OK (0.13.0) — TASK I stress: ${D10_CYCLES} editor cycles under play, a module-orphaning diff swap every ${D10_SWAP_EVERY} — scanning...`);
       d10Phase = 1;
       ws.send(JSON.stringify({ type: "scan", dirs: [fixtureDir] }));

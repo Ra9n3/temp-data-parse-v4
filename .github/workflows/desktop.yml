@@ -360,8 +360,12 @@ jobs:
             # guard's safe failure (leak, no unmapped dispatch) — print it
             # loudly; an UNRESOLVED window means the invariant could NOT be
             # enforced and the next dispatch is the TASK F crash — fail now.
-            $guardD10 = @($d10Lines | Select-String -Pattern "\[module-guard\] retire orphan=yes")
-            if (($guardD10 | Measure-Object).Count -lt 1) { Show-StepLogTail -Path $engineLogD10 -Proc $procD10 -Label "Engine D10"; throw "D10: no '[module-guard] retire orphan=yes' summary receipt — the swaps must orphan a module each and the sweep must hold the invariant (execution proof missing)" }
+            # (Attempt 13's lesson: the summary grammar is
+            # "[module-guard] retire instance=<iid> orphan=yes windows=..." —
+            # the pattern must span the instance field; "retire orphan=yes"
+            # adjacency never occurs in the engine's emission.)
+            $guardD10 = @($d10Lines | Select-String -Pattern "\[module-guard\] retire instance=\S+ orphan=yes")
+            if (($guardD10 | Measure-Object).Count -lt 1) { Show-StepLogTail -Path $engineLogD10 -Proc $procD10 -Label "Engine D10"; throw "D10: no '[module-guard] retire instance=<iid> orphan=yes' summary receipt — the swaps must orphan a module each and the sweep must hold the invariant (execution proof missing)" }
             $guardD10 | ForEach-Object { Write-Host $_.Line }
             $pinnedD10 = @($d10Lines | Select-String -Pattern "\[module-guard\] PINNED")
             if (($pinnedD10 | Measure-Object).Count -gt 0) { Write-Host "D10 NOTE: $($pinnedD10.Count) window(s) could not be detached and were PINNED (safe leak — the module stays mapped; no unmapped dispatch possible):"; $pinnedD10 | ForEach-Object { Write-Host $_.Line } }
