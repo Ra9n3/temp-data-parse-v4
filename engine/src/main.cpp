@@ -4479,13 +4479,19 @@ int destroyAndDrainOnThisThread(const std::vector<ModuleWindow>& wins,
     int destroyed = 0;
     for (const ModuleWindow& w : wins) {
         if (w.tid != self) continue;   // not ours — never DestroyWindow cross-thread
-        DWORD liveTid = 0;
-        if (GetWindowThreadProcessId(w.hwnd, &liveTid) == 0 || liveTid != self) continue;
+        // THE 445e7cf RUN'S BUG (acceptance 39687874816: 46 retires, every
+        // window classified current-thread-owned, ZERO destroyed, all
+        // pinned): GetWindowThreadProcessId's OUT-PARAM receives the PROCESS
+        // id and its RETURN is the owning THREAD id — the old re-check
+        // compared the process id against the thread id and skipped every
+        // window. The RETURN is the re-check.
+        const DWORD liveTid = GetWindowThreadProcessId(w.hwnd, nullptr);
+        if (liveTid == 0 || liveTid != self) continue;
         const BOOL ok = DestroyWindow(w.hwnd);
         ++destroyed;
         engineLog(std::string("[module-teardown] destroyed hwnd=") + hexAddr(reinterpret_cast<uintptr_t>(w.hwnd)) +
                   " thread=" + std::to_string(self) +
-                  " (owner-thread destroy — WM_DESTROY delivered inline) ok=" + (ok ? "1" : "0") +
+                  " (current-thread destroy — WM_DESTROY delivered inline) ok=" + (ok ? "1" : "0") +
                   " instance=" + iid + " module=" + wideToUtf8(w.module));
     }
     if (destroyed == 0) return 0;
@@ -4589,7 +4595,7 @@ void beginModuleTeardown(const std::string& iid, const std::string& pluginPath,
         // destroyed=0 handed-to-worker=0 while phase 2 pinned the ghost 15 ms
         // later - the per-window classification was invisible). One line per
         // found window, with the classification and the stored worker tid.
-        const char* klass = w.tid == self ? "mm-owned (destroyed on this thread)"
+        const char* klass = w.tid == self ? "current-thread-owned (destroyed on this thread)"
                           : (workerTid != 0 && w.tid == static_cast<DWORD>(workerTid))
                                 ? "init-worker-owned (handed to the worker)"
                                 : "other-owner (handed to the worker; the worker destroys it only if it owns it - else phase 2 refuses the unload)";
