@@ -4323,6 +4323,13 @@ std::string wideToUtf8(const wchar_t* w) {
     return juce::String(w).toStdString();
 }
 
+// TASK J: the machinery carries module paths as std::wstring — overload so
+// the receipt concatenations compile (the C2664 the db03aae acceptance run
+// named: wideToUtf8(w.module) at the teardown/verify sites).
+std::string wideToUtf8(const std::wstring& w) {
+    return wideToUtf8(w.c_str());
+}
+
 std::wstring utf8ToWide(const std::string& s) {
     const juce::String js(s.c_str());
     return std::wstring(static_cast<const wchar_t*>(js.toUTF16()));
