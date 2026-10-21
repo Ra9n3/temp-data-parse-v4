@@ -3327,3 +3327,178 @@ recurring with NO dump in the artifact falsifies the WER/in-engine assumption
 chain → forensics-only fix, engine untouched. (3) if the next run is GREEN
 (race missed), the forensics STAYS and attempts keep accumulating — never
 re-run-until-green this away.
+
+## CI crash family, TASK F — the dump adjudicated: a wild WNDPROC into an
+## UNLOADED module (run 39563546785 attempt 1)
+
+The forensics paid off on the first red run. scorch-engine-20261021-075340.dmp
+(192 KB, M1 channel: %APPDATA%/scorch/crashes + engine-crash.log, both first-
+class artifact contents now) pinned the crash class:
+
+- engine-crash.log: kind=seh code=0xc0000005 addr=0x7FF838CA69B0 thread=8076.
+- 0xC0000005 with access type EXECUTE (DEP); RIP = RAX = the faulting target —
+  the classic call-through-a-bad-function-pointer shape.
+- [crash_rsp] holds user32.dll+0x17846 — the return address pushed by the
+  failed indirect call sits in user32's message dispatch: Windows was calling
+  a WINDOW PROCEDURE when it died.
+- The target 0x7FF838CA69B0 is in a MAPPED-OUT HOLE (above dbghelp.dll's top
+  0x7FF835244000, below comctl32's base 0x7FF846490000), NOT inside any of the
+  65 loaded modules: something was loaded there, then unloaded, while a window
+  it owned (or whose class it registered) stayed alive.
+- The bad pointer appears 8x on the crash thread's stack (dispatch spill
+  slots). Scorch Test Synth.vst3 is STILL LOADED (0x7FF8321D0000 +0x2E4000) —
+  the crash is NOT in the plugin's current mapping. Thread 8076 was a
+  message-pumping thread; 21 threads total.
+
+FALSIFICATIONS on record:
+
+- TASK E candidate M1 ("C++ exception escaping the MM editor-open job") is
+  DEAD — there is no C++ throw here; it is a wild WNDPROC call. M2/M3/M4 (the
+  exception/abort family) die with it: the receipt came through the SEH filter
+  (kind=seh 0xC0000005), not the terminate path. M5 reopens in a NEW form:
+  window/message-callback territory is exactly where the death lives — not as
+  "headless window-station assumptions", but as a ZOMBIE WINDOW whose proc
+  points into an unmapped module.
+- The TASK E WER LocalDumps channel is falsified AS DESIGNED, not as a
+  misconfiguration: kernel32 engages WER (LocalDumps included) ONLY when no
+  top-level filter exists or that filter returns EXCEPTION_CONTINUE_SEARCH;
+  the engine's M1 filter returns EXCEPTION_EXECUTE_HANDLER after writing its
+  own minidump, and abort()/fail-fast deaths (the 0xC000041D class) bypass WER
+  entirely. The registry key was verified present on every run and
+  C:\engine-dumps stayed empty on the first real crash. Channel DELETED
+  (harness-only); the M1 channel is THE channel. The exit-code note in TASK E
+  ("0xC0000005 would exit with its own code through the M1 filter") stands —
+  this run confirms it.
+
+MECHANISM CLASS (static review, item 4; file:line candidates):
+
+The only DLLs the engine's own process unloads mid-run are the hosted VST3
+module handles. That unload+reload is CI-PROVEN: the 0.9.2 incident where the
+abandoned seq-10 instance's destruction dropped the module's last reference,
+Windows FreeLibrary'd the .vst3, and seq 12's create RELOADED it (the fixture's
+per-module static create counter reset — receipted in the run logs; see the
+0.9.2 section above and the main.cpp:6655 comment "FreeLibrary + module reload
+resets the fixture's static create counter"; the module-handle cache itself is
+described at main.cpp:3900). Per-load ASLR gives a process-unique DLL a fresh
+base per mapping — consistent with a ~3 MB ghost hole (the vst3's current size
+is +0x2E4000) at 0x7FF838CA69B0 while the LIVE vst3 sits at 0x7FF8321D0000.
+
+Scan/probe are NOT in-process in the D5 machine (item 4a): runScanWorker
+(main.cpp:3862) and runProbeWorker (3908) are SEPARATE CHILD processes, one per
+row — ProbeCrashDummy / ProbeHangDummy / CorruptDummy / CrashDummy never load
+in the D5 parent's address space. The glue itself installs no hooks and
+creates no raw windows (grep: zero SetWindowsHookEx / CreateWindow /
+EnumWindows in main.cpp) — every window in the process comes from JUCE or the
+plugin. The ONLY module the parent cycles is the hosted fixture vst3: unloaded
+at abandoned-instance destruction (seq 10), the M2 replace-retire path, and
+the classic-pair retire (seq 40/41); reloaded by the next create (seq 12+).
+
+Inside the plugin DLL (JUCE 8.0.4), module GUI init inside a HOST process
+creates hidden windows whose WNDPROCs live IN THE PLUGIN DLL:
+
+- juce_audio_plugin_client_VST3.cpp (8.0.4), ScopedRunLoop's Windows branch
+  (~L582–591): holds a ScopedJuceInitialiser_GUI — the plugin module's OWN
+  JUCE MessageManager comes alive inside the engine process the first time
+  the host instantiates the plugin (the load path; the hasEditor() capability
+  probe also drives the wrapper's IPlugView view creation — the fixture
+  header documents the same quirk at ScorchTestSynth.h:93–95).
+- juce_Messaging_windows.cpp (8.0.4): that MM creates a hidden message window
+  in InternalMessageQueue's constructor; it is destroyed ONLY by
+  doPlatformSpecificShutdown — which never runs for a plugin module inside a
+  host. Its WNDPROC (messageWndProc) is compiled per-module.
+- juce_HiddenMessageWindow_windows.h (8.0.4): the window class is
+  MODULE-UNIQUE ("JUCE_" + hex(Time::getHighResolutionTicks())) with
+  hInstance = the plugin module handle. DLL unload destroys NEITHER the
+  window NOR the process-global class entry — both survive with a proc
+  pointer into the now-unmapped module. This is the textbook zombie window.
+- The fixture code itself is clean: ScorchTestSynth has zero Timer /
+  MessageManager / at-init Component / HWND usage (grep) — the zombies are
+  the plugin module's JUCE-infrastructure windows, not fixture logic.
+
+Engine-side HWND inventory (item 4c) — who owns each WNDPROC:
+
+1. The engine's own MM hidden window: created on the pump thread
+   (main.cpp:6692, runDispatchLoop 6704); proc in the EXE — safe.
+2. Editor DocumentWindow peers (openEditorWindow main.cpp:1995–2004): procs in
+   the EXE; alive only while an editor is open; the D5 machine opens/closes
+   them mid-machine under bounded timers.
+3. applyHostWindowOwner (main.cpp:1851–1880): SetWindowLongPtrW
+   (GWLP_HWNDPARENT) — OWNERSHIP, not a proc; safe.
+4. closeButtonPressed → async self-delete (1894–1907) — no proc mutation.
+5. While a plugin editor is OPEN: the host-side VST3 wrapper child HWND
+   (class in the EXE) + the plugin-side peer HWND (class registered by the
+   PLUGIN module — proc in the plugin DLL). Destroyed at close; the risk
+   window is an unload while open — the crash shows the death ~1 ms AFTER an
+   openEditor acceptance, with the pump dying mid-dispatch.
+6. The plugin module's own infrastructure windows (the MM window + the
+   device/display-change detector windows): alive for the whole run after the
+   first instantiate, immune to every FreeLibrary, never destroyed — the
+   prime zombie class.
+
+Headless graphics (item 4b): d2d1/d3d11/dcomp/d3d10warp all loaded at crash =
+the editor-peer rendering stack (JUCE 8 D2D/WARP on a GPU-less runner), pulled
+in by the machine's earlier editor-open phases and still resident. That family
+registers no user32 callbacks — they are not the ghost procs. System-side
+TSF/IME load/unload on focus changes stays a background candidate ONLY if the
+unloaded-module list names one (P1 arbitrates).
+
+Why timing-dependent: a zombie proc is only reached when a message is actually
+dispatched to its window — pure queue timing. Attempt 2 passed, attempts 3/4/5
+crashed, same engine bytes: the message landed in the editor-open window or it
+didn't. The ~780 ms stream silence, one state, close = the pump dying inside
+dispatch.
+
+ITEM 1 STATUS (symbolize engine+0x120E70 / 0x170445 / 0x88CBA): BLOCKED on the
+binary, honestly. Run 39563546785's artifact set holds ONLY
+engine-crash-dumps-39563546785-1 (21,420 bytes, API-verified) — the
+success-only "Upload engine exe (sidecar)" never runs on a red run. The
+green-run exe path is blocked at the source: GitHub artifact DOWNLOAD requires
+authentication (the zip endpoint 401s unauthenticated even for a public repo),
+no PAT exists in the analysis sandbox, and the anonymous API rate limit
+(per-IP, rotating) throttled the listing itself for most of the session. The
+symbolization-relevant structural read stands: engine+0x120E70 is the deepest
+engine frame under user32 dispatch on the pumping thread = the JUCE
+message-pump call site (dispatchNextMessageOnSystemQueue-class),
+0x170445/0x88CBA its pump/run-loop callers — exact function names land with
+the map (P4). Fixed for the future: /MAP emits scorch-engine.map beside the
+exe (linker bookkeeping, image bytes unchanged), and a NEW failure-only
+upload step (engine-exe-map-crash-<run>-<attempt>) ships the exe + map on the
+red runs themselves — a red run's dump now symbolizes against ITS OWN build,
+offline, no PDB needed.
+
+WHAT SHIPPED (flag changes only; zero functional code-path changes):
+
+- main.cpp writeDump (455–468): MiniDumpNormal → | MiniDumpWithUnloadedModules
+  | MiniDumpWithProcessThreadData — the ONE authorized engine flag change
+  (dump-write-time only). The next dump LISTS the unloaded module by name and
+  carries per-thread state.
+- engine/CMakeLists.txt (64–72): LINK_FLAGS "/SUBSYSTEM:CONSOLE /MAP".
+- desktop.yml: WER LocalDumps step DELETED (structurally dead, falsified
+  above) and replaced by the M1 env-passthrough step; the upload glob loses
+  C:\engine-dumps; NEW failure-only exe+map upload. D5 asserts, phases, and
+  the mjs are untouched. No catch-and-continue anywhere. Tag stays HELD.
+
+TASK A link — UPDATED: the CI family's mechanism class is now concrete (wild
+WNDPROC into an unmapped module — the window/message-callback domain). The
+Falcon field incident (0xC0000005, 0.12.2 follow-ups) sits in the SAME domain
+— a real library runs its own window/COM/callback lifecycle, and a real
+library's module unload (uninstall/reload while its windows persist) is the
+same textbook shape. Same-class suspicion remains UNPROVEN for the field
+incident; the CI family gets its own adjudication from P1.
+
+Predictions on record:
+
+- (P1) the next red D5 run's dump (MiniDumpWithUnloadedModules) lists ≥1
+  unloaded module and the faulting address falls inside one of those ranges;
+  THAT module's name is the culprit. Expected name by the static read: the
+  EARLIER mapping of Scorch Test Synth.vst3 (a zombie JUCE-infrastructure
+  window of the plugin module) — a system DLL named by the list (TSF/IME/
+  display family) redirects the hunt immediately, either way it is NAMED.
+- (P2) FALSIFIER: the faulting address INSIDE the STILL-LOADED vst3 range
+  (0x7FF8321D0000 +0x2E4000) → the unloaded-module read is wrong (stale
+  pointer into a LIVE module — freed-COM/interface reuse) → reopened with the
+  new evidence, report back either way.
+- (P3) green-run rule re-affirmed: forensics stay, attempts accumulate, never
+  re-run-until-green.
+- (P4) the next red run's dump + its own map/exe artifact = exact function
+  names for every offset (engine+0x120E70-class → file::function receipts).

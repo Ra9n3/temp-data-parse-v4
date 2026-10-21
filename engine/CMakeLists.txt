@@ -63,5 +63,10 @@ add_subdirectory(testvst)
 # a crashing plugin must actually kill its worker child — crash isolation.)
 if(MSVC)
     target_compile_options(scorch-engine PRIVATE /EHa)
-    set_target_properties(scorch-engine PROPERTIES LINK_FLAGS "/SUBSYSTEM:CONSOLE")
+    # TASK F (2026-10-21): /MAP emits scorch-engine.map beside the exe —
+    # function start/end RVAs + names for EVERY crash offset, so the next
+    # red run's minidump symbolizes (engine+0x120E70-class addresses -> the
+    # enclosing function, offline, no PDB upload needed). Linker-side
+    # bookkeeping only: the image bytes are unchanged; no codegen impact.
+    set_target_properties(scorch-engine PROPERTIES LINK_FLAGS "/SUBSYSTEM:CONSOLE /MAP")
 endif()

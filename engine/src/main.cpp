@@ -452,8 +452,19 @@ void writeDump(EXCEPTION_POINTERS* ep, char* outPath, size_t outLen) {
     mei.ThreadId = GetCurrentThreadId();
     mei.ExceptionPointers = ep;
     mei.ClientPointers = FALSE;
+    // TASK F (2026-10-21, run 39563546785 attempt 1 dump): verdict is a wild
+    // WNDPROC call into an UNLOADED module (0xC0000005 EXECUTE at a mapped-out
+    // hole; return address in user32 message dispatch; NOT a C++ exception).
+    // MiniDumpWithUnloadedModules makes the NEXT dump LIST the unloaded DLL —
+    // its name is the culprit; MiniDumpWithProcessThreadData carries the
+    // per-thread state needed to tie the zombie window to its owning thread.
+    // Diagnostic-only: these flags are read at dump-write time; no code path
+    // changes (the one authorized engine-flag change of TASK F).
     writeDumpFn(GetCurrentProcess(), GetCurrentProcessId(), file,
-                MiniDumpNormal, ep != nullptr ? &mei : nullptr, nullptr, nullptr);
+                static_cast<MINIDUMP_TYPE>(MiniDumpNormal
+                                           | MiniDumpWithUnloadedModules
+                                           | MiniDumpWithProcessThreadData),
+                ep != nullptr ? &mei : nullptr, nullptr, nullptr);
     CloseHandle(file);
 }
 
