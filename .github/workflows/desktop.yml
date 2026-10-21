@@ -307,6 +307,60 @@ jobs:
 
           Write-Host "All engine protocol tests passed (audio-capable build, graceful headless behavior)"
 
+          # Test D10 — TASK I: the editor-open-under-play stress (the
+          # dangling-WNDPROC race). 60 editor open/close cycles UNDER ACTIVE
+          # PLAYBACK (--null-audio pacing), with a mid-play diff swap every 5
+          # cycles that orphans the outgoing instance's module — JUCE frees a
+          # plugin DLL when the last instance of its path dies (the D5 CI
+          # finding) — and loads the survivor under play. The survivor's next
+          # editor cycle runs INSIDE the freed module's deferred-free window:
+          # the exact shape the TASK F dump died in (user32 dispatch into an
+          # unmapped WNDPROC, race-dependent — attempts 2-5). Pre-guard this
+          # run is the REPRO attempt (a crash here is the required evidence;
+          # the P1 dump's unloaded-module list names the ghost). Post-guard
+          # the same machine is the acceptance gate: 50+ clean cycles, no
+          # [crash] receipts, and the [module-guard] receipts (asserted from
+          # the guard commit onward).
+          Write-Host "=== Test D10: TASK I stress (60 editor cycles under play, module-orphaning swaps) ==="
+          $engineLogD10 = Join-Path $env:APPDATA "scorch\engine.log"
+          $logLinesBeforeD10 = 0
+          if (Test-Path $engineLogD10) { $logLinesBeforeD10 = (Get-Content $engineLogD10 | Measure-Object -Line).Lines }
+          $procD10 = Start-Process -FilePath "engine/build/scorch-engine.exe" -ArgumentList "--port","9391","--null-audio" -PassThru -NoNewWindow -RedirectStandardOutput "engine-d10-stdout.txt" -RedirectStandardError "engine-d10-stderr.txt"
+          Start-Sleep -Seconds 3
+          try {
+            if ($procD10.HasExited) {
+              Write-Host "Engine D10 exited early (code=$($procD10.ExitCode)). stdout:"
+              if (Test-Path engine-d10-stdout.txt) { Get-Content engine-d10-stdout.txt }
+              throw "Engine D10 process exited before test could connect"
+            }
+            node .github/scripts/test-engine-protocol.mjs 9391 stress "$env:SCAN_FIXTURES"
+            if ($LASTEXITCODE -ne 0) {
+              Show-StepLogTail -Path $engineLogD10 -Proc $procD10 -Label "Engine D10"
+              Write-Host "Engine D10 stdout:"
+              if (Test-Path engine-d10-stdout.txt) { Get-Content engine-d10-stdout.txt }
+              Write-Host "Engine D10 stderr:"
+              if (Test-Path engine-d10-stderr.txt) { Get-Content engine-d10-stderr.txt }
+              if (Test-Path $engineLogD10) { Write-Host "Engine D10 engine.log slice (last 120 lines):"; Get-Content $engineLogD10 | Select-Object -Last 120 }
+              throw "Harness D10 (stress mode) failed"
+            }
+            # TASK D machinery: wait for ENGINE EXIT before reading the log —
+            # the file is final once the process is gone (exit-verified read).
+            $procD10.WaitForExit(20000) | Out-Null
+            if (-not $procD10.HasExited) { Show-StepLogTail -Path $engineLogD10 -Proc $procD10 -Label "Engine D10"; throw "Engine D10 still running 20s after the harness exit — shutdown hung (dump above names the last phase)" }
+            if ($procD10.ExitCode -ne 0) { Show-StepLogTail -Path $engineLogD10 -Proc $procD10 -Label "Engine D10"; throw "Engine D10 exited code=$($procD10.ExitCode) before the receipt asserts (dump above)" }
+            Write-Host "Engine D10 exit verified BEFORE the log read (file final: exit 0)"
+            $d10Lines = Get-Content $engineLogD10 | Select-Object -Skip $logLinesBeforeD10
+            $crashD10 = @($d10Lines | Select-String -Pattern "\[crash\]")
+            if (($crashD10 | Measure-Object).Count -ne 0) {
+              $crashD10 | ForEach-Object { Write-Host $_.Line }
+              throw "D10: the in-process crash channel fired during the stress — adjudicate the dump (the unloaded-module list IS the verdict) before continuing"
+            }
+            Write-Host "D10 receipts: 60 editor cycles under active playback, 11 module-orphaning swaps, zero [crash] receipts, clean exit 0"
+            Write-Host "Engine D10 clean exit 0 (TASK I stress: the engine survived every orphaning free with editors cycling)"
+          } finally {
+            Stop-Process -Id $procD10.Id -Force -ErrorAction SilentlyContinue
+          }
+
           # Test C — Stage 3c-1 VST3 scan protocol: valid plugin found (real
           # name + vendor), CRASH-ISOLATION (worker dies → failed entry, scan
           # + engine survive), corrupt .vst3 graceful, default-dir scan clean.
@@ -1555,59 +1609,6 @@ jobs:
             Remove-Item Env:\SCORCH_TESTVST_EDITOR_JAM_MS -ErrorAction SilentlyContinue
           }
 
-          # Test D10 — TASK I: the editor-open-under-play stress (the
-          # dangling-WNDPROC race). 60 editor open/close cycles UNDER ACTIVE
-          # PLAYBACK (--null-audio pacing), with a mid-play diff swap every 5
-          # cycles that orphans the outgoing instance's module — JUCE frees a
-          # plugin DLL when the last instance of its path dies (the D5 CI
-          # finding) — and loads the survivor under play. The survivor's next
-          # editor cycle runs INSIDE the freed module's deferred-free window:
-          # the exact shape the TASK F dump died in (user32 dispatch into an
-          # unmapped WNDPROC, race-dependent — attempts 2-5). Pre-guard this
-          # run is the REPRO attempt (a crash here is the required evidence;
-          # the P1 dump's unloaded-module list names the ghost). Post-guard
-          # the same machine is the acceptance gate: 50+ clean cycles, no
-          # [crash] receipts, and the [module-guard] receipts (asserted from
-          # the guard commit onward).
-          Write-Host "=== Test D10: TASK I stress (60 editor cycles under play, module-orphaning swaps) ==="
-          $engineLogD10 = Join-Path $env:APPDATA "scorch\engine.log"
-          $logLinesBeforeD10 = 0
-          if (Test-Path $engineLogD10) { $logLinesBeforeD10 = (Get-Content $engineLogD10 | Measure-Object -Line).Lines }
-          $procD10 = Start-Process -FilePath "engine/build/scorch-engine.exe" -ArgumentList "--port","9391","--null-audio" -PassThru -NoNewWindow -RedirectStandardOutput "engine-d10-stdout.txt" -RedirectStandardError "engine-d10-stderr.txt"
-          Start-Sleep -Seconds 3
-          try {
-            if ($procD10.HasExited) {
-              Write-Host "Engine D10 exited early (code=$($procD10.ExitCode)). stdout:"
-              if (Test-Path engine-d10-stdout.txt) { Get-Content engine-d10-stdout.txt }
-              throw "Engine D10 process exited before test could connect"
-            }
-            node .github/scripts/test-engine-protocol.mjs 9391 stress "$env:SCAN_FIXTURES"
-            if ($LASTEXITCODE -ne 0) {
-              Show-StepLogTail -Path $engineLogD10 -Proc $procD10 -Label "Engine D10"
-              Write-Host "Engine D10 stdout:"
-              if (Test-Path engine-d10-stdout.txt) { Get-Content engine-d10-stdout.txt }
-              Write-Host "Engine D10 stderr:"
-              if (Test-Path engine-d10-stderr.txt) { Get-Content engine-d10-stderr.txt }
-              if (Test-Path $engineLogD10) { Write-Host "Engine D10 engine.log slice (last 120 lines):"; Get-Content $engineLogD10 | Select-Object -Last 120 }
-              throw "Harness D10 (stress mode) failed"
-            }
-            # TASK D machinery: wait for ENGINE EXIT before reading the log —
-            # the file is final once the process is gone (exit-verified read).
-            $procD10.WaitForExit(20000) | Out-Null
-            if (-not $procD10.HasExited) { Show-StepLogTail -Path $engineLogD10 -Proc $procD10 -Label "Engine D10"; throw "Engine D10 still running 20s after the harness exit — shutdown hung (dump above names the last phase)" }
-            if ($procD10.ExitCode -ne 0) { Show-StepLogTail -Path $engineLogD10 -Proc $procD10 -Label "Engine D10"; throw "Engine D10 exited code=$($procD10.ExitCode) before the receipt asserts (dump above)" }
-            Write-Host "Engine D10 exit verified BEFORE the log read (file final: exit 0)"
-            $d10Lines = Get-Content $engineLogD10 | Select-Object -Skip $logLinesBeforeD10
-            $crashD10 = @($d10Lines | Select-String -Pattern "\[crash\]")
-            if (($crashD10 | Measure-Object).Count -ne 0) {
-              $crashD10 | ForEach-Object { Write-Host $_.Line }
-              throw "D10: the in-process crash channel fired during the stress — adjudicate the dump (the unloaded-module list IS the verdict) before continuing"
-            }
-            Write-Host "D10 receipts: 60 editor cycles under active playback, 11 module-orphaning swaps, zero [crash] receipts, clean exit 0"
-            Write-Host "Engine D10 clean exit 0 (TASK I stress: the engine survived every orphaning free with editors cycling)"
-          } finally {
-            Stop-Process -Id $procD10.Id -Force -ErrorAction SilentlyContinue
-          }
 
           # Test E — Stage 3c-hotfix: REAL-PROJECT-SIZED load. The CI gap was
           # scale; this closes it: a deterministic 13,824-event (~1.1 MB)

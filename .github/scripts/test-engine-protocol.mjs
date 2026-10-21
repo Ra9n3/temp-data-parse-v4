@@ -450,6 +450,10 @@ let d10Errors = [];
 const d10PluginOf = (iid) => (iid === "inst-a" ? d10ScanA : d10ScanB);
 const d10Other = (iid) => (iid === "inst-a" ? "inst-b" : "inst-a");
 const d10SendLoad = (seq, iid) => {
+  // The multiSendLoad grammar EXACTLY: events + channels + routing + plugins.
+  // Attempt 8's load (events + plugins, NO mapping) wedged the WS thread
+  // inside handle_load; every green load in the suite maps its tracks. The
+  // track t1 rides wire channel 1 on the live instance.
   ws.send(JSON.stringify({
     type: "load", seq,
     events: [
@@ -457,6 +461,8 @@ const d10SendLoad = (seq, iid) => {
       { eventType: "NOTE_OFF", channel: 1, data1: 60, data2: 0, timestampTicks: 8447 },
     ],
     meta: D10_META,
+    channels: { t1: 1 },
+    routing: { t1: { inst: iid, ch: 1 } },
     plugins: [d10PluginOf(iid)],
   }));
 };
@@ -465,7 +471,11 @@ const d10Open = () => ws.send(JSON.stringify({ type: "openEditor", instanceId: d
 // load path was invisible from the harness side — the timeout line alone
 // could not say WHERE the machine stood). One line every 20 s with the full
 // machine state; harmless on green runs, decisive on a wedged one.
+let d10ConnectedAt = 0;
 const d10Heartbeat = setInterval(() => {
+  if (d10Phase === 0 && d10ConnectedAt !== 0 && Date.now() - d10ConnectedAt > 30000) {
+    fail(`stress: the engine did not answer hello within 30 s of connect — the WS layer never delivered the handshake (attempt-9 shape: 6 min of phase=0 heartbeats, run 39614289080)`);
+  }
   console.log(`[test] stress heartbeat: phase=${d10Phase} cycles=${d10Cycle}/${D10_CYCLES} opened=${d10Opened} closed=${d10Closed} live=${d10Live} swapInFlight=${d10SwapInFlight} seq=${d10SwapSeq} peak=${d10Peak.toFixed(3)} errors=${d10Errors.length}`);
 }, 20000);
 
@@ -1075,6 +1085,7 @@ function finishAndShutdown() {
 }
 
 ws.addEventListener("open", () => {
+  if (mode === "stress") d10ConnectedAt = Date.now();
   console.log(`[test] connected to ws://127.0.0.1:${port} (mode=${mode}), waiting for hello...`);
 });
 
