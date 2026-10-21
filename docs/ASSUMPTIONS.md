@@ -3502,3 +3502,109 @@ Predictions on record:
   re-run-until-green.
 - (P4) the next red run's dump + its own map/exe artifact = exact function
   names for every offset (engine+0x120E70-class → file::function receipts).
+
+## CI harness family, TASK G — the seq-40 XOR adjudicated: a stale grep
+## target, not a silent drop (run 39578126692 attempt 6)
+
+Attempt 6: the crash race did NOT fire — the machine progressed past phase 7
+(editor reopen) for the first time since the fix, ran the WHOLE designed
+sequence (jam 10 → queued-behind 11 → clean 12 → editor phases → fold 20/21 →
+classic pair 40/41 → clean exit 0), and died in the PS harness instead:
+the seq-40/41 classic-pair XOR assert (ps1 line 722) threw with
+superseded=0 loaded=0 kept=0 instanceKept=0 failed=0. No crash channel
+receipt, no dump, dump artifact empty, exe+map artifact uploaded as designed.
+P1 stays PENDING (first crashing run's dump names the ghost); the crash track
+stays armed exactly as TASK F left it; no re-run-until-green was executed.
+
+The harness's own evidence (the "D5 seq-40 terminal evidence" census printed
+just above the throw — every slice line mentioning seq 40/seq=40) held BOTH:
+
+- "[load] received 656 bytes | ... | seq 40 | plugin requested"
+- "[plugin] init superseded: seq=40 by=20 (coalesced — the request's set
+  matches the in-flight init; its terminal receipts serve this request)"
+
+The engine DID emit an exactly-one terminal for seq 40 — the superseded
+receipt — in the very slice the counter read as 0. (For the record: GitHub
+Copilot's read, "the engine never reported any terminal result", is
+contradicted by these two lines; the counter's zero was the PATTERN's zero.)
+
+ADJUDICATION (the three hypotheses, on evidence):
+
+- H1 grammar drift — CONFIRMED, with the precise shape. The XOR's superseded
+  grep target was written `seq=40 by=41\D`: the QUEUED-OVERWRITE form only
+  (main.cpp's "overwritten while still queued — never started" emission).
+  The engine's COALESCING fold emits the SAME superseded grammar with
+  by=<in-flight seq>: "seq=40 by=20". Five shapes were enumerated; the sixth
+  (the fold form) was missing from both the comment and the pattern. The
+  XOR condition itself was never wrong — the grep target was stale.
+- H2 slice mismatch — REFUTED. The census dump is generated from the SAME
+  $d5Lines array the patterns ran against, AFTER the TASK D exit-verified
+  read (file final, exit 0). The receipt was IN the slice; the pattern
+  missed it. No second window exists in the flow.
+- H3 engine-side — RESOLVED: not stuck, not designed-in-flight — a bounded
+  publish-tail ordering window. Proof chain, all from this run:
+  (a) the mjs machine sends 40 ONLY after receiving seq 20's wire "loaded"
+  (terminal.mjs phase 11→12 — the machine's own console line confirms:
+  "seq 20 LOADED ✓ ... sending the classic supersede pair"), so seq 20 was
+  NOT in-flight by machine design at 40's arrival;
+  (b) the engine's publish tail order is: per-entry wire sends → publish:
+  done engineLog → initRegistryMarkTerminal — the registry mark LAGS the
+  wire receipt by two flushed engineLog lines (the run's per-line cadence:
+  0.5–1.2 ms per flush, so a ~1–2 ms window);
+  (c) the machine's ~1.5 ms loopback round trip landed INSIDE it: the
+  timestamps read kept|seq 20 .511 → publish: done|seq 20 .513 → [load]
+  received seq 40 .513 → superseded seq=40 by=20 .514 → init failed seq=41
+  .518;
+  (d) initRegistryFindMatching skips only TERMINAL records — 40's fold into
+  20 firing at all PROVES the mark had not yet run. A stuck init is
+  excluded: publish completed in 1 ms and the mark is unconditional after
+  it. "by=20" is the coalesce TARGET (the registry-open init's seq whose
+  receipts serve the folded request) — exactly the documented fold
+  semantics, applied at the boundary of the mark window.
+
+WHAT SHIPPED (harness only; engine bytes untouched; XOR byte-identical):
+
+- desktop.yml Show-ReceiptDiag: on ANY terminal-count mismatch (seq-10,
+  seq-11, seq-21 asserts, the seq-40 XOR, seq-41, and every per-seq loop
+  site) the console now prints the EXACT per-kind regexes + the slice bounds
+  (skip count + slice line count) BEFORE throwing — one failing run answers
+  H1-vs-H2 by itself, same self-diagnosing pattern as the tail dumps.
+- classicSup widened: `seq=40 by=41\D` → `seq=40 by=\d+\D` — the repaired
+  grep target (both engine superseded emission forms append " (", so \D is
+  safe). The XOR condition, the throw message, and the other four patterns
+  are byte-identical (verified programmatically); the comment block now
+  enumerates SIX shapes including the fold form.
+- Validation against THIS run (no pwsh locally; .NET-equivalent regex
+  semantics replayed offline): OLD pattern reproduces the attempt-6 throw
+  (total=0); NEW pattern on the run's own evidence gives superseded=1,
+  XOR=1 PASS; the per-seq loop replays exactly-one for 20 (kept), 21
+  (superseded), 40 (superseded), 41 (failed); diag regexes byte-equal to
+  the assert regexes; yaml parses; pwsh brace-balanced.
+- mjs untouched: the machine behaved per design (phase 12 waits only for
+  41's error twin; seq 40's wire shape is deliberately unasserted — timing
+  is not contract). The classic-pair comment's "no mid-flight supersede"
+  claim stands for SUPERSEDE (a newer request never aborts an in-flight
+  init); the fold is the different same-set mechanism, and attempt 6 hit
+  its mark-window boundary.
+
+RESIDUAL (named, parked, engine-bytes out of scope per the hygiene rule):
+the publish tail marks the registry AFTER the wire sends. Moving
+initRegistryMarkTerminal ahead of the per-entry wire sends would close the
+~1–2 ms fold-into-wire-complete window. Parked because the observable
+behavior is invariant-compliant (every seq still gets exactly one terminal;
+the fold receipt IS legal) and instanceId-keyed clients learn their outcome
+from the in-flight init's receipts per the fold contract. FALSIFIER: a
+future run where a folded seq's target init NEVER reaches terminal, or a
+client visibly stalls waiting on a folded load's outcome — that reopens
+engine-side with this note as the mechanism map.
+
+Predictions on record:
+
+- (P5) with the widened target, the next red D5 run (if any) prints
+  Show-ReceiptDiag's per-kind regexes + slice bounds before ANY throw; a
+  seq-40 mismatch can now only mean a REAL exactly-one violation (0 or ≥2
+  terminals), not a stale grep.
+- (P1) UNCHANGED: the next CRASHING run's dump (MiniDumpWithUnloadedModules)
+  lists the unloaded module by name — expected the earlier Scorch Test
+  Synth.vst3 mapping (zombie JUCE-infrastructure window). Attempt 6
+  produced no dump; nothing about the crash track moved.

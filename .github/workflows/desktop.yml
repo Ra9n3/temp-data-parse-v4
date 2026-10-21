@@ -209,6 +209,19 @@ jobs:
               Write-Host ("{0} evidence: engine.log NOT FOUND at {1}" -f $Label, $Path)
             }
           }
+          # 0.12.3 TASK G: the attempt-6 lesson (run 39578126692) — a
+          # receipt-COUNT mismatch threw with the log tail, but the per-kind
+          # PATTERNS and the slice BOUNDS lived only in this yaml, so one run
+          # could not answer "grammar drift vs slice mismatch" (the evidence
+          # dump showed the receipt IN the slice while the counter still read
+          # 0). Every terminal-count mismatch below now prints the exact
+          # per-kind regexes + the slice bounds to the console BEFORE
+          # throwing — same self-diagnosing pattern as the tail dumps.
+          function Show-ReceiptDiag {
+            param([string]$Label, [object[]]$KindPatterns, [int]$SkipLines, [int]$SliceLines)
+            Write-Host ("{0} receipt-diag: slice = engine.log lines AFTER the first {1} pre-test lines (Select-Object -Skip {1}); slice read = {2} lines" -f $Label, $SkipLines, $SliceLines)
+            foreach ($kp in $KindPatterns) { Write-Host ("{0} receipt-diag kind [{1}] regex: {2}" -f $Label, $kp.Kind, $kp.Pattern) }
+          }
 
           # Stage 3c-hotfix: start the protocol-test step with a CLEAN
           # engine.log so the receipt assertions in Test E prove THIS run
@@ -847,21 +860,51 @@ jobs:
             if ($procD5.ExitCode -ne 0) { Show-StepLogTail -Path $engineLogD5 -Proc $procD5 -Label "Engine D5"; throw "Engine D5 exited code=$($procD5.ExitCode) before the receipt asserts (dump above)" }
             Write-Host "Engine D5 exit verified BEFORE the log read (file final: exit 0)"
             $d5Lines = Get-Content $engineLogD5 | Select-Object -Skip $logLinesBeforeD5
+            $d5SliceCount = @($d5Lines).Count
+            # TASK G: the EXACT per-kind regexes every count assert below
+            # runs — printed verbatim by Show-ReceiptDiag on any mismatch so
+            # the console alone can adjudicate H1 (grammar drift) vs H2
+            # (slice window) on the failing run.
+            $d5ReceiptDiag = @(
+              [pscustomobject]@{ Kind = "terminal-timeout seq10"; Pattern = "\[plugin\] init failed: seq=10 reason=terminal-timeout" },
+              [pscustomobject]@{ Kind = "queued-behind seq11"; Pattern = "\[plugin\] init failed: seq=11 reason=queued-behind-jammed-init" },
+              [pscustomobject]@{ Kind = "coalesced-fold seq21"; Pattern = "\[plugin\] init superseded: seq=21 by=20 \(coalesced" },
+              [pscustomobject]@{ Kind = "superseded seq40 (any by= target)"; Pattern = "\[plugin\] init superseded: seq=40 by=\d+\D" },
+              [pscustomobject]@{ Kind = "loaded seq40"; Pattern = "\[plugin\] loaded .* \| seq 40( |\$)" },
+              [pscustomobject]@{ Kind = "kept seq40"; Pattern = "\[plugin\] kept .* \| seq 40( |\$)" },
+              [pscustomobject]@{ Kind = "instance-kept seq40"; Pattern = "\[plugin\] instance kept .* \| seq 40( |\$)" },
+              [pscustomobject]@{ Kind = "failed seq40"; Pattern = "\[plugin\] init failed: seq=40\D" },
+              [pscustomobject]@{ Kind = "failed seq41"; Pattern = "\[plugin\] init failed: seq=41\D" }
+            )
             # The four scenario receipts (the harness proved the wire side).
             $termTimeout = @($d5Lines | Select-String -Pattern "\[plugin\] init failed: seq=10 reason=terminal-timeout")
-            if (($termTimeout | Measure-Object).Count -ne 1) { Show-StepLogTail -Path $engineLogD5 -Proc $procD5 -Label "D5"; throw "D5: exactly one 'init failed: seq=10 reason=terminal-timeout' expected, got $(($termTimeout | Measure-Object).Count)" }
+            if (($termTimeout | Measure-Object).Count -ne 1) { Show-ReceiptDiag -Label "D5" -KindPatterns $d5ReceiptDiag -SkipLines $logLinesBeforeD5 -SliceLines $d5SliceCount; Show-StepLogTail -Path $engineLogD5 -Proc $procD5 -Label "D5"; throw "D5: exactly one 'init failed: seq=10 reason=terminal-timeout' expected, got $(($termTimeout | Measure-Object).Count)" }
             $queuedBehind = @($d5Lines | Select-String -Pattern "\[plugin\] init failed: seq=11 reason=queued-behind-jammed-init")
-            if (($queuedBehind | Measure-Object).Count -ne 1) { Show-StepLogTail -Path $engineLogD5 -Proc $procD5 -Label "D5"; throw "D5: exactly one 'init failed: seq=11 reason=queued-behind-jammed-init' expected, got $(($queuedBehind | Measure-Object).Count)" }
+            if (($queuedBehind | Measure-Object).Count -ne 1) { Show-ReceiptDiag -Label "D5" -KindPatterns $d5ReceiptDiag -SkipLines $logLinesBeforeD5 -SliceLines $d5SliceCount; Show-StepLogTail -Path $engineLogD5 -Proc $procD5 -Label "D5"; throw "D5: exactly one 'init failed: seq=11 reason=queued-behind-jammed-init' expected, got $(($queuedBehind | Measure-Object).Count)" }
             $fold = @($d5Lines | Select-String -Pattern "\[plugin\] init superseded: seq=21 by=20 \(coalesced")
-            if (($fold | Measure-Object).Count -ne 1) { Show-StepLogTail -Path $engineLogD5 -Proc $procD5 -Label "D5"; throw "D5: exactly one 'init superseded: seq=21 by=20 (coalesced' expected, got $(($fold | Measure-Object).Count)" }
+            if (($fold | Measure-Object).Count -ne 1) { Show-ReceiptDiag -Label "D5" -KindPatterns $d5ReceiptDiag -SkipLines $logLinesBeforeD5 -SliceLines $d5SliceCount; Show-StepLogTail -Path $engineLogD5 -Proc $procD5 -Label "D5"; throw "D5: exactly one 'init superseded: seq=21 by=20 (coalesced' expected, got $(($fold | Measure-Object).Count)" }
             # The classic pair (40 fixture, 41 bogus) is sent back-to-back by
-            # the harness: WHICH way the ~2 ms race resolves is TIMING, not
+            # the harness: WHICH terminal seq 40 resolves to is TIMING, not
             # contract — the contract is the terminal invariant below. The
-            # terminal grammar has FIVE shapes (any one of them = exactly-one):
+            # terminal grammar has SIX shapes (any one of them = exactly-one):
             #   - "init superseded: seq=40 by=41" — 41 overwrote 40 while it
             #     was STILL QUEUED (the queued-overwrite path; the engine has
             #     no mid-flight supersede — an in-flight request runs to its
             #     own terminal);
+            #   - "init superseded: seq=40 by=<in-flight> (coalesced ...)" —
+            #     40 arrived while the SAME-SET init was still registry-open
+            #     and FOLDED into it (attempt 6, run 39578126692: "seq=40
+            #     by=20"). Adjudicated mechanism, from the run's timestamps:
+            #     the worker sends the wire "loaded" receipt BEFORE its
+            #     registry terminal-mark (publish tail order: per-entry wire
+            #     sends → publish:done engineLog → initRegistryMarkTerminal),
+            #     and the ~1-2 ms gap swallowed the machine's round trip (the
+            #     mjs sends 40 only AFTER receiving seq 20's loaded — the
+            #     order is proven, not assumed). A LEGAL exactly-one
+            #     terminal — so the superseded grep target matches ANY
+            #     "by=" target, not just by=41 (TASK G: repairing the broken
+            #     grep target, NOT weakening the XOR — the XOR itself stays
+            #     byte-identical);
             #   - "loaded ... | seq 40" — 40 committed a NEW instance;
             #   - "kept ... | seq 40" — M2's DIFF machinery: 40's set is
             #     IDENTICAL to seq 20's commit, per-entry KEPT line;
@@ -871,10 +914,11 @@ jobs:
             #     race that lands there counted 0/0/0 and threw);
             #   - "init failed: seq=40" — 40's OWN init failing is ALSO an
             #     exactly-one terminal (the watchdog/scan-fail grammar).
-            # All are exactly-one-terminal outcomes; the SUM across all five
-            # must be 1 (XOR), anything else throws — with the seq-40 log
-            # lines dumped so the next failure is self-diagnosing.
-            $classicSup = @($d5Lines | Select-String -Pattern "\[plugin\] init superseded: seq=40 by=41\D")
+            # All are exactly-one-terminal outcomes; the SUM across all six
+            # must be 1 (XOR), anything else throws — with the per-kind
+            # regexes + slice bounds + the seq-40 log lines dumped so the
+            # next failure is self-diagnosing.
+            $classicSup = @($d5Lines | Select-String -Pattern "\[plugin\] init superseded: seq=40 by=\d+\D")
             $classicLoaded = @($d5Lines | Select-String -Pattern "\[plugin\] loaded .* \| seq 40( |\$)")
             $classicKept = @($d5Lines | Select-String -Pattern "\[plugin\] kept .* \| seq 40( |\$)")
             $classicInstKept = @($d5Lines | Select-String -Pattern "\[plugin\] instance kept .* \| seq 40( |\$)")
@@ -888,13 +932,14 @@ jobs:
             if ($termTotal -eq 1) {
               Write-Host "D5 classic pair: seq 40 resolved to EXACTLY ONE terminal (superseded=$supN loaded=$loadN kept=$keptN instanceKept=$instKeptN failed=$fail40N) — 41 failed fast on the bogus path; the invariant held"
             } else {
+              Show-ReceiptDiag -Label "D5 seq-40 XOR" -KindPatterns $d5ReceiptDiag -SkipLines $logLinesBeforeD5 -SliceLines $d5SliceCount
               Show-StepLogTail -Path $engineLogD5 -Proc $procD5 -Label "D5"
               Write-Host "D5 seq-40 terminal evidence (every line mentioning seq 40 or seq=40 in the slice):"
               @($d5Lines | Select-String -Pattern "seq 40|seq=40") | ForEach-Object { Write-Host "   $($_.Line)" }
               throw "D5: classic pair 40/41 must give seq 40 EXACTLY ONE terminal (superseded XOR loaded XOR kept XOR instanceKept XOR failed), got superseded=$supN loaded=$loadN kept=$keptN instanceKept=$instKeptN failed=$fail40N"
             }
             $fail41 = @($d5Lines | Select-String -Pattern "\[plugin\] init failed: seq=41\D")
-            if (($fail41 | Measure-Object).Count -ne 1) { Show-StepLogTail -Path $engineLogD5 -Proc $procD5 -Label "D5"; throw "D5: exactly one 'init failed: seq=41' expected, got $(($fail41 | Measure-Object).Count)" }
+            if (($fail41 | Measure-Object).Count -ne 1) { Show-ReceiptDiag -Label "D5" -KindPatterns $d5ReceiptDiag -SkipLines $logLinesBeforeD5 -SliceLines $d5SliceCount; Show-StepLogTail -Path $engineLogD5 -Proc $procD5 -Label "D5"; throw "D5: exactly one 'init failed: seq=41' expected, got $(($fail41 | Measure-Object).Count)" }
             # Heartbeat: the pending and queued >10s warnings fired during the jam.
             $pendWarn = @($d5Lines | Select-String -Pattern "\[plugin\] init pending >10s seq 10")
             if (($pendWarn | Measure-Object).Count -lt 1) { Show-StepLogTail -Path $engineLogD5 -Proc $procD5 -Label "D5"; throw "D5: no 'init pending >10s seq 10' warning — the heartbeat did not fire during the jam" }
@@ -921,6 +966,11 @@ jobs:
               $count = (($loaded | Measure-Object).Count) + (($failed | Measure-Object).Count) + (($supers | Measure-Object).Count)
               if ($count -ne 1) {
                 Write-Host "seq $n -> loaded=$(($loaded | Measure-Object).Count) failed=$(($failed | Measure-Object).Count) superseded=$(($supers | Measure-Object).Count)"
+                Show-ReceiptDiag -Label "D5 seq $n" -KindPatterns @(
+                  [pscustomobject]@{ Kind = "loaded|kept"; Pattern = "\[plugin\] (loaded|kept) .* \| seq $n( |\$)" },
+                  [pscustomobject]@{ Kind = "failed"; Pattern = "\[plugin\] init failed: seq=$n( |\$)" },
+                  [pscustomobject]@{ Kind = "superseded"; Pattern = "\[plugin\] init superseded: seq=$n( |\$)" }
+                ) -SkipLines $logLinesBeforeD5 -SliceLines $d5SliceCount
                 Show-StepLogTail -Path $engineLogD5 -Proc $procD5 -Label "D5"
                 throw "D5 TERMINAL INVARIANT VIOLATION: seq $n has $count terminal receipt(s), exactly 1 required"
               }
