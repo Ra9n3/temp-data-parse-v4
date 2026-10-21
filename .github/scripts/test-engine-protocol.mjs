@@ -447,19 +447,27 @@ let d10SwapInFlight = null;            // instanceId the pending swap must deliv
 let d10Kicked = false;
 let d10Peak = 0;
 let d10Errors = [];
+// TASK I phase-2 stall fix (the user's directive): play goes out IMMEDIATELY
+// after the load — the transport is the progress signal, the lazy-init device
+// opens on first play, and the plugin loads ASYNC under the rolling transport
+// (the mid-play live-edit contract). No machine state ever waits 6 minutes
+// again: d10LastProgressAt is stamped on every forward step and the 15 s
+// guard fails with a full state dump (evidence-before-fail, same style as
+// the receipt diagnostics) if the machine stops advancing.
+let d10LastProgressAt = 0;
+let d10LoadPayload = "";
+const d10Stamp = () => { d10LastProgressAt = Date.now(); };
 const d10PluginOf = (iid) => (iid === "inst-a" ? d10ScanA : d10ScanB);
 const d10Other = (iid) => (iid === "inst-a" ? "inst-b" : "inst-a");
 const d10SendLoad = (seq, iid) => {
-  // The multiSendLoad grammar EXACTLY: events + meta + routing + plugins —
-  // and NOTHING else. The multi machine has shipped this shape green for
-  // every run; attempt 10 proved the `channels` key alongside a `plugins`
-  // array is the wedge trigger (the engine printed "perTrack none" — the
-  // plugins-array path never parsed the channels map — and the WS thread
-  // wedged between "[load] received" and "[plugin] init started" for 360 s,
-  // three attempts out of three, on a fresh runner at the suite's second
-  // test). The track t1 rides wire channel 1 on the live instance via
-  // routing alone.
-  ws.send(JSON.stringify({
+  // The multi machine's load grammar (events + meta + routing + plugins) —
+  // the payload is LOGGED VERBATIM at send: attempts 8/10/11 all show the
+  // engine parsed a SCORE-ONLY load ("perTrack none", no "| plugin requested"
+  // receipt suffix) — the byte-length + body fingerprint below settles on the
+  // record whether the payload left the harness intact or the keys were lost
+  // in transit/parse. Engine bytes stay frozen; the fingerprint is harness
+  // evidence.
+  d10LoadPayload = JSON.stringify({
     type: "load", seq,
     events: [
       { eventType: "NOTE_ON", channel: 1, data1: 60, data2: 100, timestampTicks: 480 },
@@ -468,20 +476,32 @@ const d10SendLoad = (seq, iid) => {
     meta: D10_META,
     routing: { t1: { inst: iid, ch: 1 } },
     plugins: [d10PluginOf(iid)],
-  }));
+  });
+  console.log(`[test] stress load payload (${d10LoadPayload.length} bytes): ${d10LoadPayload}`);
+  ws.send(d10LoadPayload);
 };
 const d10Open = () => ws.send(JSON.stringify({ type: "openEditor", instanceId: d10Live }));
 // In-flight heartbeat (the attempt-8 lesson: a 360 s wedge inside the engine's
 // load path was invisible from the harness side — the timeout line alone
 // could not say WHERE the machine stood). One line every 20 s with the full
 // machine state; harmless on green runs, decisive on a wedged one.
+// PLUS the 15 s progress guard (the phase-2 stall fix): the machine must
+// advance at least one step (playing state, editor open/close, plugin_state
+// loaded) every 15 s or the mode FAILS IMMEDIATELY with a state dump — no
+// more 6-minute churns. The whole phase is capped by this guard on top of
+// the 360 s main timeout.
 let d10ConnectedAt = 0;
+const d10StateDump = (why) =>
+  `stress stall (${why}): phase=${d10Phase} cycles=${d10Cycle}/${D10_CYCLES} opened=${d10Opened} closed=${d10Closed} live=${d10Live} swapInFlight=${d10SwapInFlight} seq=${d10SwapSeq} peak=${d10Peak.toFixed(3)} errors=${d10Errors.length} | age since last progress=${Date.now() - d10LastProgressAt}ms | the load payload (byte-length = the fingerprint for the score-only-parse question) is logged above as "stress load payload"`;
 const d10Heartbeat = setInterval(() => {
   if (d10Phase === 0 && d10ConnectedAt !== 0 && Date.now() - d10ConnectedAt > 30000) {
     fail(`stress: the engine did not answer hello within 30 s of connect — the WS layer never delivered the handshake (attempt-9 shape: 6 min of phase=0 heartbeats, run 39614289080)`);
   }
+  if (d10LastProgressAt !== 0 && d10Phase >= 2 && Date.now() - d10LastProgressAt > 15000) {
+    fail(d10StateDump("no machine progress for 15 s"));
+  }
   console.log(`[test] stress heartbeat: phase=${d10Phase} cycles=${d10Cycle}/${D10_CYCLES} opened=${d10Opened} closed=${d10Closed} live=${d10Live} swapInFlight=${d10SwapInFlight} seq=${d10SwapSeq} peak=${d10Peak.toFixed(3)} errors=${d10Errors.length}`);
-}, 20000);
+}, 5000);
 
 const limiterOff = process.env.SCORCH_LIMITER_OFF != null;
 
@@ -1735,15 +1755,34 @@ ws.addEventListener("message", (event) => {
       if (!d10ScanA) fail(`stress: "Scorch Test Synth" required, got ${JSON.stringify(msg.plugins)}`);
       if (!d10ScanB) fail(`stress: "Scorch Test Synth B" required (two independent modules), got ${JSON.stringify(msg.plugins)}`);
       console.log(`[test] bench: A=${d10ScanA.name} (${d10ScanA.uid}) B=${d10ScanB.name} (${d10ScanB.uid}) falcon=${d10Falcon ? d10Falcon.name : "absent"} bbcso=${d10Bbcso ? d10Bbcso.name : "absent"}`);
-      console.log("[test] loading inst-a (seq 10) — playback starts on the loaded receipt");
-      d10Phase = 2;
-      d10SendLoad(d10SwapSeq, "inst-a");
-    } else if (msg.type === "loadAck" && d10Phase === 2 && msg.seq === d10SwapSeq) {
-      console.log("[test] loadAck (enqueue receipt) — awaiting plugin_state loaded");
-    } else if (msg.type === "plugin_state" && msg.state === "loaded" && d10Phase === 2) {
-      console.log(`[test] ${msg.instanceId} live — transport play (the WHOLE stress runs under active playback)`);
+      // PLAY FIRST (the phase-2 stall fix): the load is async by contract
+      // (loadAck = the enqueue receipt; plugin_state follows per instance).
+      // Under the lazy-init policy the device opens on FIRST PLAY — gating
+      // play on the plugin receipt deadlocked the whole machine when the
+      // engine parsed the load score-only (attempts 8/10/11: 6 minutes of
+      // phase-2 silence, device never opened, engine alive throughout). The
+      // transport now rolls from tick 0 over the 2-event score while the
+      // plugin loads; the first cycle still waits for the plugin to be LIVE
+      // (openEditor with no live instance only answers editor_unavailable),
+      // and the 15 s progress guard bounds that wait with evidence.
       d10Phase = 3;
+      d10SendLoad(d10SwapSeq, "inst-a");
+      console.log("[test] transport play tick 0 — PLAY FIRST (lazy-init device opens now; the plugin loads async under the rolling transport)");
+      d10Stamp();
       ws.send(JSON.stringify({ type: "transport", command: "play", tick: 0 }));
+    } else if (msg.type === "loadAck") {
+      d10Stamp();
+      console.log(`[test] loadAck seq=${msg.seq} (enqueue receipt)`);
+    } else if (msg.type === "plugin_state" && msg.state === "loaded" && d10Phase === 3 &&
+               d10SwapInFlight == null && !d10Kicked) {
+      // The FIRST live instance — the editor cycles may begin. (If this
+      // receipt never arrives, the 15 s progress guard fails with the dump:
+      // phase=3, cycles=0, and the load-payload fingerprint above answers
+      // the score-only-parse question on the record.)
+      d10Kicked = true;
+      d10Stamp();
+      console.log(`[test] ${msg.instanceId} live — playback already rolling — stress cycles begin`);
+      d10Open();
     } else if (msg.type === "plugin_state" && msg.state === "loaded" && d10Phase === 3 &&
                d10SwapInFlight != null && String(msg.instanceId ?? "") === d10SwapInFlight) {
       // The mid-play diff swap delivered: the outgoing instance is retired
@@ -1752,17 +1791,15 @@ ws.addEventListener("message", (event) => {
       // runs inside that free window — the repro window.
       d10Live = d10SwapInFlight;
       d10SwapInFlight = null;
+      d10Stamp();
       console.log(`[test] swap complete — cycling resumes on ${d10Live} (the retired module frees inside this window)`);
       d10Open();
     } else if (msg.type === "state" && d10Phase === 3 && msg.playing) {
       d10Peak = Math.max(d10Peak, msg.peak ?? 0);
-      if (!d10Kicked) {
-        d10Kicked = true;
-        console.log("[test] playback active — stress cycles begin");
-        d10Open();
-      }
+      d10Stamp();
     } else if (msg.type === "editorOpened" && d10Phase >= 3) {
       d10Opened++;
+      d10Stamp();
       if (String(msg.instanceId ?? "") !== d10Live)
         fail(`stress: editorOpened for "${msg.instanceId}", expected "${d10Live}"`);
       setTimeout(() => {
@@ -1771,6 +1808,7 @@ ws.addEventListener("message", (event) => {
     } else if (msg.type === "editorClosed" && d10Phase >= 3) {
       d10Closed++;
       d10Cycle++;
+      d10Stamp();
       if (String(msg.instanceId ?? "") !== d10Live)
         fail(`stress: editorClosed for "${msg.instanceId}", expected "${d10Live}"`);
       if (d10Closed !== d10Cycle || d10Opened !== d10Closed)
