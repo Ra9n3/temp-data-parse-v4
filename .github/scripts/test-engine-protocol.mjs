@@ -408,6 +408,53 @@ let edPhase = 0, edScanPlugin = null;
 let edOpenedCount = 0, edClosedOk = false, edHeadlessArm = false, edFoldWindowSent = 0;
 const edInstanceId = "inst-a";
 const edSendOpen = () => ws.send(JSON.stringify({ type: "openEditor", instanceId: edInstanceId }));
+
+// ── TASK I stress-mode state (the editor-open-under-play WNDPROC race) ──────
+// 60 editor open/close cycles under ACTIVE playback, alternating the live
+// instance between the two fixture identities via mid-play diff loads. Every
+// swap orphans the outgoing instance's module — JUCE frees the plugin DLL when
+// the last instance of its path dies (the D5 CI finding,
+// testvst/ScorchTestSynth.h "FreeLibrary after the last instance dies") — and
+// the survivor's next open/close cycle then runs INSIDE the outgoing module's
+// deferred-free window (RenderSequenceExchange frees at most ~500 ms later, on
+// the message thread). That is the exact field shape the TASK F dump died in:
+// editor open under play + retire + reload, the freed module's infrastructure
+// window dispatching into unmapped code (0xC0000005 EXECUTE at RIP=window
+// proc, inside user32 dispatch). Deterministic: fixed cycle count, fixed swap
+// cadence, one long note so the transport never rolls silent, no RNG, no
+// wall-clock dependence. Falcon/BBCSO legs are scanned for and included when
+// present; CI receipts them absent (CI cannot host commercial libraries —
+// engine/testvst/CMakeLists.txt) and the mechanism stays identity-free: any
+// JUCE-linked plugin DLL carries the same second-JUCE-copy infrastructure
+// window whose teardown runs under the loader lock at FreeLibrary.
+const D10_CYCLES = 60;                 // >= 50 per the TASK I brief
+const D10_SWAP_EVERY = 5;              // an orphaning mid-play diff load every 5 cycles
+const D10_META = { bpm: 120, ppqn: 960, timeSignature: { numerator: 4, denominator: 4 }, endTick: 345600 };
+let d10Phase = 0;                      // 0 hello, 1 scan, 2 loaded, 3 cycling, 4 stop
+let d10ScanA = null, d10ScanB = null, d10Falcon = null, d10Bbcso = null;
+let d10Cycle = 0;                      // completed open+close cycles
+let d10Opened = 0, d10Closed = 0;
+let d10SwapSeq = 10;                   // diff-load seq counter
+let d10Live = "inst-a";                // instance the editor cycles run on
+let d10SwapInFlight = null;            // instanceId the pending swap must deliver
+let d10Kicked = false;
+let d10Peak = 0;
+let d10Errors = [];
+const d10PluginOf = (iid) => (iid === "inst-a" ? d10ScanA : d10ScanB);
+const d10Other = (iid) => (iid === "inst-a" ? "inst-b" : "inst-a");
+const d10SendLoad = (seq, iid) => {
+  ws.send(JSON.stringify({
+    type: "load", seq,
+    events: [
+      { eventType: "NOTE_ON", channel: 1, data1: 60, data2: 100, timestampTicks: 480 },
+      { eventType: "NOTE_OFF", channel: 1, data1: 60, data2: 0, timestampTicks: 345599 },
+    ],
+    meta: D10_META,
+    plugins: [d10PluginOf(iid)],
+  }));
+};
+const d10Open = () => ws.send(JSON.stringify({ type: "openEditor", instanceId: d10Live }));
+
 const limiterOff = process.env.SCORCH_LIMITER_OFF != null;
 
 // Events chosen so a note IS sounding when the test stops (tick ~600): the
@@ -557,6 +604,8 @@ const timeout = setTimeout(() => {
     console.error(`TIMEOUT at step ${step} phase=${slPhase} (scan=${slScanPlugin ? "ok" : "none"} ack=${slAckOk} ackMs=${slAckMs} loaded=${slLoadedOk} loadedMs=${slLoadedMs} play=${slPlayOk} ticks=${slTicksOk} peak=${slPeak.toFixed(3)} stop=${slStopOk})`);
   } else if (mode === "terminal") {
     console.error(`TIMEOUT at step ${step} phase=${trPhase} (scan=${trScanPlugin ? "ok" : "none"} jamAck=${trJamAckFast}@${trJamAckMs}ms jamErr=${trJamErr} queuedErr=${trQueuedErr} clean=${trCleanLoaded} ticks=${trPlayTicks} stop=${trStopped} reuse=${trReuseCount} edOpen=${trEditorOpenOk} edClose=${trEditorCloseOk} carried=${trEditorCarriedOk} headless=${trHeadlessSkip} supp=${trSuppLoaded} bogus2=${trBogus2Err})`);
+  } else if (mode === "stress") {
+    console.error(`TIMEOUT at step ${step} phase=${d10Phase} (A=${d10ScanA ? "ok" : "none"} B=${d10ScanB ? "ok" : "none"} cycles=${d10Cycle}/${D10_CYCLES} opened=${d10Opened} closed=${d10Closed} live=${d10Live} swapInFlight=${d10SwapInFlight} seq=${d10SwapSeq} peak=${d10Peak.toFixed(3)} errors=${d10Errors.length})`);
   } else {
     console.error(`TIMEOUT at step ${step} (hello=${helloOk} pong=${pongOk} load=${loadOk} noDeviceErr=${noDeviceErrOk} pongAfterErr=${pongAfterErrOk} stillFunctional=${stillFunctionalOk})`);
   }
@@ -568,7 +617,7 @@ const timeout = setTimeout(() => {
 // loaded-receipt bound is asserted EXPLICITLY per phase below — but the
 // wall-clock budget still covers them, plus the Stage 3h stall probe (a 2.5 s
 // audio freeze + its tail): 120 s.
-}, mode === "scan" ? 180000 : mode === "host" ? 150000 : mode === "multi" ? 120000 : mode === "latency" ? 90000 : mode === "slowload" ? 90000 : mode === "terminal" ? 150000 : mode === "routing" ? 120000 : mode === "strips" ? 150000 : mode === "limiter" ? 90000 : mode === "editor" ? 60000 : 30000);
+}, mode === "scan" ? 180000 : mode === "host" ? 150000 : mode === "multi" ? 120000 : mode === "latency" ? 90000 : mode === "slowload" ? 90000 : mode === "terminal" ? 150000 : mode === "routing" ? 120000 : mode === "strips" ? 150000 : mode === "limiter" ? 90000 : mode === "editor" ? 60000 : mode === "stress" ? 360000 : 30000);
 
 // scan-mode flags
 let scanSent = false, scanResultOk = false, aliveAfterCrashOk = false, defaultScanOk = false;
@@ -1635,6 +1684,84 @@ ws.addEventListener("message", (event) => {
     } else if (msg.type === "editorClosed" && edPhase === 4) {
       edClosedOk = true;
       console.log("[test] editorClosed — field-gate B wire contract complete (coalescing + occupancy receipts: desktop.yml)");
+      finishAndShutdown();
+    }
+  } else if (mode === "stress") {
+    // ── TASK I: the editor-open-under-play WNDPROC race (see the state block) ──
+    if (msg.type === "error") {
+      d10Errors.push(msg);
+      fail(`stress: unexpected error receipt: ${JSON.stringify(msg)}`);
+    } else if (msg.type === "hello" && d10Phase === 0) {
+      if (msg.protocol !== 1) fail(`expected protocol 1, got ${msg.protocol}`);
+      if (msg.engineVersion !== "0.12.3") fail(`expected 0.12.3, got ${msg.engineVersion}`);
+      if (!fixtureDir) fail("stress mode requires a fixture dir argument");
+      console.log(`[test] hello OK (0.12.3) — TASK I stress: ${D10_CYCLES} editor cycles under play, a module-orphaning diff swap every ${D10_SWAP_EVERY} — scanning...`);
+      d10Phase = 1;
+      ws.send(JSON.stringify({ type: "scan", dirs: [fixtureDir] }));
+    } else if (msg.type === "scan_result" && d10Phase === 1) {
+      d10ScanA = (msg.plugins ?? []).find((p) => p.name === "Scorch Test Synth");
+      d10ScanB = (msg.plugins ?? []).find((p) => p.name === "Scorch Test Synth B");
+      d10Falcon = (msg.plugins ?? []).find((p) => /falcon/i.test(p.name ?? ""));
+      d10Bbcso = (msg.plugins ?? []).find((p) => /bbcso|bbc symphony/i.test(p.name ?? ""));
+      if (!d10ScanA) fail(`stress: "Scorch Test Synth" required, got ${JSON.stringify(msg.plugins)}`);
+      if (!d10ScanB) fail(`stress: "Scorch Test Synth B" required (two independent modules), got ${JSON.stringify(msg.plugins)}`);
+      console.log(`[test] bench: A=${d10ScanA.name} (${d10ScanA.uid}) B=${d10ScanB.name} (${d10ScanB.uid}) falcon=${d10Falcon ? d10Falcon.name : "absent"} bbcso=${d10Bbcso ? d10Bbcso.name : "absent"}`);
+      console.log("[test] loading inst-a (seq 10) — playback starts on the loaded receipt");
+      d10Phase = 2;
+      d10SendLoad(d10SwapSeq, "inst-a");
+    } else if (msg.type === "loadAck" && d10Phase === 2 && msg.seq === d10SwapSeq) {
+      console.log("[test] loadAck (enqueue receipt) — awaiting plugin_state loaded");
+    } else if (msg.type === "plugin_state" && msg.state === "loaded" && d10Phase === 2) {
+      console.log(`[test] ${msg.instanceId} live — transport play (the WHOLE stress runs under active playback)`);
+      d10Phase = 3;
+      ws.send(JSON.stringify({ type: "transport", command: "play", tick: 0 }));
+    } else if (msg.type === "plugin_state" && msg.state === "loaded" && d10Phase === 3 &&
+               d10SwapInFlight != null && String(msg.instanceId ?? "") === d10SwapInFlight) {
+      // The mid-play diff swap delivered: the outgoing instance is retired
+      // (its module is orphaned — the free lands within ~500 ms, on the
+      // message thread) and the survivor is live. The NEXT editor cycle now
+      // runs inside that free window — the repro window.
+      d10Live = d10SwapInFlight;
+      d10SwapInFlight = null;
+      console.log(`[test] swap complete — cycling resumes on ${d10Live} (the retired module frees inside this window)`);
+      d10Open();
+    } else if (msg.type === "state" && d10Phase === 3 && msg.playing) {
+      d10Peak = Math.max(d10Peak, msg.peak ?? 0);
+      if (!d10Kicked) {
+        d10Kicked = true;
+        console.log("[test] playback active — stress cycles begin");
+        d10Open();
+      }
+    } else if (msg.type === "editorOpened" && d10Phase >= 3) {
+      d10Opened++;
+      if (String(msg.instanceId ?? "") !== d10Live)
+        fail(`stress: editorOpened for "${msg.instanceId}", expected "${d10Live}"`);
+      setTimeout(() => {
+        ws.send(JSON.stringify({ type: "closeEditor", instanceId: d10Live }));
+      }, 150);
+    } else if (msg.type === "editorClosed" && d10Phase >= 3) {
+      d10Closed++;
+      d10Cycle++;
+      if (String(msg.instanceId ?? "") !== d10Live)
+        fail(`stress: editorClosed for "${msg.instanceId}", expected "${d10Live}"`);
+      if (d10Closed !== d10Cycle || d10Opened !== d10Closed)
+        fail(`stress: open/close bookkeeping diverged (opened=${d10Opened} closed=${d10Closed} cycle=${d10Cycle})`);
+      if (d10Cycle % 10 === 0)
+        console.log(`[test] stress cycle ${d10Cycle}/${D10_CYCLES} ok (peak ${d10Peak.toFixed(3)})`);
+      if (d10Cycle >= D10_CYCLES) {
+        console.log(`[test] ${D10_CYCLES} cycles complete under play — stopping`);
+        d10Phase = 4;
+        ws.send(JSON.stringify({ type: "transport", command: "stop" }));
+      } else if (d10Cycle % D10_SWAP_EVERY === 0) {
+        const next = d10Other(d10Live);
+        console.log(`[test] cycle ${d10Cycle}: mid-play diff swap ${d10Live} -> ${next} (orphaning the retired module UNDER PLAY)`);
+        d10SwapInFlight = next;
+        d10SendLoad(++d10SwapSeq, next);
+      } else {
+        d10Open();
+      }
+    } else if (msg.type === "state" && d10Phase === 4 && msg.playing === false) {
+      console.log(`[test] stop clean — stress complete: cycles=${d10Cycle} opened=${d10Opened} closed=${d10Closed} swaps=${d10SwapSeq - 10} benchFalcon=${d10Falcon ? "present" : "absent"} benchBbcso=${d10Bbcso ? "present" : "absent"}`);
       finishAndShutdown();
     }
   } else if (mode === "slowload") {
@@ -3115,6 +3242,25 @@ ws.addEventListener("close", () => {
       process.exit(0);
     } else {
       console.error(`FAILED: hello=${helloOk} scan=${edScanPlugin ? "ok" : "none"} opened=${edOpenedCount} foldsSent=${edFoldWindowSent} closed=${edClosedOk} headless=${edHeadlessArm} phase=${edPhase}`);
+      process.exit(1);
+    }
+  } else if (mode === "stress") {
+    allOk = helloOk && d10ScanA != null && d10ScanB != null &&
+      d10Cycle === D10_CYCLES && d10Opened === D10_CYCLES && d10Closed === D10_CYCLES &&
+      d10Errors.length === 0 && d10SwapInFlight == null && d10Phase >= 4;
+    if (allOk) {
+      console.log("");
+      console.log("========================================");
+      console.log("TASK I STRESS PASSED (editor-open-under-play, the WNDPROC race shape):");
+      console.log(`  ${D10_CYCLES} editor open/close cycles UNDER ACTIVE PLAYBACK (peak ${d10Peak.toFixed(3)})`);
+      console.log(`  ${d10SwapSeq - 10} mid-play diff swaps orphaned a module every ${D10_SWAP_EVERY} cycles (module free + reload under play)`);
+      console.log(`  bench: ${d10ScanA.name} + ${d10ScanB.name}; falcon=${d10Falcon ? "present" : "absent"} bbcso=${d10Bbcso ? "present" : "absent"} (field-gate legs)`);
+      console.log("  the engine survived every orphaning free with editors cycling — zero error receipts");
+      console.log("  engine.log side: the [module-guard] receipts are desktop.yml's half");
+      console.log("========================================");
+      process.exit(0);
+    } else {
+      console.error(`FAILED: hello=${helloOk} A=${d10ScanA ? "ok" : "none"} B=${d10ScanB ? "ok" : "none"} cycles=${d10Cycle}/${D10_CYCLES} opened=${d10Opened} closed=${d10Closed} errors=${d10Errors.length} phase=${d10Phase}`);
       process.exit(1);
     }
   } else {
