@@ -4445,6 +4445,16 @@ std::vector<ModuleWindow> collectModuleWindows(const std::string& pluginPath) {
         if (modKey.empty() || modKey.rfind(wantKey, 0) != 0) continue;
         out.push_back({hwnd, GetWindowThreadProcessId(hwnd, nullptr), std::wstring(modPath)});
     }
+    // DEDUPE (repro run 39679840849 receipt): a TOP-LEVEL window is enumerated
+    // by BOTH EnumWindows and EnumThreadWindows (the collector's two passes) —
+    // the same ghost hwnd was listed twice per sweep (windows=2 for ONE
+    // physical window). Destroying an already-destroyed hwnd is harmless, but
+    // the receipts and counts must speak the truth: one window, one destroy.
+    std::sort(out.begin(), out.end(),
+              [](const ModuleWindow& a, const ModuleWindow& b) { return a.hwnd < b.hwnd; });
+    out.erase(std::unique(out.begin(), out.end(),
+                          [](const ModuleWindow& a, const ModuleWindow& b) { return a.hwnd == b.hwnd; }),
+              out.end());
     return out;
 }
 

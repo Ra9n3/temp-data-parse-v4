@@ -156,6 +156,67 @@ load-bearing mechanism."
   the guard's 11 detach receipts prove the window was alive at every free.
   The won't-reproduce verdict and its attempts are written down here.
 
+### The step-3 verdict (written down per the brief — run 39679840849)
+
+The amplified pre-fix attempt RAN and did **not** reproduce the crash:
+dd0dfe9 (the pure instrument — mitigation INERT, nothing shielding the
+ghost), 120 editor cycles under active playback, 23 module-orphaning diff
+swaps, seeded jitter (seed 20261022, close delay 150–400 ms, open delay
+0–120 ms). Result: **23× `[module-guard] retire … orphan=yes windows=2 …
+detached=0 pinned=0 failed=0 … mitigation=INERT`, zero `[crash]` receipts,
+clean exit 0** — the ghost's WNDPROC was LEFT ARMED through all 23 frees
+(46 armed window-frees across both fixture identities), and no dispatch ever
+hit the dangling proc.
+
+**Why it does not reproduce on this bench — the dispatch-vector analysis
+(this map is the evidence, per the brief):**
+
+1. The instrument receipts name the ghost's owner: `hwnd=0x4007c
+   thread=3180` — the **init worker** (the load's hasEditor view probe boots
+   the plugin's private JUCE stack there, exactly as §2 W5 predicts). The
+   init worker is a ~100 ms poll loop (`main.cpp` worker lambda) that **never
+   pumps Windows messages**.
+2. A WNDPROC executes only when its window's messages are DISPATCHED:
+   - the owning thread must pump (`GetMessage`/`PeekMessage`) for queued or
+     broadcast traffic — the init worker never does;
+   - inter-thread `SendMessage` (broadcast-class traffic: WM_TIMECHANGE /
+     WM_SETTINGCHANGE from the runner) is delivered only when the receiving
+     thread next pumps — with a non-pumping owner the sender times out and
+     **no dispatch occurs**;
+   - message-only windows receive no broadcasts at all; this ghost is
+     top-level (double-enumerated — see the dedupe receipt below), so
+     broadcasts are queued for it, but they sit forever on a non-pumping
+     queue;
+   - thread-exit cleanup (user32 destroys a dying thread's windows, calling
+     their procs) cannot fire — the init worker lives for process life.
+3. So on the CI bench the armed zombie is **dormant**: the free strands a
+   WNDPROC that nothing will ever call. The TASK F crash (dump
+   20261021-075340) required a dispatch vector that this harness shape does
+   not produce — a ghost on a PUMPING thread (the MM pump thread pumps every
+   window it owns, forever), or a teardown path where the owning thread
+   exits or pumps after the unmap. The field benches (Falcon/BBCSO — plugins
+   whose GUI stack boots on the MM thread at openEditor, and whose editors
+   drive real message traffic) are where that vector lives; the
+   identity-free CI fixture exercises the lifecycle but not the dispatch.
+4. Timing/seed variation cannot create a dispatch into a non-pumping
+   thread's window — no seed makes this bench crash. The won't-reproduce
+   verdict is MECHANISM-level, not a sample-size statement.
+
+**Evidence package for the fix (all on the record):** the ghost exists (11×
+`windows=1` under the TASK I guard, run 39650302358 attempt 2; 23× `windows=2`
+under the instrument, run 39679840849 — the count difference is the collector
+double-enumerating one top-level window, receipt `hwnd=0x4007c` twice per
+sweep, now deduped in `collectModuleWindows`); the free strands it while
+armed (23 instrumented frees, WNDPROC left in the unloading module — the
+exact TASK F exposure); the cross-thread destroy defect is code-proven
+(§3); and the fix's owner-thread destroy + drain + verify closes the class
+by ORDERING for every dispatch vector — dormant or not, a destroyed window
+cannot dispatch.
+
+Post-fix silence on this same amplified machine (the acceptance run) closes
+the loop: 50+ clean iterations per bench, `windows=0` verification receipts,
+zero `[crash]`, clean exit 0.
+
 ## 6. Acceptance mapping (TASK J step 4)
 
 - 50+ clean stress iterations per runner bench: the amplified D10 runs
