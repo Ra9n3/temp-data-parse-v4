@@ -3248,3 +3248,82 @@ prefer the previous device endpoint/rate (pre-crash Realtek@48000
 became Primary Sound Driver@44100 DirectSound — assess-and-queue); the
 frontend probeAll re-probe of all 78 plugins every start is a
 probe-cache candidate.
+
+## CI crash family — D5 editor-open, 0xC000041D (TASK E: forensics in place)
+
+Desktop attempt 4 turned the D5 failure from a receipt question into a crash:
+the ENGINE process killed itself — exitCode=-1073740771 (0xC000041D
+STATUS_FATAL_APP_EXIT, the UCRT abort/terminate family) — 1 pass (attempt 2) /
+2 crashes (attempts 3+4) on IDENTICAL engine bytes (engine/ untouched across
+96385fd → ef9fc8a → 9d4091c): a timing-dependent crash inside the engine, not
+a harness race. Timeline: seq-13 mid-play reuse answered, the standalone
+openEditor landed 1 ms later, the ~30 Hz state stream went silent ~780 ms
+(tick 1398 → 1443), one state, connection closed, FAILED at phase 7.
+
+What the exit code narrows (static, no behavior change): a plain unhandled SEH
+(an AV) would terminate with its own code and receipt through the M1-hotfix
+SEH filter (main.cpp:460–468) — 0xC000041D is the abort/ReportFault shape
+instead, which is exactly what terminateReceipt (main.cpp:482–488) +
+std::abort() produces when a C++ exception escapes to a no-throw boundary
+(message-thread job, std::thread lambda, WNDPROC-adjacent dispatch). CRITICAL
+correction to the attempt-4 reading: the M1 crash channel receipts to
+%APPDATA%/scorch/engine-crash.log + minidumps to %APPDATA%/scorch/crashes/ —
+files the protocol step has NEVER read, so "no [crash] receipt" was never
+actually observed; absence in engine.log is meaningless (that file never
+carries one).
+
+Candidate mechanisms (static review only — the .dmp adjudicates):
+
+- M1 (best fit): uncaught C++ exception escaping the message-thread
+  editor-open job — the callAsync lambda (main.cpp:6460–6464) and
+  openEditorWindow (1919–2015) have no try/catch; with
+  JUCE_CATCH_UNHANDLED_EXCEPTIONS=0 an escape reaches std::terminate. Throw
+  sources in-window: createEditorIfNeeded (1967) on a PLAYING processor,
+  window/peer creation (1995–2004).
+- M2: exception escaping an unguarded std::thread — the ~30 Hz state loop
+  (6871–6917; the 780 ms silence + one final state + close is consistent with
+  WER suspending the process mid-report), the WS-thread half of
+  handle_open_editor (6375–6466, inside the ix callback at 6850), the init
+  worker (6919+).
+- M3: plugin-internal data race — editor construction on the same live
+  processor the reuse path just re-applied state/routing to (5082–5148);
+  ScorchTestSynth has no explicit abort/throw, so this must ride torn
+  container/string internals (bad_alloc/length_error) → M1's terminate.
+- M4: explicit abort/fail-fast inside a callback.
+- M5 (deprioritized): headless window-station assumptions — attempt 2 proved
+  real windows open on this runner; the display-less path is pre-guarded
+  (editor_unavailable, 1975–1987). A raw dangling-instance UAF (the
+  openEditor-vs-swap suspect) would exit 0xC0000005 (0xC0000374 for heap
+  corruption), not 0xC000041D; the 3d-4 re-resolve-at-run-time
+  (6425–6435, 6460–6462) + the 3h audio-proof free already fence it.
+
+Reverse ordering (harness closed first → engine close-handler crash) RULED
+OUT: the seq-13 editor-open fail timer is 20 s (test-engine-protocol.mjs:1771)
+vs death at ~0.9 s; the mjs sends nothing on close; the engine's Close handler
+(6859–6867) is three atomic stores + two logs; and the exit code was read from
+the process, not inferred from the socket.
+
+Forensics now in place (harness-only, engine bytes untouched, D5 untouched):
+WER LocalDumps for scorch-engine.exe (full dump → C:\engine-dumps, DontShowUI,
+DumpCount 10, key verified at setup) configured BEFORE any engine process
+starts; the in-engine channel surfaced (a failure-time show-step prints the
+engine-crash.log tail + the minidump dir); both plus engine-crash.log uploaded
+as engine-crash-dumps-<run>-<attempt> on failure/cancel. LocalDumps terminates
+the process only AFTER the dump is written, so the harness-visible close
+implies the dump is already on disk — no cleanup can race it away.
+
+TASK A link — same-class suspicion, UNPROVEN. TASK A is the user-side wedge/
+crash forensics (the three 10:55 minidumps; Field-gate B preamble — dump
+evidence that never adjudicated). The CI family joins it as same-class
+suspicion only: a timing-dependent in-engine death in/near the editor-open
+window. The 0xC0000005 field incident (Falcon-internal, 0.12.2 follow-ups) is
+the third data point. None of this is evidence of a shared root cause; the
+next .dmp adjudicates in both directions.
+
+Predictions on record: (1) the next red D5 run uploads engine-crash-dumps-*
+with ≥1 .dmp (WER full dump and/or M1 minidump) and prints the engine-crash.log
+tail; the faulting module comes from offline analysis. (2) exitCode 0xC000041D
+recurring with NO dump in the artifact falsifies the WER/in-engine assumption
+chain → forensics-only fix, engine untouched. (3) if the next run is GREEN
+(race missed), the forensics STAYS and attempts keep accumulating — never
+re-run-until-green this away.

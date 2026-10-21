@@ -140,6 +140,45 @@ jobs:
           Write-Host "Probe crash fixture built (nested 3 levels deep)"
           "SCAN_FIXTURES=$fx" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
 
+      # TASK E crash forensics: the D5 failure class turned out to be the
+      # ENGINE process killing itself — attempt 4 observed engineHasExited=True
+      # exitCode=-1073740771 (0xC000041D STATUS_FATAL_APP_EXIT, unhandled
+      # exception inside a user-mode callback — window/message-callback
+      # territory) on IDENTICAL engine bytes that passed D5 on attempt 2
+      # (1 pass / 2 crashes = timing-dependent crash inside the engine).
+      # Configure WER LocalDumps BEFORE any engine process starts so the next
+      # crash hands us the real .dmp that the user-side TASK A dump never could.
+      - name: Enable WER LocalDumps for scorch-engine.exe (crash forensics)
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $dumpDir = 'C:\engine-dumps'
+          New-Item -ItemType Directory -Force -Path $dumpDir | Out-Null
+          # WerFault (LocalSystem) must be able to write here regardless of
+          # which identity the crash lands under.
+          icacls $dumpDir /grant '*S-1-5-18:(OI)(CI)F' | Out-Null
+          $werRoot = 'HKLM:\SOFTWARE\Microsoft\Windows\Windows Error Reporting'
+          New-Item -Path $werRoot -Force | Out-Null
+          # No modal WER UI on a headless runner — a dialog would hang the job.
+          Set-ItemProperty -Path $werRoot -Name 'DontShowUI' -Value 1 -Type DWord
+          $perExe = Join-Path $werRoot 'LocalDumps\scorch-engine.exe'
+          New-Item -Path (Join-Path $werRoot 'LocalDumps') -Force | Out-Null
+          New-Item -Path $perExe -Force | Out-Null
+          # DumpType 2 = full dump (module list + heaps + stacks for ALL threads).
+          Set-ItemProperty -Path $perExe -Name 'DumpFolder' -Value $dumpDir -Type ExpandString
+          Set-ItemProperty -Path $perExe -Name 'DumpType'  -Value 2 -Type DWord
+          Set-ItemProperty -Path $perExe -Name 'DumpCount' -Value 10 -Type DWord
+          # The engine's OWN M1-era crash channel (docs/ASSUMPTIONS.md, M1-hotfix):
+          # [crash] receipts -> %APPDATA%/scorch/engine-crash.log (raw stdio),
+          # minidumps -> %APPDATA%/scorch/crashes/. The protocol step has never
+          # read either — publish both for the failure-time steps below.
+          "SCORCH_CRASH_DIR=$(Join-Path $env:APPDATA 'scorch\crashes')" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          "SCORCH_CRASH_LOG=$(Join-Path $env:APPDATA 'scorch\engine-crash.log')" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          $set = Get-ItemProperty -Path $perExe
+          if ($set.DumpFolder -ne $dumpDir -or $set.DumpType -ne 2) { throw "WER LocalDumps setup failed for scorch-engine.exe (folder='$($set.DumpFolder)' type=$($set.DumpType))" }
+          Write-Host "WER LocalDumps active for scorch-engine.exe:"
+          Write-Host "  DumpFolder=$($set.DumpFolder) DumpType=$($set.DumpType) DumpCount=$($set.DumpCount)"
+
       - name: Engine standalone protocol test (null-audio + graceful no-device + scan + host + real-scale paths)
         shell: pwsh
         run: |
@@ -1643,6 +1682,38 @@ jobs:
           }
           Write-Host "3h proof-based reclamation (milestone 1 scope): $($scoreFrees.Count) score free(s) with seq >= swapSeq + 2 (plugin teardown is the vendor's RenderSequenceExchange now)"
           Write-Host "engine.log receipt assertions passed (scale load, play, load-fail, async init, reuse, M2 set-diff grammar + per-instance kept/added/removed/changed + exactly-one terminals, M2 output guard: unity + clip counter + render peak, audio config, prepare config, session peak, musical release, resume re-attacks, editor unavailable/open/focus/close, state captured/restored, 3f-3a host-window set + owner applied, 3h score free counter math all present)"
+
+      # TASK E: if the engine crashed, WER LocalDumps wrote the real .dmp
+      # (the evidence TASK A could never get from the user side). Upload it
+      # for offline analysis. LocalDumps terminates the process only AFTER
+      # the dump is written, so the harness-visible socket close implies the
+      # dump is already on disk — no cleanup can race it away. Green runs
+      # produce no dumps; if-no-files-found keeps that path silent.
+      # The in-engine [crash] channel (SetUnhandledExceptionFilter + set_terminate
+      # + SIGABRT family, M1-hotfix): receipts land in engine-crash.log, minidumps
+      # in %APPDATA%/scorch/crashes. Attempt 4 showed no [crash] receipt in
+      # ENGINE.LOG — but that file never carries one. Surface the real channel:
+      # its ABSENCE here is itself evidence (an abort/terminate path that
+      # bypasses the in-process filters, or a crash inside them — exactly the
+      # gap WER LocalDumps above covers independently).
+      - name: Show engine crash receipts (in-engine [crash] channel, if it fired)
+        if: failure() || cancelled()
+        shell: pwsh
+        run: |
+          if (Test-Path $env:SCORCH_CRASH_LOG) { Write-Host "engine-crash.log (last 40):"; Get-Content $env:SCORCH_CRASH_LOG -Tail 40 } else { Write-Host "no engine-crash.log — the in-process crash handlers did NOT run" }
+          if (Test-Path $env:SCORCH_CRASH_DIR) { Write-Host "engine minidumps on disk:"; Get-ChildItem $env:SCORCH_CRASH_DIR | Select-Object Name,Length,LastWriteTime | Format-Table | Out-String | Write-Host } else { Write-Host "no engine minidump dir" }
+
+      - name: Upload engine crash dumps (WER LocalDumps + engine minidumps)
+        if: failure() || cancelled()
+        uses: actions/upload-artifact@v4
+        with:
+          name: engine-crash-dumps-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            C:\engine-dumps\*.dmp
+            ${{ env.SCORCH_CRASH_DIR }}\*.dmp
+            ${{ env.SCORCH_CRASH_LOG }}
+          if-no-files-found: ignore
+          retention-days: 30
 
       - run: npm ci
 
