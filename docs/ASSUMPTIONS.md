@@ -3685,3 +3685,25 @@ Predictions on record:
 - SCOPE NOTE: D7/D8/D8b/D9 counting sites remain outside Show-ReceiptDiag
   (the brief scoped this pass to D6); close them on evidence if any of them
   red-shifts with an in-file receipt and a zero count.
+
+## TASK J adjudication record corrections (2026-10-22, user directives 5-6)
+
+- RECORD CORRECTION — TASK H (D6) is CLOSED at attempt 8. The task-chain
+  bookkeeping elsewhere had it as planned/unstarted; that was wrong. The D6
+  record above (Show-ReceiptDiag widening, attempt-8 green, the P6
+  prediction) IS the closed state. No D6 residue is claimed by the TASK J
+  adjudication; if a future task ever names D6 residue, it MUST name the
+  exact file + behavior — "D6 residue" alone is not a finding.
+- NAMED + PARKED (by name, per directive 5): `malformed-plugins[]` — a
+  malformed plugins[] under pluginRequested==false && channelsBad==true is
+  accepted SCORE-ONLY with NO wire error and NO engine.log line (the
+  "plugin set REFUSED" branch only speaks when reqInstances is non-empty) —
+  a silent drop of a malformed plugin request, the exact class the
+  terminal-receipt invariant forbids. Mechanism map: engine main.cpp
+  handle_load's parse (named in the harness record, TASK I attempt 12,
+  commit 014925b). Parked with engine bytes frozen through the TASK J merge;
+  it enters the parked list under exactly this name.
+- DEFERRAL RECORDED (directive 6): the markTerminal-before-send reorder
+  (the publish tail marking the registry after the wire sends — the
+  RESIDUAL above) does NOT ride the TASK J merge. It joins the NEXT
+  housekeeping unit as its first item.
