@@ -47,6 +47,37 @@ target_link_libraries(scorch-engine PRIVATE
 # inside juce_audio_processors — no external SDK download. juce_gui_basics is
 # pulled in transitively (AudioProcessorEditor is a Component) — the engine
 # never creates editors, and JUCE_WEB_BROWSER=0 keeps the webview stack out.
+# D12 receipt-provenance: pin the exact commit this binary was built at. The
+# engine carries it in --version, the hello payload, and the [engine] start
+# receipt — every bench/receipt record names the build that produced it.
+# CI checkouts are clean → no suffix; a dirty local tree appends "-dirty"; a
+# non-git configure (plain source zip) falls back to "unknown".
+set(SCORCH_ENGINE_COMMIT "unknown")
+find_package(Git QUIET)
+if(Git_FOUND)
+    execute_process(
+        COMMAND "${GIT_EXECUTABLE}" rev-parse --short=12 HEAD
+        WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}"
+        OUTPUT_VARIABLE _scorch_commit
+        OUTPUT_STRIP_TRAILING_WHITESPACE
+        ERROR_QUIET
+    )
+    if(_scorch_commit)
+        set(SCORCH_ENGINE_COMMIT "${_scorch_commit}")
+        execute_process(
+            COMMAND "${GIT_EXECUTABLE}" diff --quiet
+            WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}"
+            RESULT_VARIABLE _scorch_commit_dirty
+            ERROR_QUIET
+        )
+        if(NOT _scorch_commit_dirty EQUAL 0)
+            string(APPEND SCORCH_ENGINE_COMMIT "-dirty")
+        endif()
+    endif()
+endif()
+target_compile_definitions(scorch-engine PRIVATE
+    SCORCH_ENGINE_COMMIT="${SCORCH_ENGINE_COMMIT}"
+)
 target_compile_definitions(scorch-engine PRIVATE
     JUCE_PLUGINHOST_VST3=1
     JUCE_WEB_BROWSER=0

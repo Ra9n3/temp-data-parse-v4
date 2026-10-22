@@ -5,7 +5,12 @@ Canon: this file is the bench contract. The harness mode is `fieldbench` in
 `.github/scripts/field-bench.ps1`. The engine build under test is **0.14.1**
 (TASK J root fix + D12: progress-aware init watchdog, gated state-capture,
 shutdown abandonment of a wedged init worker); the bench exercises the exact
-load/open/close/retire paths the app uses.
+load/open/close/retire paths the app uses. The build **self-reports its
+commit** (CMake pins `SCORCH_ENGINE_COMMIT` from `git rev-parse` at configure
+time; `-dirty` on a dirty tree, `unknown` on a non-git configure) in the
+`--version` output, the hello payload, and the `[engine] start` receipt — a
+receipt that names only a version does not identify a build; every receipt
+from 0.14.1 on names the commit too.
 
 ## Why this bench exists
 
@@ -22,6 +27,11 @@ halt-and-adjudicate on any crash. On green → merge.
 
 - **run record**: the `bench-receipt.txt` file the script writes (+ the
   console transcript). Attach both back to the chat.
+- **engine build identity**: the receipt's `engine:` + `commit:` lines — the
+  version AND the self-reported build commit (wire-attested via the harness
+  transcript's `engine build: 0.14.1 commit=…` line; the `--version` string is
+  the fallback). A receipt without a commit describes a pre-embed build and
+  does not pin the bytes.
 - **cycle counts**: `falcon=N/50`, `bbcso=N/50` (wire editorOpened/editorClosed
   receipts; the harness fails on any open/close bookkeeping divergence).
 - **windows=0 receipt count**: the number of
@@ -111,7 +121,8 @@ Env knobs (harness side, normally untouched): `SCORCH_FB_LOAD_STALL_MS`
   0.14.0): the 300 s load window (above) + shutdown-before-disconnect on
   every bail (the RED's engine had no "shutdown received" line and lingered
   until the ps1's force-kill). Contract unchanged: >=50 clean cycles per
-  plugin. Re-run: same command.
+  plugin. Re-run: same command. Builds on the record: engine 0.14.0 (bytes @
+  `7f345e6`); harness @ `ff172ab` (fix) + `7e9f2c5` (canon).
 - **2026-10-22 (run 190901) — RED, adjudicated ENGINE (D12).** The harness
   fix held (no wait-limit misfire). Falcon leg **50/50 clean again**. BBCSO:
   the ENGINE's own init watchdog declared the load failed at 120 s wall
@@ -133,7 +144,22 @@ Env knobs (harness side, normally untouched): `SCORCH_FB_LOAD_STALL_MS`
   Per-leg init phase timings now land as `[plugin] init timing phase=...
   ms=...` receipts. Contract unchanged: >=50 clean cycles per plugin.
   Re-run: same command (engine artifact: the NEW scorch-engine-windows-exe
-  0.14.1).
+  0.14.1). Builds on the record: engine 0.14.0 bytes @ `7f345e6` (the exe was
+  built from the branch tree at `7e9f2c5` — engine files identical);
+  harness @ `7e9f2c5`. The fixes landed as 0.14.1: `05aa460` (D12 directives)
+  + `de225cc` (harness/docs) + `5146223` (D13 — the pre-commit
+  destroy-ordering hole the branch CI re-fired and the dump adjudicated).
+- **Receipt provenance — the commit pin (this build on).** The receipt could
+  not tell two 0.14.x builds apart (run 190901's record named a version, not
+  bytes). The 0.14.1 build now self-reports its commit (`SCORCH_ENGINE_COMMIT`
+  — CMake pins it at configure; see the canon above) and the receipt records
+  it three ways: the `engine:`/`commit:` lines (parsed from the wire-attested
+  hello), the harness transcript line (`engine build: 0.14.1 commit=…`), and
+  the `[engine] start v0.14.1 commit …` engine.log receipt.
+  `SCORCH_FB_EXPECT_COMMIT` (normally untouched) hard-asserts it. From this
+  build on, every field receipt self-pins its engine commit — a re-run
+  receipt must name the commit of the artifact CI delivered, and a mismatch
+  between the exe pulled and the run recorded is visible on its face.
 
 ## Hosted-CI counterpart
 

@@ -153,6 +153,15 @@ $bbcsoRetires0 = Count-Windows0 $retireBbcso
 $crashed = ($crashLines.Count -gt 0) -or ($newDumps.Count -gt 0) -or ($crashLogNow -and -not $crashLogBefore) -or $engineCrashy
 $mjsGreen = ($mjsExit -eq 0)
 $mjsOut = (Get-Content $transcript -ErrorAction SilentlyContinue | Out-String)
+# D12 receipt-provenance: the engine build commit, parsed FIRST from the
+# wire-attested harness transcript (the harness logs it from the engine's
+# hello — the engine pins SCORCH_ENGINE_COMMIT at build time), with the
+# --version output as the fallback source. A receipt without a commit does
+# not identify a build (pre-embed engines); from 0.14.1 on, every build
+# carries one.
+$engineCommit = "unknown"
+if ($mjsOut -match "engine build: \S+ commit=([0-9a-fA-F][0-9a-fA-F-]*)") { $engineCommit = $Matches[1] }
+elseif ($engineVersion -match "commit ([0-9a-fA-F][0-9a-fA-F-]*)") { $engineCommit = $Matches[1] }
 $legsAbsent = $mjsOut -match "field legs ABSENT"
 $singleLeg = (-not $legsAbsent) -and (($retireFalcon.Count -eq 0) -or ($retireBbcso.Count -eq 0)) -and ($retireAll.Count -le 1)
 
@@ -170,6 +179,7 @@ $receipt = @()
 $receipt += "SCORSH TASK J FIELD BENCH — receipt"
 $receipt += "UTC:      $((Get-Date).ToUniversalTime().ToString('yyyy-MM-dd HH:mm:ss'))"
 $receipt += "engine:   $engineVersion"
+$receipt += "commit:   $engineCommit"
 $receipt += "node:     $nodeVersion"
 $receipt += "cycles:   $Cycles per leg   seed: $Seed   require-both-legs: 1   port: $Port"
 $receipt += "dirs:     $($dirsOk -join ' | ')"

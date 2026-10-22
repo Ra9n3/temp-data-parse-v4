@@ -542,6 +542,18 @@ namespace {
 // "openEditor":true); the lazy-device window is receipted (nominal fallback +
 // device-ready race re-prepare); matching requests coalesce into an in-flight
 // init instead of answering "reused" while it is still outstanding.
+// D12 receipt-provenance: the exact commit this binary was built at. CMake
+// pins SCORCH_ENGINE_COMMIT from `git rev-parse` at configure time (with a
+// "-dirty" suffix on a dirty tree; "unknown" on a non-git configure); a
+// non-CMake dev build falls back to the literal below. It is carried in the
+// --version output, the hello payload, and the [engine] start receipt so
+// every bench/receipt record names the build that produced it. Metadata only:
+// behavior is versioned by kEngineVersion alone — the commit never gates
+// anything and is never compared by CI.
+#ifndef SCORCH_ENGINE_COMMIT
+#define SCORCH_ENGINE_COMMIT "dev-unpinned"
+#endif
+
 constexpr const char* kEngineVersion = "0.14.1";   // D12 (field bench run 190901): the init watchdog is progress-aware (60 s zero-movement stall + 600 s hard cap + 10 s heartbeat + last-call breadcrumb bundle), state-capture is gated off still-initializing plugins and thread-documented, and shutdown abandons a wedged init worker (bounded 10 s wait, detach, hard exit — terminal receipts always emitted). 0.14.0 was the TASK J root fix: teardown ordering load-bearing (destroy windows -> drain -> unload; owner-thread destroy via the init-worker teardown jobs), the module-guard demoted to the fail-loud verify+PIN backstop
 constexpr int kProtocolVersion = 1;
 constexpr int kDefaultPort = 9377;
@@ -7249,7 +7261,8 @@ int main(int argc, char** argv) {
             // "audio: built-in" is the compile-gate-absence proof: a gated
             // (mute) build would not report audio support here.
             std::cout << "scorch-engine " << kEngineVersion
-                      << " (protocol " << kProtocolVersion
+                      << " (commit " << SCORCH_ENGINE_COMMIT
+                      << ", protocol " << kProtocolVersion
                       << ", audio: built-in)" << std::endl;
             return 0;
         }
@@ -7389,7 +7402,8 @@ int main(int argc, char** argv) {
     // through this table — bind the STABLE addresses once, before any device
     // or load can exist.
     g_audioCallback.bindSelectorSources();
-    engineLog(std::string("[engine] start v") + kEngineVersion + " port " +
+    engineLog(std::string("[engine] start v") + kEngineVersion + " commit " +
+              SCORCH_ENGINE_COMMIT + " port " +
               std::to_string(port) + (g_nullAudio ? " --null-audio" : "") +
               (g_forcedNoAudio ? " --no-audio" : ""));
 
@@ -7411,8 +7425,11 @@ int main(int argc, char** argv) {
                 // it cannot vanish at a size threshold.
                 engineLog("[ws] client connected (no message-size cap in IXWebSocket v11.4.5 — verified in source)");
                 std::cout << "[engine] client connected" << std::endl;
+                // hello carries the build commit (D12 receipt-provenance) —
+                // additive field; protocol 1 consumers read engineVersion only.
                 std::string hello = "{\"type\":\"hello\",\"engineVersion\":\"" +
                                     std::string(kEngineVersion) +
+                                    "\",\"commit\":\"" + std::string(SCORCH_ENGINE_COMMIT) +
                                     "\",\"protocol\":" + std::to_string(kProtocolVersion) + "}";
                 ws.send(hello);
             } else if (msg->type == ix::WebSocketMessageType::Error) {
