@@ -197,12 +197,17 @@
 //         "[plugin] init stage=<instantiate|state-restore|prepare|commit|
 //         publish|state-capture> instance= seq="; a request pending or
 //         queued >10s warns every 10 s ("init pending >10s" / "init queued
-//         >10s"); a request still without its terminal receipt after
-//         SCORCH_INIT_TERMINAL_TIMEOUT_MS (default 120000 ms) is DECLARED
-//         failed by the watchdog ("reason=terminal-timeout" for the stuck
-//         worker's request, "reason=queued-behind-jammed-init" for the ones
-//         queued behind it) with a wire plugin_state error twin. The
-//         declaration is log-only — the wedged thread is never touched.
+//         >10s", with phase + zero-movement age + the last engine→plugin
+//         call breadcrumb — the D12 heartbeat); a request that stops MOVING
+//         (no phase/progress stamp) for SCORCH_INIT_PROGRESS_STALL_MS
+//         (default 60000 ms; SCORCH_INIT_TERMINAL_TIMEOUT_MS honored as the
+//         CI alias) — or exceeds SCORCH_INIT_HARD_CAP_MS total (default
+//         600000 ms) — is DECLARED failed by the watchdog
+//         ("reason=terminal-timeout" for the stalled worker's request,
+//         "reason=queued-behind-jammed-init" for the ones queued behind it,
+//         "reason=init-hard-cap-timeout" at the cap) with a wire
+//         plugin_state error twin and a STALL-BUNDLE diagnostic line.
+//         The declaration is log-only — the wedged thread is never touched.
 //   COALESCING: a load whose plugin set (instanceId+uid+path per entry)
 //         matches a queued/in-flight init FOLDS into it ("init superseded:
 //         seq=NEW by=INFLIGHT (coalesced ...)") instead of answering
@@ -537,7 +542,7 @@ namespace {
 // "openEditor":true); the lazy-device window is receipted (nominal fallback +
 // device-ready race re-prepare); matching requests coalesce into an in-flight
 // init instead of answering "reused" while it is still outstanding.
-constexpr const char* kEngineVersion = "0.14.0";   // TASK J root fix: teardown ordering is load-bearing (destroy windows -> drain -> unload; owner-thread destroy via the init-worker teardown jobs), the module-guard is demoted to the fail-loud verify+PIN backstop (no detach — never the load-bearing mechanism); the dangling-WNDPROC crash class is closed by ORDERING, not by interception
+constexpr const char* kEngineVersion = "0.14.1";   // D12 (field bench run 190901): the init watchdog is progress-aware (60 s zero-movement stall + 600 s hard cap + 10 s heartbeat + last-call breadcrumb bundle), state-capture is gated off still-initializing plugins and thread-documented, and shutdown abandons a wedged init worker (bounded 10 s wait, detach, hard exit — terminal receipts always emitted). 0.14.0 was the TASK J root fix: teardown ordering load-bearing (destroy windows -> drain -> unload; owner-thread destroy via the init-worker teardown jobs), the module-guard demoted to the fail-loud verify+PIN backstop
 constexpr int kProtocolVersion = 1;
 constexpr int kDefaultPort = 9377;
 constexpr int kMaxVoices = 64;
@@ -2110,6 +2115,46 @@ void closeAllEditorsAtShutdown() {
 // Storage decision + rebind identity (pluginId+path, NOT volatile instance
 // ids) documented in ASSUMPTIONS.md 3d-3.
 constexpr size_t kMaxPluginStateBytes = 2 * 1024 * 1024;   // ~2 MiB/instance
+
+// ─── D12: the last engine→plugin call breadcrumb ──────────────────────────
+// The watchdog's stall bundle must distinguish "slow first load" from
+// "deadlock" WITHOUT suspending the worker (a raw stack needs a suspended
+// thread that may hold plugin/JUCE locks — its own wedge risk, declined by
+// policy). Every engine→plugin call in the init paths stamps this lock-free
+// record BEFORE entering the call and re-stamps on return; a call wedged
+// inside plugin code holds nothing the watchdog needs, so the bundle is
+// readable exactly when the wedge is live.
+static long long initSteadyMsNow() {
+    return std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::steady_clock::now().time_since_epoch()).count();
+}
+struct InitCallBreadcrumb {
+    std::atomic<const char*> call{""};   // static site literal ("loadHostedPlugin(create)", "getStateInformation", ...)
+    std::atomic<long long> atMs{0};      // steady ms of the LAST stamp (enter or exit)
+    std::atomic<bool> inside{false};     // true between the enter and exit stamps
+};
+InitCallBreadcrumb g_initCallBreadcrumb;
+static void initBreadcrumbEnter(const char* call) {
+    g_initCallBreadcrumb.call.store(call, std::memory_order_release);
+    g_initCallBreadcrumb.atMs.store(initSteadyMsNow(), std::memory_order_release);
+    g_initCallBreadcrumb.inside.store(true, std::memory_order_release);
+}
+static void initBreadcrumbExit();   // defined with the init registry (stamps intra-phase progress)
+struct InitBreadcrumbScope {
+    explicit InitBreadcrumbScope(const char* call) { initBreadcrumbEnter(call); }
+    ~InitBreadcrumbScope() { initBreadcrumbExit(); }
+    InitBreadcrumbScope(const InitBreadcrumbScope&) = delete;
+    InitBreadcrumbScope& operator=(const InitBreadcrumbScope&) = delete;
+};
+static std::string initBreadcrumbSuffix() {
+    const char* c = g_initCallBreadcrumb.call.load(std::memory_order_acquire);
+    if (c == nullptr || c[0] == '\0') return "lastCall=none";
+    const long long age = initSteadyMsNow() - g_initCallBreadcrumb.atMs.load(std::memory_order_acquire);
+    return std::string("lastCall=") + c +
+           (g_initCallBreadcrumb.inside.load(std::memory_order_acquire)
+                ? " (INSIDE for " : " (returned ") +
+           std::to_string(age) + " ms ago)";
+}
 // Capture the CURRENT live instance and broadcast the blob. Callable from
 // the message thread AND the init worker (getStateInformation is host-callable
 // from any thread; plugins guard internally). try/catch: a plugin that
@@ -2133,6 +2178,7 @@ void captureAndBroadcastState(juce::AudioPluginInstance* inst, const HostedPlugi
     engineLog("[plugin] capture BEGIN instance=" + h.instanceId + " (" + trigger + ")");
     try {
         juce::MemoryBlock mb;
+        InitBreadcrumbScope _bc("getStateInformation");   // D12: the watchdog's last-call breadcrumb covers ALL capture triggers
         inst->getStateInformation(mb);
         const long long capMs = std::chrono::duration_cast<std::chrono::milliseconds>(
             std::chrono::steady_clock::now() - tc0).count();
@@ -2203,6 +2249,7 @@ struct InitReceiptRecord {
     bool unload = false;              // unload requests keep their own terminal ("unload complete")
     std::string fingerprint;          // "iid|uid|path" per entry, ';' joined (the coalescing key)
     std::chrono::steady_clock::time_point queuedAt{};
+    std::chrono::steady_clock::time_point phaseSince{};   // D12: last phase/progress movement (the stall clock; {} means queuedAt)
     bool inFlight = false;            // popped by the init worker
     bool terminal = false;            // exactly-one terminal receipt has been emitted
     std::string terminalKind;         // "loaded" | "failed" | "superseded"
@@ -2214,17 +2261,39 @@ struct InitReceiptRecord {
 std::mutex g_initReceiptMutex;
 std::vector<InitReceiptRecord> g_initReceipts;   // small (a handful of live requests)
 
-// The terminal-declaration bound. A REAL heavyweight load legitimately runs
-// for tens of seconds (Falcon field load: 2.1 s; the 12 s slowload CI floor;
-// huge orchestral libraries longer) — the default stays far above any real
-// load. CI sets it small (12 s) against the 20 s jam fixture. Log-only: the
-// declaration never touches the wedged thread.
-static long long initTerminalTimeoutMs() {
+// The stall + cap bounds (D12 — the watchdog is PROGRESS-AWARE, not a wall
+// clock; field bench run 190901: the flat 120 s wall clock killed a
+// GB-scale first load that may have been moving normally between slow
+// phases). Two bounds now govern the terminal declaration:
+//   stall — fail only after initStallTimeoutMs() of ZERO phase/progress
+//           movement (default 60 s). SCORCH_INIT_TERMINAL_TIMEOUT_MS (the
+//           old wall-clock knob) is honored as an alias so CI's existing
+//           12 s wiring keeps its exact timing: during a jam there IS no
+//           movement, so the fire moment is identical.
+//   cap   — SCORCH_INIT_HARD_CAP_MS total per request (default 600 s)
+//           regardless of movement: a slow-but-alive multi-phase load gets
+//           its headroom, and nothing runs forever.
+// Log-only: the declaration never touches the wedged thread.
+static long long initStallTimeoutMs() {
     static const long long v = [] {
-        long long x = 120000;
-        if (const char* e = std::getenv("SCORCH_INIT_TERMINAL_TIMEOUT_MS")) {
+        long long x = 60000;
+        if (const char* e = std::getenv("SCORCH_INIT_PROGRESS_STALL_MS")) {
             const long long p = std::atoll(e);
             if (p >= 1000) x = p;
+        } else if (const char* e2 = std::getenv("SCORCH_INIT_TERMINAL_TIMEOUT_MS")) {
+            const long long p = std::atoll(e2);
+            if (p >= 1000) x = p;
+        }
+        return x;
+    }();
+    return v;
+}
+static long long initHardCapMs() {
+    static const long long v = [] {
+        long long x = 600000;
+        if (const char* e = std::getenv("SCORCH_INIT_HARD_CAP_MS")) {
+            const long long p = std::atoll(e);
+            if (p >= 5000) x = p;
         }
         return x;
     }();
@@ -2255,7 +2324,21 @@ static void initRegistrySetPhase(long long seq, const char* phase, const std::st
         if (r.seq != seq || r.terminal) continue;
         r.phase = phase;
         r.instanceId = iid;
+        r.phaseSince = std::chrono::steady_clock::now();   // D12: a phase transition is movement — the stall clock restarts
     }
+}
+// D12: an intra-phase progress stamp (a plugin call RETURNED) — every
+// in-flight request's stall clock restarts. Called from initBreadcrumbExit.
+static void initRegistryBumpProgress() {
+    const auto now = std::chrono::steady_clock::now();
+    std::lock_guard<std::mutex> lk(g_initReceiptMutex);
+    for (auto& r : g_initReceipts)
+        if (!r.terminal && r.inFlight) r.phaseSince = now;
+}
+static void initBreadcrumbExit() {
+    g_initCallBreadcrumb.atMs.store(initSteadyMsNow(), std::memory_order_release);
+    g_initCallBreadcrumb.inside.store(false, std::memory_order_release);
+    initRegistryBumpProgress();   // a completed call is honest intra-phase progress
 }
 // The coalescing lookup (#5): a NON-terminal record (queued or in-flight)
 // with the same fingerprint. Returns its seq, or 0.
@@ -2308,7 +2391,8 @@ InitPhaseRecord g_initPhase;
 // registry record so the >10s pending warnings name the stuck stage.
 class InitPhaseGuard {
 public:
-    InitPhaseGuard(const char* phase, const std::string& iid, long long seq = -1) {
+    InitPhaseGuard(const char* phase, const std::string& iid, long long seq = -1)
+        : phaseName_(phase), iid_(iid), seq_(seq) {
         std::lock_guard<std::mutex> lk(g_initPhase.mtx);
         g_initPhase.phase = phase;
         g_initPhase.instanceId = iid;
@@ -2322,11 +2406,27 @@ public:
         }
     }
     ~InitPhaseGuard() {
-        std::lock_guard<std::mutex> lk(g_initPhase.mtx);
-        g_initPhase.active = false;
+        long long ms = 0;
+        {
+            std::lock_guard<std::mutex> lk(g_initPhase.mtx);
+            ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                std::chrono::steady_clock::now() - g_initPhase.startedAt).count();
+            g_initPhase.active = false;
+        }
+        // D12 receipt: per-leg init phase timings (ms per phase) — the bench
+        // receipt's engine.log half parses these to show where a leg's init
+        // time actually went (and the stall bundle's in-phase age reads
+        // against them).
+        if (seq_ >= 0)
+            engineLog("[plugin] init timing phase=" + phaseName_ + " instance=" + iid_ +
+                      " seq " + std::to_string(seq_) + " ms=" + std::to_string(ms));
     }
     InitPhaseGuard(const InitPhaseGuard&) = delete;
     InitPhaseGuard& operator=(const InitPhaseGuard&) = delete;
+private:
+    std::string phaseName_;
+    std::string iid_;
+    long long seq_;
 };
 
 // ─── Stage 3c-regression: ASYNC plugin init ─────────────────────────────
@@ -2375,6 +2475,11 @@ uint64_t g_pluginInitGen = 0;            // guarded; bumped per queued request
 // The superseded receipts' "by=" must name the request that took our place —
 // the generation counter alone cannot answer "which seq superseded me".
 long long g_pluginInitNewestSeq = 0;     // guarded by g_pluginInitMutex
+// D12: set once when the init worker's loop has EXITED — the shutdown path
+// polls it for a bounded 10 s; a worker still inside a plugin call after the
+// bound is abandoned (detached, never joined) so a wedged worker can never
+// stop engine exit.
+std::atomic<bool> g_pluginInitWorkerExited{false};
 
 // Real device config, captured in audioDeviceAboutToStart. A hot-swapped
 // instance is prepared with THESE numbers before it becomes visible to the
@@ -6962,6 +7067,20 @@ void handle_close_editor(const juce::var& json) {
 // carrying its instanceId so the app embeds it in the right LibraryGroup.
 void handle_capture_state() {
     juce::MessageManager::callAsync([] {
+        // D12 audit: state-capture NEVER runs against a plugin the init worker
+        // may be inside. The worker serializes every state op on the live set
+        // (state-restore on a kept instance, capture on an outgoing one); a
+        // concurrent MM getStateInformation against the SAME plugin is
+        // unbounded plugin-internal-lock contention — the wedge class run
+        // 190901 died in. The published set only ever holds COMMITTED
+        // instances, but a committed instance can be mid-restore/mid-prepare
+        // inside the worker's CURRENT request — so the gate is the load flag,
+        // not the set membership. Skip with a named receipt; the frontend
+        // re-asks when idle.
+        if (g_pluginLoadActive.load(std::memory_order_acquire)) {
+            engineLog("[plugin] capture SKIPPED (request) — an init is in flight; state-capture never runs against a plugin the worker may be inside (D12 audit); re-ask when the load settles");
+            return;
+        }
         // Milestone 2: EVERY live instance — one pluginSavedState per
         // instance, each carrying its instanceId (slot order, deterministic).
         for (HostedPlugin* h : liveSetSnapshot()->bySlot) {
@@ -7814,7 +7933,10 @@ int main(int argc, char** argv) {
             {
                 std::lock_guard<std::mutex> lk(g_initReceiptMutex);
                 for (auto& r : g_initReceipts) {
-                    if (r.seq == req.seq && !r.terminal) { r.inFlight = true; r.phase = "dequeue"; r.instanceId = "-"; }
+                    if (r.seq == req.seq && !r.terminal) {
+                        r.inFlight = true; r.phase = "dequeue"; r.instanceId = "-";
+                        r.phaseSince = std::chrono::steady_clock::now();   // D12: the stall clock starts at dequeue
+                    }
                 }
             }
             // ── 0.9.2 LAZY-DEVICE RACE (#4): the audit receipt ──
@@ -8100,6 +8222,7 @@ int main(int argc, char** argv) {
                 if (decoded && restoredBytes > 0 && restoredBytes <= kMaxPluginStateBytes * 2) {
                     try {
                         InitPhaseGuard pg("state-restore", e.instanceId, seq);   // 3f-6 watchdog phase
+                        InitBreadcrumbScope _bc("setStateInformation(project-embed)");   // D12
                         proc->setStateInformation(mos.getData(), static_cast<int>(restoredBytes));
                         engineLog("[plugin] state restored " + std::to_string(restoredBytes) +
                                   " bytes (project embed) instance=" + e.instanceId);
@@ -8139,6 +8262,7 @@ int main(int argc, char** argv) {
                 std::string hostErr;
                 {
                     InitPhaseGuard pg("instantiate", e.instanceId, req.seq);
+                    InitBreadcrumbScope _bc("loadHostedPlugin(create)");   // D12
                     hostErr = loadHostedPlugin(e.pluginVar, e.instanceId, e.slot, h, e.routing, e.multiTimbral);
                 }
                 outcomes[i].initMs = std::chrono::duration_cast<std::chrono::milliseconds>(
@@ -8207,6 +8331,7 @@ int main(int argc, char** argv) {
                     const int prepBuf = prepBufOfEntry;
                     if (h != nullptr && h->instance) {
                         InitPhaseGuard pg("prepare", e.instanceId, req.seq);   // 3f-6 watchdog phase
+                        InitBreadcrumbScope _bc("prepareToPlay(worker)");   // D12
                         // Stage 3e-2: playhead re-asserted before the prepare
                         // (plugins cache the pointer; re-assert is cheap and
                         // proof against wrapper resets).
@@ -8276,6 +8401,7 @@ int main(int argc, char** argv) {
                     const int nowBuf = g_deviceBufferSize.load();
                     if (std::abs(nowRate - prepRateOfEntry) > 0.5 || nowBuf != prepBufOfEntry) {
                         InitPhaseGuard pg("prepare", e.instanceId, req.seq);
+                        InitBreadcrumbScope _bc("prepareToPlay(worker,device-race)");   // D12
                         h->instance->setPlayHead(&g_audioCallback.playHead);
                         h->instance->setPlayConfigDetails(0, 2, nowRate, nowBuf);
                         for (int b = 0; b < h->instance->getBusCount(false); ++b)
@@ -8705,6 +8831,7 @@ int main(int argc, char** argv) {
                 g_pluginLoadActive.store(g_pluginInitPending, std::memory_order_release);
             }
         }
+        g_pluginInitWorkerExited.store(true, std::memory_order_release);   // D12: the shutdown path's bounded wait reads this
     });
 
     // ─── Stage 3f-6 — init-phase watchdog thread ────────────────────────────
@@ -8724,13 +8851,19 @@ int main(int argc, char** argv) {
     //                 a busy worker), repeated every 10 s — a stuck worker is
     //                 visible in engine.log within seconds, the same pattern
     //                 as the editor's >10s pending watchdog.
-    //   age > SCORCH_INIT_TERMINAL_TIMEOUT_MS (default 120000; CI 12000) →
-    //                 the TERMINAL DECLARATION on the wedged request's behalf:
-    //                 "init failed: seq= reason=terminal-timeout ..." for the
-    //                 in-flight one, "... reason=queued-behind-jammed-init"
-    //                 for the queued ones. Exactly-one is enforced by
-    //                 initRegistryMarkTerminal; the worker discovers the
-    //                 declaration and discards its result when it unblocks.
+    //   zero phase/progress movement > initStallTimeoutMs() (default 60 s;
+    //                 SCORCH_INIT_TERMINAL_TIMEOUT_MS honored as the CI alias)
+    //                 → the TERMINAL DECLARATION on the wedged request's
+    //                 behalf: "init failed: seq= reason=terminal-timeout ..."
+    //                 for the in-flight one, "... reason=queued-behind-jammed-init"
+    //                 for the queued ones; total age > SCORCH_INIT_HARD_CAP_MS
+    //                 (default 600 s) declares regardless of movement. A
+    //                 STALL-BUNDLE line (phase, zero-movement age, last
+    //                 engine→plugin call breadcrumb, worker tid) precedes the
+    //                 declaration — the slow-load vs deadlock evidence.
+    //                 Exactly-one is enforced by initRegistryMarkTerminal; the
+    //                 worker discovers the declaration and discards its result
+    //                 when it unblocks.
     std::thread plugin_init_watchdog([&server]() {
         while (!g_should_exit.load()) {
             std::this_thread::sleep_for(std::chrono::milliseconds(1000));
@@ -8756,39 +8889,88 @@ int main(int argc, char** argv) {
                     g_initPhase.named = true;   // one WATCHDOG line per phase occurrence
                 }
             }
-            // ── 0.9.2 registry sweep ──
-            const long long terminalMs = initTerminalTimeoutMs();
+            // ── 0.9.2 registry sweep — D12: PROGRESS-AWARE ──
+            const long long stallMs = initStallTimeoutMs();
+            const long long capMs = initHardCapMs();
+            std::chrono::steady_clock::time_point workerPhaseSince{};
+            bool workerPhaseActive = false;
+            {
+                std::lock_guard<std::mutex> lk(g_initPhase.mtx);
+                workerPhaseSince = g_initPhase.startedAt;
+                workerPhaseActive = g_initPhase.active;
+            }
             struct Declaration { long long seq; std::string line; bool wireError; std::string iid; std::string detail; };
             std::vector<Declaration> declarations;
             {
                 std::lock_guard<std::mutex> lk(g_initReceiptMutex);
                 const auto now = std::chrono::steady_clock::now();
+                const long long workerMoveMs = std::chrono::duration_cast<std::chrono::milliseconds>(
+                    now - workerPhaseSince).count();
                 for (auto& r : g_initReceipts) {
                     if (r.terminal) continue;
                     const long long age = std::chrono::duration_cast<std::chrono::milliseconds>(
                         now - r.queuedAt).count();
-                    if (age >= terminalMs) {
+                    const long long zeroMoveMs = std::chrono::duration_cast<std::chrono::milliseconds>(
+                        now - (r.phaseSince == std::chrono::steady_clock::time_point{}
+                                   ? r.queuedAt : r.phaseSince)).count();
+                    // D12 fire conditions —
+                    //   stall  (in-flight): ZERO phase/progress movement for stallMs
+                    //   queued: the worker's LIVE phase has not moved for stallMs
+                    //           (it never reached this request and, jammed, cannot)
+                    //   cap:    total age >= capMs regardless of movement
+                    const bool stallFire = r.inFlight && zeroMoveMs >= stallMs;
+                    const bool queuedFire = !r.inFlight && workerPhaseActive && workerMoveMs >= stallMs;
+                    const bool capFire = age >= capMs;
+                    if (stallFire || queuedFire || capFire) {
+                        // D12 diagnostic bundle FIRST — the log reads cause →
+                        // verdict. "Slow first load" vs "deadlock": lastCall
+                        // INSIDE with a growing age names the wedged call;
+                        // lastCall returned with fresh stamps names a
+                        // slow-but-alive load between phases.
+                        declarations.push_back({r.seq,
+                            "[plugin] init STALL-BUNDLE seq=" + std::to_string(r.seq) +
+                            " phase=" + (r.phase.empty() ? "unknown" : r.phase) +
+                            " instance=" + (r.instanceId.empty() ? "-" : r.instanceId) +
+                            " zeroMovement=" + std::to_string(zeroMoveMs / 1000) + "s" +
+                            " totalAge=" + std::to_string(age / 1000) + "s" +
+                            " " + initBreadcrumbSuffix() +
+                            " workerTid=" + std::to_string(scorchguard::g_initWorkerTid.load(std::memory_order_acquire)) +
+                            " (D12: no raw stack — suspending a thread that may hold plugin/JUCE locks is its own wedge risk)",
+                            false, "", ""});
                         // The terminal declaration on the wedged request's
                         // behalf (emitted outside the mutex).
                         if (r.inFlight) {
+                            const bool capNotStall = capFire && !stallFire;
                             declarations.push_back({r.seq,
                                 "[plugin] init failed: seq=" + std::to_string(r.seq) +
-                                " reason=terminal-timeout (worker stuck in phase=" +
-                                (r.phase.empty() ? "unknown" : r.phase) + " instance=" +
-                                (r.instanceId.empty() ? "-" : r.instanceId) +
-                                " for " + std::to_string(age / 1000) +
-                                "s; no terminal receipt is possible from a wedged worker) — declared by the watchdog;"
-                                " the worker's eventual result will be discarded",
+                                (capNotStall
+                                    ? " reason=init-hard-cap-timeout (total init age " +
+                                      std::to_string(age / 1000) + "s >= cap " +
+                                      std::to_string(capMs / 1000) + "s despite movement; last phase=" +
+                                      (r.phase.empty() ? "unknown" : r.phase) + ")"
+                                    : " reason=terminal-timeout (no phase/progress movement for " +
+                                      std::to_string(zeroMoveMs / 1000) + "s — progress-aware watchdog; worker stuck in phase=" +
+                                      (r.phase.empty() ? "unknown" : r.phase) + " instance=" +
+                                      (r.instanceId.empty() ? "-" : r.instanceId) +
+                                      " for " + std::to_string(zeroMoveMs / 1000) + "s)") +
+                                " — declared by the watchdog; the worker's eventual result will be discarded",
                                 true, !r.firstIid.empty() ? r.firstIid : r.instanceId,
-                                "init declared failed after " + std::to_string(age / 1000) +
-                                "s (terminal-timeout — worker stuck in phase " +
-                                (r.phase.empty() ? "unknown" : r.phase) + ")"});
+                                capNotStall
+                                    ? "init declared failed after " + std::to_string(age / 1000) +
+                                      "s (init-hard-cap-timeout — total age " + std::to_string(age / 1000) +
+                                      "s, cap " + std::to_string(capMs / 1000) + "s)"
+                                    : "init declared failed after " + std::to_string(age / 1000) +
+                                      "s (terminal-timeout — zero phase progress for " +
+                                      std::to_string(zeroMoveMs / 1000) + "s in phase " +
+                                      (r.phase.empty() ? "unknown" : r.phase) + ")"});
                         } else {
                             declarations.push_back({r.seq,
                                 "[plugin] init failed: seq=" + std::to_string(r.seq) +
                                 " reason=queued-behind-jammed-init (the worker has not reached this request for " +
                                 std::to_string(age / 1000) +
-                                "s; an older init is stuck) — declared by the watchdog; reload to retry",
+                                "s and its live phase has not moved for " +
+                                std::to_string(workerMoveMs / 1000) +
+                                "s — an older init is stuck) — declared by the watchdog; reload to retry",
                                 true, !r.firstIid.empty() ? r.firstIid : r.instanceId,
                                 "init declared failed after " + std::to_string(age / 1000) +
                                 "s (queued-behind-jammed-init — the worker never reached this request)"});
@@ -8810,16 +8992,20 @@ int main(int argc, char** argv) {
                                     "[plugin] init pending >10s seq " + std::to_string(r.seq) +
                                     " phase=" + (r.phase.empty() ? "unknown" : r.phase) +
                                     " instance=" + (r.instanceId.empty() ? "-" : r.instanceId) +
-                                    " (" + std::to_string(secs) +
-                                    "s) — the init is still running (terminal declaration at " +
-                                    std::to_string(terminalMs / 1000) + "s) | " + mmOccupancySuffix(),
+                                    " (" + std::to_string(secs) + "s)" +
+                                    " zeroMovement=" + std::to_string(zeroMoveMs / 1000) + "s" +
+                                    " " + initBreadcrumbSuffix() +
+                                    " — the init is still running (stall declaration after " +
+                                    std::to_string(stallMs / 1000) + "s of zero movement, hard cap " +
+                                    std::to_string(capMs / 1000) + "s) | " + mmOccupancySuffix(),
                                     false, "", ""});
                             } else {
                                 declarations.push_back({r.seq,
                                     "[plugin] init queued >10s seq " + std::to_string(r.seq) +
                                     " (" + std::to_string(secs) +
-                                    "s) — the worker has not reached this request yet (terminal declaration at " +
-                                    std::to_string(terminalMs / 1000) + "s) | " + mmOccupancySuffix(),
+                                    "s) — the worker has not reached this request yet (stall declaration after " +
+                                    std::to_string(stallMs / 1000) + "s of worker zero movement, hard cap " +
+                                    std::to_string(capMs / 1000) + "s) | " + mmOccupancySuffix(),
                                     false, "", ""});
                             }
                         }
@@ -9047,24 +9233,66 @@ int main(int argc, char** argv) {
     }
     server.stop();
     state_thread.join();
-    plugin_init_thread.join();
-    // 0.9.2 — the terminal receipt invariant holds at shutdown too: any
-    // request still queued or in-flight (the worker exited mid-init) gets its
-    // named failed receipt — never a silent drop, even on the way out.
+    // ── D12: abandonment BEFORE the join — the terminal receipt invariant
+    // holds at shutdown even when the worker is WEDGED. Every still-
+    // non-terminal seq (queued or in-flight) gets its named engine-shutdown
+    // failed receipt NOW, before we know whether the worker can exit; the
+    // in-flight line names the phase + zero-movement age.
     {
-        std::vector<long long> abandonedSeqs;
+        std::vector<std::string> abandonLines;
         {
             std::lock_guard<std::mutex> lk(g_initReceiptMutex);
+            const auto now = std::chrono::steady_clock::now();
             for (auto& r : g_initReceipts) {
                 if (r.terminal) continue;
                 r.terminal = true;
                 r.terminalKind = "failed";
-                abandonedSeqs.push_back(r.seq);
+                const long long zeroMoveMs = std::chrono::duration_cast<std::chrono::milliseconds>(
+                    now - (r.phaseSince == std::chrono::steady_clock::time_point{}
+                               ? r.queuedAt : r.phaseSince)).count();
+                abandonLines.push_back(
+                    "[plugin] init failed: seq=" + std::to_string(r.seq) +
+                    " reason=engine-shutdown (the init was still " +
+                    (r.inFlight ? "RUNNING" : "queued") + " at exit" +
+                    (r.inFlight
+                         ? " — abandoned; worker was in phase=" +
+                               (r.phase.empty() ? "unknown" : r.phase) +
+                               " instance=" + (r.instanceId.empty() ? "-" : r.instanceId) +
+                               ", zero movement for " + std::to_string(zeroMoveMs / 1000) + "s"
+                         : "") +
+                    ")");
             }
         }
-        for (const long long s : abandonedSeqs)
-            engineLog("[plugin] init failed: seq=" + std::to_string(s) +
-                      " reason=engine-shutdown (the init was still queued or running at exit)");
+        for (const std::string& l : abandonLines) engineLog(l);
+    }
+    // D12: bounded worker wait — the worker exits within 10 s of the
+    // shutdown flag, or it is wedged inside a plugin call and is ABANDONED:
+    // detached, never joined, and the editor/device teardown is skipped (a
+    // wedged worker must never stop engine exit — the deliberate-leak policy
+    // already documents that nothing is freed at exit; the OS reaps the
+    // rest). Exit code stays 0: an abandoned wedge is a named shutdown
+    // shape, not a crash.
+    bool workerExited = false;
+    for (int i = 0; i < 100; ++i) {
+        if (g_pluginInitWorkerExited.load(std::memory_order_acquire)) { workerExited = true; break; }
+        std::this_thread::sleep_for(std::chrono::milliseconds(100));
+    }
+    bool workerAbandoned = false;
+    if (workerExited) {
+        plugin_init_thread.join();
+    } else {
+        workerAbandoned = true;
+        std::string phase, iid;
+        {
+            std::lock_guard<std::mutex> lk(g_initPhase.mtx);
+            phase = g_initPhase.phase;
+            iid = g_initPhase.instanceId;
+        }
+        engineLog("[engine] init worker ABANDONED at shutdown (no exit within 10000 ms; last phase=" +
+                  (phase.empty() ? "unknown" : phase) + " instance=" +
+                  (iid.empty() ? "-" : iid) +
+                  ") — detached; skipping editor/device teardown around a live plugin call (the deliberate-leak policy)");
+        plugin_init_thread.detach();
     }
     // Stage 3f-6: the watchdog sleeps in 1 s slices and re-checks
     // g_should_exit — join is bounded.
@@ -9074,6 +9302,16 @@ int main(int argc, char** argv) {
     // Stage 3f-2: the probe thread checks g_should_exit between its 250 ms
     // wait slices and kills any in-flight probe child — join is bounded.
     scan_probe_thread.join();
+    if (workerAbandoned) {
+        // D12: the wedged-worker exit path — nothing past this point touches
+        // plugin state (no editor closes, no device stop around a live plugin
+        // call); the exit receipts are above, the OS reaps the process. The
+        // wedged thread dies with the process (_Exit terminates all threads).
+        engineLog("[engine] exit 0 (shutdown abandoned a wedged init worker — teardown skipped by policy; exit receipts above)");
+        std::cout << "[engine] exit 0 (init worker abandoned at shutdown)" << std::endl;
+        std::fflush(nullptr);
+        std::_Exit(0);
+    }
     // Stage 3d-1: graceful exit closes editor windows FIRST (bounded wait —
     // the pump is still running). A hard kill needs nothing: the OS reaps
     // the process's windows, so orphans are impossible either way.
