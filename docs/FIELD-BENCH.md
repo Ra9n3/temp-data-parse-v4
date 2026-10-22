@@ -61,6 +61,14 @@ Duration: ~5–15 minutes (3 real plugin loads dominate). **Do not interact
 with the plugin editor windows while the bench runs** — they open and close
 automatically ~50 times per plugin.
 
+Stall windows (the 2026-10-22 RED adjudication — harness wait-limit, NOT
+product): while a load receipt is outstanding the no-progress window is
+**300 s** (a GB-scale library's first load streams from disk for minutes —
+the first RED died at 60 s mid-BBCSO-load); once `plugin_state loaded`
+arrives the cycling phase keeps its **60 s** no-progress window. On ANY bail
+the harness sends shutdown BEFORE disconnecting, so the engine's clean-exit
+receipt exists on every path.
+
 ## Verdicts
 
 - **GREEN** — mjs exit 0, engine exit 0, zero `[crash]` receipts, per-plugin
@@ -84,6 +92,25 @@ automatically ~50 times per plugin.
 `-Cycles 50` (>=50 required) · `-Seed 20261023` (deterministic jitter — vary
 it on a re-run to cross the deferred-free window at different phases) ·
 `-Port 9421` · `-ScanDirs` · `-EngineExe` · `-OutDir`.
+
+Env knobs (harness side, normally untouched): `SCORCH_FB_LOAD_STALL_MS`
+(default 300000 — the load window), `SCORCH_FB_CYCLE_STALL_MS` (default
+60000 — the cycling window), plus `SCORCH_FIELD_CYCLES` /
+`SCORCH_FIELD_SEED` / `SCORCH_FIELD_REQUIRE` (set by this script).
+
+## Field receipts (desktop runs)
+
+- **2026-10-22 — RED, adjudicated HARNESS (not product).** Falcon leg
+  **PASSED: 50/50 cycles, 0 errors, no crash, no pins** on the real Falcon —
+  the TASK J real-world evidence: the crash repro stayed clean on the real
+  plugin under the exact field shape (editor-open-under-play, mid-play
+  retires). BBCSO leg stalled in LOAD: the flat 60 s no-progress guard fired
+  while `loadInFlight=field-bbcso` (~70 s age) — a GB-scale library's first
+  load outlives 60 s by design. Fixes (harness-only, engine bytes frozen at
+  0.14.0): the 300 s load window (above) + shutdown-before-disconnect on
+  every bail (the RED's engine had no "shutdown received" line and lingered
+  until the ps1's force-kill). Contract unchanged: >=50 clean cycles per
+  plugin. Re-run: same command.
 
 ## Hosted-CI counterpart
 
