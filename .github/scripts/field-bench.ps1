@@ -18,7 +18,7 @@
 # Usage (from the bench folder):
 #   powershell -ExecutionPolicy Bypass -File .\field-bench.ps1
 # Options:
-#   -EngineExe .\scorch-engine.exe     (the 0.14.0 engine from the CI artifact)
+#   -EngineExe .\scorch-engine.exe     (the 0.14.1 engine from the CI artifact)
 #   -ScanDirs "C:\Program Files\Common Files\VST3","C:\Program Files (x86)\Common Files\VST3"
 #   -Cycles 50    -Port 9421    -Seed 20261023    -OutDir .\field-bench-<ts>
 # ============================================================================
@@ -87,8 +87,8 @@ Write-Host "engine: $engineVersion"
 Write-Host "node:   $nodeVersion"
 Write-Host "scan dirs: $($dirsOk -join ' | ')"
 Write-Host "cycles per leg: $Cycles  seed: $Seed  require-both-legs: 1"
-if ($engineVersion -notmatch "0\.14\.0") {
-  Verdict "HALT: the engine did not report 0.14.0 ('$engineVersion'). This bench validates the TASK J branch build — use the scorch-engine-windows-exe artifact from the fieldbench CI run."
+if ($engineVersion -notmatch "0\.14\.1") {
+  Verdict "HALT: the engine did not report 0.14.1 ('$engineVersion'). This bench validates the TASK J + D12 branch build — use the scorch-engine-windows-exe artifact from the LATEST fieldbench CI run (the D12 build, not the older 0.14.0)."
   exit 2
 }
 

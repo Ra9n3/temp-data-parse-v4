@@ -270,3 +270,74 @@ to the ordering.
   standing record, warn-only until TASK H lands it).
 - Engine changes only on the branch; tag approved-45787bb-v1 does not move;
   main carries this fix only after the branch proves green.
+
+## 7. The state-capture thread map + the init watchdog/shutdown contract (D12, 0.14.1)
+
+Field bench run 190901 (2026-10-22): the BBCSO leg's init was declared failed
+by the flat 120 s wall-clock watchdog while the worker sat in phase
+state-capture, and shutdown then hung on the unbounded init-worker join (the
+engine stayed alive until the bench script force-stopped it). D12 closes the
+class. This section is the audit deliverable.
+
+### 7.1 Which thread state-capture uses
+
+| trigger | thread | site |
+|---|---|---|
+| `diff-remove (worker)` | the init worker | the REMOVED pass of a load whose set drops a live instance |
+| `replace (worker)` | the init worker | the CHANGED-entry capture before the commit |
+| `unload (worker)` | the init worker | the explicit `{"plugins":[]}` retire loop |
+| `request` (wire `captureState`) | the message thread (MM), via `callAsync` | `handle_capture_state` → every live instance |
+
+A heavyweight library's `getStateInformation` is seconds-class and must never
+sit inside a message-thread job (the M1-hotfix rule) — the retire-path
+captures live on the worker for exactly that reason. The MM path exists only
+for the wire's explicit captureState request.
+
+### 7.2 The never-against-a-still-initializing-plugin invariant
+
+The published set only ever holds COMMITTED instances (a plugin becomes live
+at commit, after create → state → prepare), so a capture can never target a
+half-created plugin by set membership. The real exposure is CONCURRENCY: a
+committed instance can be mid-restore/mid-prepare inside the worker's
+CURRENT request while an MM captureState walks the same set — two concurrent
+state ops against one plugin is unbounded plugin-internal-lock contention
+(the wedge class run 190901 died in). Enforcement (0.14.1):
+
+- the MM `captureState` path is GATED on `g_pluginLoadActive` — an init in
+  flight skips the capture with a named receipt (`capture SKIPPED (request)
+  — an init is in flight ...`); the frontend re-asks when idle;
+- the worker capture sites are serialized behind the worker itself (one
+  request at a time), which is the invariant's second half by construction.
+
+### 7.3 The progress-aware init watchdog (replaces the 120 s wall clock)
+
+- **stall**: a request is declared failed only after
+  `SCORCH_INIT_PROGRESS_STALL_MS` (default 60 s) of ZERO phase/progress
+  movement. Movement = a phase transition (`init stage=` receipts) or a
+  plugin call returning (the D12 breadcrumb's exit stamp). The old
+  `SCORCH_INIT_TERMINAL_TIMEOUT_MS` knob is honored as an alias so CI's 12 s
+  jam wiring keeps its exact fire moment (a jam has no movement).
+- **hard cap**: `SCORCH_INIT_HARD_CAP_MS` (default 600 s) total per request
+  regardless of movement — slow-but-alive multi-phase loads get headroom,
+  nothing runs forever (`reason=init-hard-cap-timeout`).
+- **heartbeat**: the >10 s warnings now carry `zeroMovement=<s>s` plus the
+  last engine→plugin call breadcrumb every 10 s.
+- **STALL-BUNDLE**: every terminal declaration is preceded by a bundle line —
+  phase, instance, zero-movement age, total age, `lastCall=<site>
+  (INSIDE for|returned <n> ms ago)`, worker tid. `INSIDE` + growing age =
+  wedged call (deadlock class); fresh `returned` stamps = slow-but-alive
+  load. No raw stack is taken: suspending a thread that may hold plugin/JUCE
+  locks is its own wedge risk (declined by policy — the breadcrumb is the
+  sanctioned evidence).
+
+### 7.4 Shutdown never blocks on a wedged init worker
+
+The exit path previously joined the init worker unconditionally — a worker
+wedged inside a plugin call blocked engine exit forever (run 190901's 30 s+
+force-stop). Now: abandonment receipts are emitted BEFORE the wait (every
+still-non-terminal seq gets `reason=engine-shutdown`, the in-flight line
+naming its phase + zero-movement age), the worker gets a bounded 10 s to
+exit, and past the bound it is DETACHED (never joined) — editor/device
+teardown is skipped and the process exits 0 with a named receipt
+(`init worker ABANDONED at shutdown ...`). A wedged worker can never stop
+engine exit; `_Exit(0)` terminates the detached thread with the process.

@@ -2,9 +2,10 @@
 
 Canon: this file is the bench contract. The harness mode is `fieldbench` in
 `.github/scripts/test-engine-protocol.mjs`; the desktop runner script is
-`.github/scripts/field-bench.ps1`. Engine bytes are frozen (0.14.0, the
-TASK J root fix); the bench exercises the exact load/open/close/retire paths
-the app uses.
+`.github/scripts/field-bench.ps1`. The engine build under test is **0.14.1**
+(TASK J root fix + D12: progress-aware init watchdog, gated state-capture,
+shutdown abandonment of a wedged init worker); the bench exercises the exact
+load/open/close/retire paths the app uses.
 
 ## Why this bench exists
 
@@ -33,7 +34,7 @@ halt-and-adjudicate on any crash. On green → merge.
 ## Prerequisites (once)
 
 1. **Node 22 LTS**: `winget install OpenJS.NodeJS.LTS` (check: `node --version`).
-2. **The bench folder** (self-contained): `scorch-engine.exe` (the 0.14.0
+2. **The bench folder** (self-contained): `scorch-engine.exe` (the 0.14.1
    branch build — the `scorch-engine-windows-exe` artifact of the fieldbench
    CI run), `test-engine-protocol.mjs`, `field-bench.ps1` (the three files in
    one folder; the zip provided in chat is exactly this).
@@ -49,7 +50,7 @@ powershell -ExecutionPolicy Bypass -File .\field-bench.ps1
 
 What it does: checks prereqs → records the P1 baseline (engine.log offset,
 existing dumps — nothing is ever deleted) → verifies the engine reports
-0.14.0 → starts the engine **with the REAL audio device** (the field shape)
+0.14.1 → starts the engine **with the REAL audio device** (the field shape)
 → runs the fieldbench machine: scan → play tick 0 → Falcon leg (50 editor
 open/close cycles, seeded jitter 200–600 ms close / 0–160 ms reopen) → mid-play
 BBCSO load (Falcon's module retires UNDER PLAY) → BBCSO leg (50 cycles) →
@@ -111,6 +112,28 @@ Env knobs (harness side, normally untouched): `SCORCH_FB_LOAD_STALL_MS`
   every bail (the RED's engine had no "shutdown received" line and lingered
   until the ps1's force-kill). Contract unchanged: >=50 clean cycles per
   plugin. Re-run: same command.
+- **2026-10-22 (run 190901) — RED, adjudicated ENGINE (D12).** The harness
+  fix held (no wait-limit misfire). Falcon leg **50/50 clean again**. BBCSO:
+  the ENGINE's own init watchdog declared the load failed at 120 s wall
+  clock (terminal-timeout — worker in phase state-capture, the outgoing
+  Falcon's `getStateInformation` on the diff-remove path); then shutdown was
+  sent + the connection closed, but the engine was STILL ALIVE 30 s later
+  and got force-stopped (the unbounded `plugin_init_thread.join()` at exit).
+  Three engine defects named and fixed in **0.14.1**: (1) the watchdog is
+  progress-aware — 60 s zero-movement stall (SCORCH_INIT_PROGRESS_STALL_MS;
+  the old SCORCH_INIT_TERMINAL_TIMEOUT_MS knob aliases it for CI), 600 s
+  hard cap (SCORCH_INIT_HARD_CAP_MS), a 10 s heartbeat (phase +
+  zero-movement + last engine→plugin call), and a STALL-BUNDLE diagnostic
+  line at declaration (slow first load vs deadlock); (2) state-capture
+  audited — the MM `captureState` path is gated off an in-flight init, the
+  worker capture sites target committed instances by construction, and the
+  thread map is documented in docs/window-module-lifecycle.md §7; (3)
+  shutdown abandons a wedged init worker — bounded 10 s wait, detach, skip
+  editor/device teardown, exit 0 with all terminal/exit receipts emitted.
+  Per-leg init phase timings now land as `[plugin] init timing phase=...
+  ms=...` receipts. Contract unchanged: >=50 clean cycles per plugin.
+  Re-run: same command (engine artifact: the NEW scorch-engine-windows-exe
+  0.14.1).
 
 ## Hosted-CI counterpart
 
