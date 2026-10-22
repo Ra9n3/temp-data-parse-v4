@@ -163,7 +163,12 @@
 //     Hosted CI receipts the legs ABSENT and passes (0 field cycles);
 //     SCORCH_FIELD_REQUIRE=1 makes absence fatal on the desktop. P1 armed:
 //     any crash = HALT + adjudicate the dump. Harness-only; engine bytes
-//     frozen (0.14.0).
+//     frozen (0.14.0). Stall windows: 300 s while a load receipt is
+//     outstanding (a GB-scale library's FIRST load streams from disk for
+//     minutes), 60 s for the cycling machine. Bail discipline: ANY fieldbench
+//     bail sends shutdown BEFORE disconnecting — the engine's clean-exit
+//     receipt must exist on every path (the 2026-10-22 RED bailed bare and
+//     the engine lingered).
 
 // Stage 3f-3a runner-only imports: the Windows host-hwnd holder spawns a
 // PowerShell WinForms form and reads its HWND from a file (everything else
@@ -580,6 +585,15 @@ const d10Heartbeat = setInterval(() => {
 const FB_CYCLES = Math.max(1, Number(process.env.SCORCH_FIELD_CYCLES ?? 50));
 const FB_REQUIRE = process.env.SCORCH_FIELD_REQUIRE === "1";
 const FB_SEED = Number(process.env.SCORCH_FIELD_SEED ?? 20261023);
+// Stall windows (the 2026-10-22 bench RED adjudication — harness wait-limit,
+// NOT product): the RED's BBCSO leg stalled when the flat 60 s no-progress
+// guard fired at ~70 s while loadInFlight=field-bbcso — a GB-scale library's
+// first load streams from disk for minutes. While a load receipt is
+// outstanding the no-progress window is FB_LOAD_STALL_MS (default 300 s);
+// the "plugin_state loaded" receipt stamps progress (fbStamp) and hands the
+// clock back to FB_CYCLE_STALL_MS (default 60 s) for the cycling phase.
+const FB_LOAD_STALL_MS = Math.max(1000, Number(process.env.SCORCH_FB_LOAD_STALL_MS ?? 300000));
+const FB_CYCLE_STALL_MS = Math.max(1000, Number(process.env.SCORCH_FB_CYCLE_STALL_MS ?? 60000));
 const fbRand = (() => {
   let s = FB_SEED >>> 0;
   return () => {                       // mulberry32 (same shape as the stress PRNG)
@@ -638,12 +652,48 @@ const fbFinishLegOrStop = () => {
     ws.send(JSON.stringify({ type: "transport", command: "stop" }));
   }
 };
+// Bail discipline (the 2026-10-22 bench RED, second finding): on ANY bail,
+// send shutdown BEFORE disconnecting — the first RED bailed with a bare
+// exit(1), the engine never saw "shutdown received" and lingered until the
+// ps1's 30 s force-kill. fbBail grants the engine a short grace window to
+// carry its clean-exit receipts, then exits 1 regardless (the bench verdict
+// is the ps1's; a bail is a bail). fieldbench-SCOPED on purpose: the other
+// eleven modes' fail() semantics stay byte-identical.
+let fbBailing = false;         // set once by fbBail — the fieldbench message handlers no-op past it
+const fbBail = (msg) => {
+  if (fbBailing) return;
+  fbBailing = true;
+  console.error(`FAIL: ${msg}`);
+  clearInterval(fbHeartbeat);  // no further guard firings during the grace window
+  if (ws.readyState === WebSocket.OPEN) {
+    console.log("[test] field bench bail: sending shutdown BEFORE disconnect (engine exit receipts must exist on every path)");
+    try { ws.send(JSON.stringify({ type: "shutdown" })); } catch { /* socket died mid-bail */ }
+    const t0 = Date.now();
+    const grace = setInterval(() => {
+      if (ws.readyState !== WebSocket.OPEN || Date.now() - t0 > 5000) {
+        clearInterval(grace);
+        process.exit(1);
+      }
+    }, 100);
+    return;                    // the grace window owns the exit
+  }
+  process.exit(1);
+};
+
 const fbHeartbeat = setInterval(() => {
   if (fbPhase === 0 && fbConnectedAt !== 0 && Date.now() - fbConnectedAt > 30000) {
-    fail("field bench: the engine did not answer hello within 30 s of connect");
+    fbBail("field bench: the engine did not answer hello within 30 s of connect");
   }
-  if (fbLastProgressAt !== 0 && fbPhase >= 2 && Date.now() - fbLastProgressAt > 60000) {
-    fail(fbStateDump("no machine progress for 60 s (real plugin GUIs are slow — 60 s is already generous)"));
+  if (fbLastProgressAt !== 0 && fbPhase >= 2) {
+    // The load sub-phase owns its own window (see FB_LOAD_STALL_MS): the
+    // "plugin_state loaded" receipt IS the explicit wait; the cycling phase
+    // keeps the 60 s machine-progress window (FB_CYCLE_STALL_MS).
+    const fbStallMs = fbLoadInFlight != null ? FB_LOAD_STALL_MS : FB_CYCLE_STALL_MS;
+    if (Date.now() - fbLastProgressAt > fbStallMs) {
+      fbBail(fbStateDump(fbLoadInFlight != null
+        ? `no load receipt for ${Math.round(fbStallMs / 1000)} s while loadInFlight=${fbLoadInFlight} (GB-scale first-load window exceeded — the 2026-10-22 RED was the flat 60 s guard firing exactly here)`
+        : `no machine progress for ${Math.round(fbStallMs / 1000)} s (cycling phase — real plugin GUIs are slow)`));
+    }
   }
   console.log(`[test] field bench heartbeat: phase=${fbPhase} leg=${fbLeg + 1}/${fbLegs.length} live=${fbLive} loadInFlight=${fbLoadInFlight} falcon=${fbCyclesDone.falcon}/${FB_CYCLES} bbcso=${fbCyclesDone.bbcso}/${FB_CYCLES} opened=${fbOpened.falcon + fbOpened.bbcso} closed=${fbClosed.falcon + fbClosed.bbcso} peak=${fbPeak.toFixed(3)} errors=${fbErrors.length}`);
 }, 10000);
@@ -804,7 +854,7 @@ const timeout = setTimeout(() => {
   } else {
     console.error(`TIMEOUT at step ${step} (hello=${helloOk} pong=${pongOk} load=${loadOk} noDeviceErr=${noDeviceErrOk} pongAfterErr=${pongAfterErrOk} stillFunctional=${stillFunctionalOk})`);
   }
-  process.exit(1);
+  if (mode === "fieldbench") fbBail("the main wall-clock budget — the TIMEOUT dump above is the state"); else process.exit(1);
 // 3f-2: scan mode now waits out the ProbeHangDummy 90 s probe timeout (plus
 // the describe stage and the fast probes) — 180 s budget. 3f-6: multi mode
 // grows the publish-safe phase (slow-capture replace + following load) whose
@@ -1990,11 +2040,12 @@ ws.addEventListener("message", (event) => {
     }
   } else if (mode === "fieldbench") {
     // ── TASK J: the FIELD bench (see the state block) ──
+    if (fbBailing) return;   // bail in progress — the shutdown grace window owns the wire
     if (msg.type === "hello" && fbPhase === 0) {
-      if (msg.protocol !== 1) fail(`expected protocol 1, got ${msg.protocol}`);
-      if (msg.engineVersion !== "0.14.0") fail(`expected 0.14.0, got ${msg.engineVersion}`);
+      if (msg.protocol !== 1) fbBail(`expected protocol 1, got ${msg.protocol}`);
+      if (msg.engineVersion !== "0.14.0") fbBail(`expected 0.14.0, got ${msg.engineVersion}`);
       const fbDirs = process.argv.slice(4).filter(Boolean);
-      if (fbDirs.length === 0) fail("fieldbench: pass at least one scan dir (argv[4..]) — the desktop bench passes the machine's real VST3 dirs");
+      if (fbDirs.length === 0) fbBail("fieldbench: pass at least one scan dir (argv[4..]) — the desktop bench passes the machine's real VST3 dirs");
       helloOk = true;
       fbStamp();
       console.log(`[test] hello OK (0.14.0) — FIELD BENCH: ${FB_CYCLES} editor cycles per REAL plugin under play, seed=${FB_SEED}, require-both-legs=${FB_REQUIRE} — scanning ${fbDirs.length} dir(s): ${fbDirs.join(", ")}`);
@@ -2008,7 +2059,7 @@ ws.addEventListener("message", (event) => {
       if (bbcsoRow) present.push({ key: "bbcso", row: bbcsoRow, instanceId: "field-bbcso", vehicle: false });
       console.log(`[test] field bench legs: falcon=${falconRow ? `${falconRow.name} (${falconRow.uid})` : "ABSENT"} bbcso=${bbcsoRow ? `${bbcsoRow.name} (${bbcsoRow.uid})` : "ABSENT"} — the scan saw ${(msg.plugins ?? []).length} plugin(s)`);
       if (present.length === 0) {
-        if (FB_REQUIRE) fail("field bench: BOTH legs absent under SCORCH_FIELD_REQUIRE=1 — a desktop bench that cannot see Falcon AND BBCSO is a mis-scanned bench (check the dirs passed to field-bench.ps1)");
+        if (FB_REQUIRE) fbBail("field bench: BOTH legs absent under SCORCH_FIELD_REQUIRE=1 — a desktop bench that cannot see Falcon AND BBCSO is a mis-scanned bench (check the dirs passed to field-bench.ps1)");
         console.log("[test] field legs ABSENT — hosted harness-validation pass (0 field cycles; the desktop run exercises the real legs)");
         fbAbsentPass = true;
         fbStamp();
@@ -2051,7 +2102,7 @@ ws.addEventListener("message", (event) => {
       fbClosed[key]++;
       fbCyclesDone[key] = Math.max(fbCyclesDone[key], fbClosed[key]);
       fbStamp();
-      if (fbOpened[key] !== fbClosed[key]) fail(`field bench: open/close bookkeeping diverged on ${key} (opened=${fbOpened[key]} closed=${fbClosed[key]})`);
+      if (fbOpened[key] !== fbClosed[key]) fbBail(`field bench: open/close bookkeeping diverged on ${key} (opened=${fbOpened[key]} closed=${fbClosed[key]})`);
       if (fbClosed[key] % 10 === 0) console.log(`[test] field bench cycle ${fbClosed[key]}/${FB_CYCLES} on ${key} ok (peak ${fbPeak.toFixed(3)})`);
       if (fbClosed[key] >= FB_CYCLES) fbFinishLegOrStop();
       else setTimeout(fbOpen, fbOpenDelayMs());
@@ -2059,12 +2110,12 @@ ws.addEventListener("message", (event) => {
       fbPeak = Math.max(fbPeak, msg.peak ?? 0);
       fbStamp();
     } else if (msg.type === "plugin_state" && msg.state === "error") {
-      fail(`field bench: plugin_state error — ${JSON.stringify(msg).slice(0, 300)} (the engine's init watchdog declared a real-plugin load failed; evidence above)`);
+      fbBail(`field bench: plugin_state error — ${JSON.stringify(msg).slice(0, 300)} (the engine's init watchdog declared a real-plugin load failed; evidence above)`);
     } else if (msg.type === "error") {
       if (fbLoadInFlight != null)
-        fail(`field bench: a load FAILED while in flight (${msg.code} ${msg.detail ?? ""}) — the bench cannot advance past a dead leg (evidence above)`);
+        fbBail(`field bench: a load FAILED while in flight (${msg.code} ${msg.detail ?? ""}) — the bench cannot advance past a dead leg (evidence above)`);
       if (msg.code === "editor_unavailable")
-        fail(`field bench: editor_unavailable on a REAL plugin (${msg.detail ?? ""}) — the field bench requires real editor windows; halting`);
+        fbBail(`field bench: editor_unavailable on a REAL plugin (${msg.detail ?? ""}) — the field bench requires real editor windows; halting`);
       fbErrors.push(msg);
       console.log(`[test] field bench error receipt (collected): code=${msg.code} detail=${msg.detail ?? ""}`);
     } else if (msg.type === "state" && fbPhase === 4 && msg.playing === false) {
