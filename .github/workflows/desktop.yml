@@ -391,6 +391,48 @@ jobs:
             Stop-Process -Id $procD10.Id -Force -ErrorAction SilentlyContinue
           }
 
+          # Test D11 — TASK J FIELD BENCH harness validation (hosted): the
+          # fieldbench mode's CI path. The real Falcon/BBCSO legs cannot exist
+          # on a hosted runner (commercial libraries) — the machine must
+          # receipt them ABSENT, pass with 0 field cycles, and shut the engine
+          # down clean. THE DESKTOP RUN (field-bench.ps1 on the user's machine,
+          # SCORCH_FIELD_REQUIRE=1) is the real bench; this step proves the
+          # harness surface is green and the absent-legs path is honest.
+          # GATING — new harness surface, not part of the D10 advisory region.
+          Write-Host "=== Test D11: TASK J fieldbench harness validation (hosted: legs absent, 0 field cycles) ==="
+          $engineLogD11 = Join-Path $env:APPDATA "scorch\engine.log"
+          $logLinesBeforeD11 = 0
+          if (Test-Path $engineLogD11) { $logLinesBeforeD11 = (Get-Content $engineLogD11 | Measure-Object -Line).Lines }
+          $procD11 = Start-Process -FilePath "engine/build/scorch-engine.exe" -ArgumentList "--port","9393","--null-audio" -PassThru -NoNewWindow -RedirectStandardOutput "engine-d11-stdout.txt" -RedirectStandardError "engine-d11-stderr.txt"
+          Start-Sleep -Seconds 3
+          $d11Run = $true
+          try {
+            if ($procD11.HasExited) {
+              Write-Host "Engine D11 exited early (code=$($procD11.ExitCode)). stdout:"
+              if (Test-Path engine-d11-stdout.txt) { Get-Content engine-d11-stdout.txt }
+              throw "D11: Engine D11 process exited before test could connect"
+            }
+            node .github/scripts/test-engine-protocol.mjs 9393 fieldbench "$env:SCAN_FIXTURES"
+            if ($LASTEXITCODE -ne 0) {
+              Show-StepLogTail -Path $engineLogD11 -Proc $procD11 -Label "Engine D11"
+              Write-Host "Engine D11 stdout:"
+              if (Test-Path engine-d11-stdout.txt) { Get-Content engine-d11-stdout.txt }
+              throw "D11: fieldbench harness failed (mjs exit $LASTEXITCODE)"
+            }
+            # TASK D machinery: wait for ENGINE EXIT before reading the log —
+            # the file is final once the process is gone (exit-verified read).
+            $procD11.WaitForExit(20000) | Out-Null
+            if (-not $procD11.HasExited) { Show-StepLogTail -Path $engineLogD11 -Proc $procD11 -Label "Engine D11"; throw "D11: Engine D11 still running 20s after the harness exit — shutdown hung" }
+            if ($procD11.ExitCode -ne 0) { Show-StepLogTail -Path $engineLogD11 -Proc $procD11 -Label "Engine D11"; throw "D11: Engine D11 exited code=$($procD11.ExitCode)" }
+            Write-Host "Engine D11 exit verified BEFORE the log read (file final: exit 0)"
+            $d11Lines = Get-Content $engineLogD11 | Select-Object -Skip $logLinesBeforeD11
+            $crashD11 = @($d11Lines | Select-String -Pattern "\[crash\]")
+            if (($crashD11 | Measure-Object).Count -ne 0) { $crashD11 | ForEach-Object { Write-Host $_.Line }; throw "D11: the in-process crash channel fired during the fieldbench validation — adjudicate the dump" }
+            Write-Host "D11 receipts: fieldbench hosted pass — legs absent, 0 field cycles, zero [crash], clean exit 0"
+          } finally {
+            Stop-Process -Id $procD11.Id -Force -ErrorAction SilentlyContinue
+          }
+
           # Test C — Stage 3c-1 VST3 scan protocol: valid plugin found (real
           # name + vendor), CRASH-ISOLATION (worker dies → failed entry, scan
           # + engine survive), corrupt .vst3 graceful, default-dir scan clean.

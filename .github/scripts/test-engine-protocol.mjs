@@ -153,6 +153,18 @@
 //     terminal receipt counting, the stage receipts, and the >10s pending /
 //     queued warnings are asserted on the engine.log side by desktop.yml.
 
+//   fieldbench (argv[4..] = scan dirs) — TASK J: the FIELD bench (the
+//     adjudication's desktop leg). Real Falcon + BBCSO found by the scan ->
+//     >=50 editor open/close cycles PER PLUGIN under active playback (seeded
+//     jitter) -> each cycled module retired UNDER PLAY by the next leg's load
+//     (the '[module-guard] retire instance=field-<plugin> orphan=yes windows=0'
+//     receipts are engine.log's half — field-bench.ps1 counts them) -> a final
+//     vehicle re-load retires the last cycled module (nothing frees at exit).
+//     Hosted CI receipts the legs ABSENT and passes (0 field cycles);
+//     SCORCH_FIELD_REQUIRE=1 makes absence fatal on the desktop. P1 armed:
+//     any crash = HALT + adjudicate the dump. Harness-only; engine bytes
+//     frozen (0.14.0).
+
 // Stage 3f-3a runner-only imports: the Windows host-hwnd holder spawns a
 // PowerShell WinForms form and reads its HWND from a file (everything else
 // in this runner is dependency-free).
@@ -548,6 +560,93 @@ const d10Heartbeat = setInterval(() => {
   console.log(`[test] stress heartbeat: phase=${d10Phase} cycles=${d10Cycle}/${D10_CYCLES} opened=${d10Opened} closed=${d10Closed} live=${d10Live} swapInFlight=${d10SwapInFlight} seq=${d10SwapSeq} peak=${d10Peak.toFixed(3)} errors=${d10Errors.length}`);
 }, 5000);
 
+// ── TASK J FIELD BENCH (the adjudication's desktop leg: the REAL plugins) ────
+// The stress mode proves the mechanism on fixtures; the TASK J adjudication
+// (directive 2, 2026-10-22) demands the FIELD bench: real Falcon + BBCSO on
+// the desktop runner, >=50 clean editor open/close cycles PER PLUGIN under
+// active playback, P1 armed, halt-and-adjudicate on any crash. This mode is
+// that bench (harness-only — engine bytes frozen; the load/open/close/retire
+// paths are the exact ones the app uses). Machine: transport play FIRST (the
+// phase-2 stall lesson) -> leg 1 load -> N editor cycles (seeded jitter) ->
+// mid-play load of leg 2 (the outgoing module RETIRES UNDER PLAY — its
+// '[module-guard] retire instance=field-<plugin> orphan=yes windows=0'
+// teardown receipts land in engine.log; field-bench.ps1 counts them) -> leg 2
+// cycles -> a final vehicle re-load of leg 1's plugin retires the LAST
+// cycled module (shutdown hard-exits past the deliberately-leaked graph — no
+// module ever frees at exit; the last retire must be manufactured). On hosted
+// CI neither real plugin exists: the machine receipts the legs ABSENT and
+// passes (0 field cycles). SCORCH_FIELD_REQUIRE=1 (set by field-bench.ps1)
+// makes absence fatal — a mis-scanned desktop cannot pass silently.
+const FB_CYCLES = Math.max(1, Number(process.env.SCORCH_FIELD_CYCLES ?? 50));
+const FB_REQUIRE = process.env.SCORCH_FIELD_REQUIRE === "1";
+const FB_SEED = Number(process.env.SCORCH_FIELD_SEED ?? 20261023);
+const fbRand = (() => {
+  let s = FB_SEED >>> 0;
+  return () => {                       // mulberry32 (same shape as the stress PRNG)
+    s = (s + 0x6D2B79F5) | 0;
+    let t = Math.imul(s ^ (s >>> 15), 1 | s);
+    t = (t ^ (t >>> 14)) >>> 0;
+    return t / 4294967296;
+  };
+})();
+const fbCloseDelayMs = () => 200 + Math.floor(fbRand() * 401);   // 200..600 ms — real GUIs close slower; still sweeps the ~500 ms deferred-free window
+const fbOpenDelayMs = () => Math.floor(fbRand() * 161);          // 0..160 ms
+const FB_META = { bpm: 120, ppqn: 960, timeSignature: { numerator: 4, denominator: 4 }, endTick: 8448 };
+const fbEvents = [
+  { eventType: "NOTE_ON", channel: 1, data1: 60, data2: 100, timestampTicks: 480, trackId: "t1" },
+  { eventType: "NOTE_OFF", channel: 1, data1: 60, data2: 0, timestampTicks: 8447, trackId: "t1" },
+];
+let fbPhase = 0;               // 0 hello, 1 scan, 2 legs/cycling, 4 stopping
+let fbLegs = [];               // [{key, row, instanceId, vehicle}] in load order (last = the retire vehicle)
+let fbLeg = -1;                // index of the leg currently cycling
+let fbLive = null;             // instanceId whose editor is cycling
+let fbLoadInFlight = null;     // instanceId awaiting plugin_state loaded
+let fbSeq = 30;                // load seq counter (this machine owns the wire)
+let fbOpened = { falcon: 0, bbcso: 0 };
+let fbClosed = { falcon: 0, bbcso: 0 };
+let fbCyclesDone = { falcon: 0, bbcso: 0 };
+let fbPeak = 0, fbErrors = [];
+let fbLastProgressAt = 0;
+let fbConnectedAt = 0;
+const fbStamp = () => { fbLastProgressAt = Date.now(); };
+const fbStateDump = (why) =>
+  `field bench stall (${why}): phase=${fbPhase} leg=${fbLeg}/${fbLegs.length} live=${fbLive} loadInFlight=${fbLoadInFlight} falcon=${fbCyclesDone.falcon}/${FB_CYCLES} bbcso=${fbCyclesDone.bbcso}/${FB_CYCLES} opened=${fbOpened.falcon + fbOpened.bbcso} closed=${fbClosed.falcon + fbClosed.bbcso} peak=${fbPeak.toFixed(3)} errors=${fbErrors.length} | age since last progress=${Date.now() - fbLastProgressAt}ms | the load payload (byte-length = the fingerprint) is logged above as "field bench load payload"`;
+const fbSendLoad = (leg) => {
+  const payload = JSON.stringify({
+    type: "load", seq: ++fbSeq, events: fbEvents, meta: FB_META,
+    routing: { t1: { inst: leg.instanceId, ch: 1 } },
+    plugins: [{ instanceId: leg.instanceId, uid: leg.row.uid, path: leg.row.path, name: leg.row.name }],
+  });
+  console.log(`[test] field bench load payload (${payload.length} bytes): ${payload}`);
+  ws.send(payload);
+};
+const fbOpen = () => ws.send(JSON.stringify({ type: "openEditor", instanceId: fbLive }));
+const fbFinishLegOrStop = () => {
+  const nextIdx = fbLeg + 1;
+  if (nextIdx < fbLegs.length) {
+    const next = fbLegs[nextIdx];
+    fbLeg = nextIdx;
+    fbLoadInFlight = next.instanceId;
+    console.log(`[test] leg complete — mid-play load of ${next.row.name}${next.vehicle ? " (the RETIRE VEHICLE: its load retires the last cycled module under play; no cycles on this leg)" : ""}: the outgoing module retires UNDER PLAY (its [module-guard] retire windows=0 receipt is engine.log's half — field-bench.ps1 counts it)`);
+    fbStamp();
+    fbSendLoad(next);
+  } else {
+    console.log(`[test] all field legs done — stopping the transport (falcon=${fbCyclesDone.falcon}/${FB_CYCLES} bbcso=${fbCyclesDone.bbcso}/${FB_CYCLES})`);
+    fbPhase = 4;
+    fbStamp();
+    ws.send(JSON.stringify({ type: "transport", command: "stop" }));
+  }
+};
+const fbHeartbeat = setInterval(() => {
+  if (fbPhase === 0 && fbConnectedAt !== 0 && Date.now() - fbConnectedAt > 30000) {
+    fail("field bench: the engine did not answer hello within 30 s of connect");
+  }
+  if (fbLastProgressAt !== 0 && fbPhase >= 2 && Date.now() - fbLastProgressAt > 60000) {
+    fail(fbStateDump("no machine progress for 60 s (real plugin GUIs are slow — 60 s is already generous)"));
+  }
+  console.log(`[test] field bench heartbeat: phase=${fbPhase} leg=${fbLeg + 1}/${fbLegs.length} live=${fbLive} loadInFlight=${fbLoadInFlight} falcon=${fbCyclesDone.falcon}/${FB_CYCLES} bbcso=${fbCyclesDone.bbcso}/${FB_CYCLES} opened=${fbOpened.falcon + fbOpened.bbcso} closed=${fbClosed.falcon + fbClosed.bbcso} peak=${fbPeak.toFixed(3)} errors=${fbErrors.length}`);
+}, 10000);
+
 const limiterOff = process.env.SCORCH_LIMITER_OFF != null;
 
 // Events chosen so a note IS sounding when the test stops (tick ~600): the
@@ -699,6 +798,8 @@ const timeout = setTimeout(() => {
     console.error(`TIMEOUT at step ${step} phase=${trPhase} (scan=${trScanPlugin ? "ok" : "none"} jamAck=${trJamAckFast}@${trJamAckMs}ms jamErr=${trJamErr} queuedErr=${trQueuedErr} clean=${trCleanLoaded} ticks=${trPlayTicks} stop=${trStopped} reuse=${trReuseCount} edOpen=${trEditorOpenOk} edClose=${trEditorCloseOk} carried=${trEditorCarriedOk} headless=${trHeadlessSkip} supp=${trSuppLoaded} bogus2=${trBogus2Err})`);
   } else if (mode === "stress") {
     console.error(`TIMEOUT at step ${step} phase=${d10Phase} (A=${d10ScanA ? "ok" : "none"} B=${d10ScanB ? "ok" : "none"} cycles=${d10Cycle}/${D10_CYCLES} opened=${d10Opened} closed=${d10Closed} live=${d10Live} swapInFlight=${d10SwapInFlight} seq=${d10SwapSeq} peak=${d10Peak.toFixed(3)} errors=${d10Errors.length})`);
+  } else if (mode === "fieldbench") {
+    console.error(`TIMEOUT at step ${step} ${fbStateDump("the main wall-clock budget")}`);
   } else {
     console.error(`TIMEOUT at step ${step} (hello=${helloOk} pong=${pongOk} load=${loadOk} noDeviceErr=${noDeviceErrOk} pongAfterErr=${pongAfterErrOk} stillFunctional=${stillFunctionalOk})`);
   }
@@ -710,7 +811,7 @@ const timeout = setTimeout(() => {
 // loaded-receipt bound is asserted EXPLICITLY per phase below — but the
 // wall-clock budget still covers them, plus the Stage 3h stall probe (a 2.5 s
 // audio freeze + its tail): 120 s.
-}, mode === "scan" ? 180000 : mode === "host" ? 150000 : mode === "multi" ? 120000 : mode === "latency" ? 90000 : mode === "slowload" ? 90000 : mode === "terminal" ? 150000 : mode === "routing" ? 120000 : mode === "strips" ? 150000 : mode === "limiter" ? 90000 : mode === "editor" ? 60000 : mode === "stress" ? 360000 : 30000);
+}, mode === "scan" ? 180000 : mode === "host" ? 150000 : mode === "multi" ? 120000 : mode === "latency" ? 90000 : mode === "slowload" ? 90000 : mode === "terminal" ? 150000 : mode === "routing" ? 120000 : mode === "strips" ? 150000 : mode === "limiter" ? 90000 : mode === "editor" ? 60000 : mode === "stress" ? 360000 : mode === "fieldbench" ? 1500000 : 30000);
 
 // scan-mode flags
 let scanSent = false, scanResultOk = false, aliveAfterCrashOk = false, defaultScanOk = false;
@@ -1155,6 +1256,7 @@ function finishAndShutdown() {
 
 ws.addEventListener("open", () => {
   if (mode === "stress") d10ConnectedAt = Date.now();
+  if (mode === "fieldbench") fbConnectedAt = Date.now();
   console.log(`[test] connected to ws://127.0.0.1:${port} (mode=${mode}), waiting for hello...`);
 });
 
@@ -1883,6 +1985,88 @@ ws.addEventListener("message", (event) => {
     } else if (msg.type === "state" && d10Phase === 4 && msg.playing === false) {
       console.log(`[test] stop clean — stress complete: cycles=${d10Cycle} opened=${d10Opened} closed=${d10Closed} swaps=${d10SwapSeq - 10} benchFalcon=${d10Falcon ? "present" : "absent"} benchBbcso=${d10Bbcso ? "present" : "absent"}`);
       clearInterval(d10Heartbeat);
+      finishAndShutdown();
+    }
+  } else if (mode === "fieldbench") {
+    // ── TASK J: the FIELD bench (see the state block) ──
+    if (msg.type === "hello" && fbPhase === 0) {
+      if (msg.protocol !== 1) fail(`expected protocol 1, got ${msg.protocol}`);
+      if (msg.engineVersion !== "0.14.0") fail(`expected 0.14.0, got ${msg.engineVersion}`);
+      const fbDirs = process.argv.slice(4).filter(Boolean);
+      if (fbDirs.length === 0) fail("fieldbench: pass at least one scan dir (argv[4..]) — the desktop bench passes the machine's real VST3 dirs");
+      helloOk = true;
+      fbStamp();
+      console.log(`[test] hello OK (0.14.0) — FIELD BENCH: ${FB_CYCLES} editor cycles per REAL plugin under play, seed=${FB_SEED}, require-both-legs=${FB_REQUIRE} — scanning ${fbDirs.length} dir(s): ${fbDirs.join(", ")}`);
+      fbPhase = 1;
+      ws.send(JSON.stringify({ type: "scan", dirs: fbDirs }));
+    } else if (msg.type === "scan_result" && fbPhase === 1) {
+      const falconRow = (msg.plugins ?? []).find((p) => /falcon/i.test(p.name ?? ""));
+      const bbcsoRow = (msg.plugins ?? []).find((p) => /bbcso|bbc symphony/i.test(p.name ?? ""));
+      const present = [];
+      if (falconRow) present.push({ key: "falcon", row: falconRow, instanceId: "field-falcon", vehicle: false });
+      if (bbcsoRow) present.push({ key: "bbcso", row: bbcsoRow, instanceId: "field-bbcso", vehicle: false });
+      console.log(`[test] field bench legs: falcon=${falconRow ? `${falconRow.name} (${falconRow.uid})` : "ABSENT"} bbcso=${bbcsoRow ? `${bbcsoRow.name} (${bbcsoRow.uid})` : "ABSENT"} — the scan saw ${(msg.plugins ?? []).length} plugin(s)`);
+      if (present.length === 0) {
+        if (FB_REQUIRE) fail("field bench: BOTH legs absent under SCORCH_FIELD_REQUIRE=1 — a desktop bench that cannot see Falcon AND BBCSO is a mis-scanned bench (check the dirs passed to field-bench.ps1)");
+        console.log("[test] field legs ABSENT — hosted harness-validation pass (0 field cycles; the desktop run exercises the real legs)");
+        fbStamp();
+        finishAndShutdown();
+        return;
+      }
+      fbLegs = present.slice();
+      fbLegs.push({ key: present[0].key, row: present[0].row, instanceId: present[0].instanceId + "2", vehicle: true });
+      // PLAY FIRST (the phase-2 stall lesson): the transport rolls while the
+      // first real plugin loads; the editor cycles and the module retires all
+      // happen UNDER ACTIVE PLAYBACK (the field shape the TASK F dump died in).
+      fbPhase = 2;
+      fbLeg = 0;
+      fbLoadInFlight = fbLegs[0].instanceId;
+      console.log(`[test] leg 1/${fbLegs.length}: ${fbLegs[0].row.name} — transport play tick 0 (PLAY FIRST; the plugin loads async under the rolling transport)`);
+      fbStamp();
+      ws.send(JSON.stringify({ type: "transport", command: "play", tick: 0 }));
+      fbSendLoad(fbLegs[0]);
+    } else if (msg.type === "plugin_state" && msg.state === "loaded" && fbPhase === 2 &&
+               fbLoadInFlight != null && String(msg.instanceId ?? "") === fbLoadInFlight) {
+      fbStamp();
+      fbLive = fbLoadInFlight;
+      fbLoadInFlight = null;
+      const leg = fbLegs[fbLeg];
+      if (leg.vehicle || fbCyclesDone[leg.key] > 0) {
+        console.log(`[test] ${fbLive} (${leg.row.name}) live — retire-vehicle leg: no cycles, advancing to stop (the module it retired is engine.log's half of the receipt)`);
+        fbFinishLegOrStop();
+      } else {
+        console.log(`[test] ${fbLive} (${leg.row.name}) live under play — ${FB_CYCLES} editor cycles begin`);
+        fbOpen();
+      }
+    } else if (msg.type === "editorOpened" && fbPhase === 2 && fbLive != null &&
+               String(msg.instanceId ?? "") === fbLive) {
+      fbOpened[fbLegs[fbLeg].key]++;
+      fbStamp();
+      setTimeout(() => ws.send(JSON.stringify({ type: "closeEditor", instanceId: fbLive })), fbCloseDelayMs());
+    } else if (msg.type === "editorClosed" && fbPhase === 2 && fbLive != null &&
+               String(msg.instanceId ?? "") === fbLive) {
+      const key = fbLegs[fbLeg].key;
+      fbClosed[key]++;
+      fbCyclesDone[key] = Math.max(fbCyclesDone[key], fbClosed[key]);
+      fbStamp();
+      if (fbOpened[key] !== fbClosed[key]) fail(`field bench: open/close bookkeeping diverged on ${key} (opened=${fbOpened[key]} closed=${fbClosed[key]})`);
+      if (fbClosed[key] % 10 === 0) console.log(`[test] field bench cycle ${fbClosed[key]}/${FB_CYCLES} on ${key} ok (peak ${fbPeak.toFixed(3)})`);
+      if (fbClosed[key] >= FB_CYCLES) fbFinishLegOrStop();
+      else setTimeout(fbOpen, fbOpenDelayMs());
+    } else if (msg.type === "state" && fbPhase === 2 && msg.playing) {
+      fbPeak = Math.max(fbPeak, msg.peak ?? 0);
+      fbStamp();
+    } else if (msg.type === "plugin_state" && msg.state === "error") {
+      fail(`field bench: plugin_state error — ${JSON.stringify(msg).slice(0, 300)} (the engine's init watchdog declared a real-plugin load failed; evidence above)`);
+    } else if (msg.type === "error") {
+      if (fbLoadInFlight != null)
+        fail(`field bench: a load FAILED while in flight (${msg.code} ${msg.detail ?? ""}) — the bench cannot advance past a dead leg (evidence above)`);
+      if (msg.code === "editor_unavailable")
+        fail(`field bench: editor_unavailable on a REAL plugin (${msg.detail ?? ""}) — the field bench requires real editor windows; halting`);
+      fbErrors.push(msg);
+      console.log(`[test] field bench error receipt (collected): code=${msg.code} detail=${msg.detail ?? ""}`);
+    } else if (msg.type === "state" && fbPhase === 4 && msg.playing === false) {
+      console.log(`[test] stop clean — FIELD BENCH machine complete: falcon=${fbCyclesDone.falcon}/${FB_CYCLES} bbcso=${fbCyclesDone.bbcso}/${FB_CYCLES} opened=${fbOpened.falcon + fbOpened.bbcso} closed=${fbClosed.falcon + fbClosed.bbcso} loads=${fbSeq - 30} errors=${fbErrors.length}`);
       finishAndShutdown();
     }
   } else if (mode === "slowload") {
@@ -3398,6 +3582,35 @@ ws.addEventListener("close", () => {
       process.exit(0);
     } else {
       console.error(`FAILED: hello=${helloOk} A=${d10ScanA ? "ok" : "none"} B=${d10ScanB ? "ok" : "none"} cycles=${d10Cycle}/${D10_CYCLES} opened=${d10Opened} closed=${d10Closed} errors=${d10Errors.length} phase=${d10Phase}`);
+      process.exit(1);
+    }
+  } else if (mode === "fieldbench") {
+    const fbCycleLegs = fbLegs.filter((l) => !l.vehicle);
+    const legsPresent = fbCycleLegs.length > 0;
+    allOk = helloOk && fbErrors.length === 0 && fbLoadInFlight == null && fbPhase >= 4 &&
+      (!legsPresent ||
+        (fbCycleLegs.every((l) => fbCyclesDone[l.key] >= FB_CYCLES && fbOpened[l.key] === fbClosed[l.key]) &&
+         fbClosed.falcon + fbClosed.bbcso === fbOpened.falcon + fbOpened.bbcso)) &&
+      (!FB_REQUIRE || legsPresent);
+    if (allOk) {
+      console.log("");
+      console.log("========================================");
+      if (!legsPresent) {
+        console.log("FIELD BENCH PASSED (hosted harness-validation — legs absent):");
+        console.log("  falcon=absent bbcso=absent — 0 field cycles (CI cannot host commercial libraries)");
+        console.log("  the machine scanned, shut down clean, and would have exercised the real legs on the desktop");
+      } else {
+        console.log("FIELD BENCH PASSED (editor-open-under-play, the REAL plugins):");
+        for (const l of fbCycleLegs)
+          console.log(`  ${l.key}: ${fbCyclesDone[l.key]}/${FB_CYCLES} editor cycles UNDER ACTIVE PLAYBACK (opened=${fbOpened[l.key]} closed=${fbClosed[l.key]})`);
+        console.log(`  legs: ${fbLegs.map((l) => l.instanceId).join(" -> ")} — each cycled module retired UNDER PLAY at the next load`);
+        console.log(`  errorReceipts=${fbErrors.length}, zero crash receipts on the wire; P1 ARMED (any crash = HALT + adjudicate the dump in %APPDATA%/scorch/crashes)`);
+        console.log("  engine.log side ([module-guard] retire windows=0 counts + pin count): field-bench.ps1's half — see bench-receipt.txt");
+      }
+      console.log("========================================");
+      process.exit(0);
+    } else {
+      console.error(`FAILED: hello=${helloOk} legs=${fbLegs.length} falcon=${fbCyclesDone.falcon}/${FB_CYCLES} bbcso=${fbCyclesDone.bbcso}/${FB_CYCLES} opened=${fbOpened.falcon + fbOpened.bbcso} closed=${fbClosed.falcon + fbClosed.bbcso} errors=${fbErrors.length} loadInFlight=${fbLoadInFlight} phase=${fbPhase}`);
       process.exit(1);
     }
   } else {
