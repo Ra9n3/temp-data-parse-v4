@@ -4816,12 +4816,14 @@ std::string loadHostedPlugin(const juce::var& pluginVar, const std::string& inst
                              int slot,
                              std::unique_ptr<HostedPlugin>& out,
                              std::vector<BusRouting> routing = {},
-                             bool multiTimbral = false) {
+                             bool multiTimbral = false,
+                             std::string* resolvedPathOut = nullptr) {
     juce::DynamicObject* pobj = pluginVar.getDynamicObject();
     if (pobj == nullptr) return "plugin field must be an object";
     const std::string path = pobj->getProperty("path").toString().toStdString();
     const std::string uid = pobj->getProperty("uid").toString().toStdString();
     if (path.empty()) return "plugin.path is required";
+    if (resolvedPathOut != nullptr) *resolvedPathOut = path;   // D13: the pre-commit destroy-ordering guard needs the module path
     if (instanceId.empty()) return "plugin.instanceId is required (multi-instance hosting)";
     try {
 #ifdef _WIN32
@@ -8255,6 +8257,7 @@ int main(int argc, char** argv) {
                     ? "changed" : "added";
                 const auto te0 = std::chrono::steady_clock::now();
                 std::unique_ptr<HostedPlugin> h;
+                std::string hModulePath;   // D13: the pre-commit destroy-ordering guard's module path
                 // Stage 3f-6: phase watchdog record — a plugin hanging inside
                 // createPluginInstance is named after 60 s by the watchdog
                 // thread (log only). 0.9.2: the guard also emits the stage
@@ -8263,8 +8266,37 @@ int main(int argc, char** argv) {
                 {
                     InitPhaseGuard pg("instantiate", e.instanceId, req.seq);
                     InitBreadcrumbScope _bc("loadHostedPlugin(create)");   // D12
-                    hostErr = loadHostedPlugin(e.pluginVar, e.instanceId, e.slot, h, e.routing, e.multiTimbral);
+                    hostErr = loadHostedPlugin(e.pluginVar, e.instanceId, e.slot, h, e.routing, e.multiTimbral, &hModulePath);
                 }
+#ifdef _WIN32
+                // ── D13: PRE-COMMIT DESTROY ORDERING (the hole run
+                // 39818111671's dump named) ──
+                // The R2 load-abort teardown covers death INSIDE
+                // loadHostedPlugin; past it, `h` owns the instance — and
+                // EVERY destruction outside a commit (the abandoned discard,
+                // the superseded discard, the shutdown break) freed the
+                // module with NO destroy→drain→verify ordering: a window the
+                // half-booted GUI stack left behind stayed ARMED with its
+                // WNDPROC in the module, and the free unmapped it (last
+                // refcount) — the next editor activity pumped the ghost
+                // (EXEC-DEP, user32 dispatch frame, the TASK F signature).
+                // This guard runs the WORKER-side teardown (the windows'
+                // owner is this thread; moduleIsOrphaned skips when another
+                // live instance or a same-path load still holds the module
+                // ref — then the free is a decrement, not an unmap) right
+                // before ~h, and DISARMS at commit (h.release() — the
+                // committed instance leaves via the live-set retire path,
+                // which has its own ordering).
+                struct PreCommitDestroyGuard {
+                    const std::unique_ptr<HostedPlugin>* hRef;
+                    const std::string* iidRef;
+                    const std::string* pathRef;
+                    ~PreCommitDestroyGuard() {
+                        if (hRef->get() != nullptr && !pathRef->empty())
+                            scorchguard::teardownModuleWindowsForLoadAbort(*iidRef, *pathRef);
+                    }
+                } preCommitDestroyGuard{&h, &e.instanceId, &hModulePath};
+#endif
                 outcomes[i].initMs = std::chrono::duration_cast<std::chrono::milliseconds>(
                     std::chrono::steady_clock::now() - te0).count();
                 {
