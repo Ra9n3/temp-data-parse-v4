@@ -2,15 +2,19 @@
 
 Canon: this file is the bench contract. The harness mode is `fieldbench` in
 `.github/scripts/test-engine-protocol.mjs`; the desktop runner script is
-`.github/scripts/field-bench.ps1`. The engine build under test is **0.14.1**
-(TASK J root fix + D12: progress-aware init watchdog, gated state-capture,
-shutdown abandonment of a wedged init worker); the bench exercises the exact
-load/open/close/retire paths the app uses. The build **self-reports its
-commit** (CMake pins `SCORCH_ENGINE_COMMIT` from `git rev-parse` at configure
-time; `-dirty` on a dirty tree, `unknown` on a non-git configure) in the
-`--version` output, the hello payload, and the `[engine] start` receipt — a
-receipt that names only a version does not identify a build; every receipt
-from 0.14.1 on names the commit too.
+`.github/scripts/field-bench.ps1`. The engine build under test is **0.14.2**
+(TASK J root fix + D13: the 0.14.1 init rework REVERTED to the 0.14.0
+semantics — flat 120 s wall-clock watchdog, state-capture at the exact
+0.14.0 placement — plus real diagnostics: 10 s init heartbeats, an
+ALL-THREAD `init-stall-*.dmp` at every watchdog declaration, and
+dump-then-TERMINATE on any AV-class exception); the bench exercises the
+exact load/open/close/retire paths the app uses. The build **self-reports
+its commit** (CMake pins `SCORCH_ENGINE_COMMIT` from `git rev-parse` at
+configure time; `-dirty` on a dirty tree, `unknown` on a non-git configure)
+in the `--version` output, the hello payload, and the `[engine] start`
+receipt — a receipt that names only a version does not identify a build;
+every receipt from 0.14.1 on names the commit too, and the receipt's FIRST
+LINE is the commit.
 
 ## Why this bench exists
 
@@ -26,12 +30,13 @@ halt-and-adjudicate on any crash. On green → merge.
 ## Receipt contract (what the adjudication requires, per plugin)
 
 - **run record**: the `bench-receipt.txt` file the script writes (+ the
-  console transcript). Attach both back to the chat.
-- **engine build identity**: the receipt's `engine:` + `commit:` lines — the
-  version AND the self-reported build commit (wire-attested via the harness
-  transcript's `engine build: 0.14.1 commit=…` line; the `--version` string is
-  the fallback). A receipt without a commit describes a pre-embed build and
-  does not pin the bytes.
+  console transcript). Attach both back to the chat. The receipt's FIRST
+  LINE is the engine build commit (D13 receipt header — one line, first).
+- **engine build identity**: the receipt's header + `engine:`/`commit:`
+  lines — the version AND the self-reported build commit (wire-attested via
+  the harness transcript's `engine build: 0.14.2 commit=…` line; the
+  `--version` string is the fallback). A receipt without a commit describes
+  a pre-embed build and does not pin the bytes.
 - **cycle counts**: `falcon=N/50`, `bbcso=N/50` (wire editorOpened/editorClosed
   receipts; the harness fails on any open/close bookkeeping divergence).
 - **windows=0 receipt count**: the number of
@@ -160,6 +165,36 @@ Env knobs (harness side, normally untouched): `SCORCH_FB_LOAD_STALL_MS`
   build on, every field receipt self-pins its engine commit — a re-run
   receipt must name the commit of the artifact CI delivered, and a mismatch
   between the exe pulled and the run recorded is visible on its face.
+- **2026-10-22 (dump 211647) — RED, adjudicated ENGINE: the 0.14.1 init
+  rework REVERTED (D13, engine 0.14.2).** The crash: null-read inside
+  Falcon.vst3+0x984386 ON THE WINDOW-MESSAGE THREAD (our pump → user32
+  dispatch → Falcon WNDPROC region); Falcon was still LOADED and its init
+  never completed; the unloaded-module list held only nvdlistx.dll (NVIDIA,
+  benign) — NOT the dangling-WNDPROC class; a LIVE, HALF-WIRED plugin met
+  the pump. Bisect verdict (code-read + the twice-clean 0.14.0 field runs):
+  the 0.14.1 progress-aware stall (60 s zero-movement) was the firing pin —
+  a GB-scale first load spends minutes inside ONE engine→plugin call (no
+  phase transitions, no breadcrumb returns), so its zero-movement clock
+  crossed 60 s while the load was HEALTHY; the watchdog declared it failed
+  and armed the abandon/discard machinery; the MM state-capture gate is
+  reverted with it. REVERTED to the exact 0.14.0 semantics: the FLAT wall
+  clock (`SCORCH_INIT_TERMINAL_TIMEOUT_MS`, default 120 s; the Falcon leg
+  passed clean twice under it) and unconditional state-capture placement.
+  KEPT: the shutdown abandonment (exit-path only — never declares, never
+  touches plugin state — not in the dump-211647 chain) and all additive
+  receipts (per-phase timings, breadcrumbs, heartbeats). NEW diagnostics
+  (mandatory): 10 s init heartbeats (phase + elapsed + zero-movement + last
+  call), an ALL-THREAD `init-stall-*.dmp` at EVERY watchdog declaration (the
+  worker's REAL stack — the D12 no-suspend policy is superseded), and
+  dump-then-TERMINATE on any AV-class first-chance exception (the process
+  never survives its own crash dump; the M1 audio-probe AV keeps its
+  thread-local carve-out). Invariant, non-negotiable, restated in
+  window-module-lifecycle.md §7: a plugin window receives dispatched
+  messages ONLY while its engine wrapper object is fully constructed and
+  attached; any abandon/abort path destroys the window on its owner thread
+  and drains messages BEFORE touching the wrapper. Contract unchanged:
+  >=50 clean cycles per plugin. Re-run: same command (engine artifact: the
+  NEW scorch-engine-windows-exe 0.14.2).
 
 ## Hosted-CI counterpart
 

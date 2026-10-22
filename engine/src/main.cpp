@@ -197,16 +197,16 @@
 //         "[plugin] init stage=<instantiate|state-restore|prepare|commit|
 //         publish|state-capture> instance= seq="; a request pending or
 //         queued >10s warns every 10 s ("init pending >10s" / "init queued
-//         >10s", with phase + zero-movement age + the last engine→plugin
-//         call breadcrumb — the D12 heartbeat); a request that stops MOVING
-//         (no phase/progress stamp) for SCORCH_INIT_PROGRESS_STALL_MS
-//         (default 60000 ms; SCORCH_INIT_TERMINAL_TIMEOUT_MS honored as the
-//         CI alias) — or exceeds SCORCH_INIT_HARD_CAP_MS total (default
-//         600000 ms) — is DECLARED failed by the watchdog
-//         ("reason=terminal-timeout" for the stalled worker's request,
-//         "reason=queued-behind-jammed-init" for the ones queued behind it,
-//         "reason=init-hard-cap-timeout" at the cap) with a wire
-//         plugin_state error twin and a STALL-BUNDLE diagnostic line.
+//         >10s", with phase + elapsed + zero-movement age + the last
+//         engine→plugin call breadcrumb — the D13 heartbeat); a request
+//         still without its terminal receipt after
+//         SCORCH_INIT_TERMINAL_TIMEOUT_MS (default 120000 ms — the 0.14.0
+//         FLAT wall clock, restored by D13 after dump 211647) is DECLARED
+//         failed by the watchdog ("reason=terminal-timeout" for the stuck
+//         worker's request, "reason=queued-behind-jammed-init" for the ones
+//         queued behind it) with a wire plugin_state error twin, a
+//         STALL-BUNDLE diagnostic line, and an ALL-THREAD diagnostic dump
+//         (init-stall-*.dmp — the worker's REAL stack names the wedge).
 //         The declaration is log-only — the wedged thread is never touched.
 //   COALESCING: a load whose plugin set (instanceId+uid+path per entry)
 //         matches a queued/in-flight init FOLDS into it ("init superseded:
@@ -429,8 +429,10 @@ void rawReceipt(const char* kind, unsigned long code, const void* addr,
     std::fclose(f);
 }
 
-// Best-effort minidump in <APPDATA>/scorch/crashes/.
-void writeDump(EXCEPTION_POINTERS* ep, char* outPath, size_t outLen) {
+// Best-effort minidump in <APPDATA>/scorch/crashes/. `prefix` names the dump
+// family: "scorch-engine" (crashes) vs "init-stall" (D13 watchdog captures).
+void writeDump(EXCEPTION_POINTERS* ep, char* outPath, size_t outLen,
+               const char* prefix = "scorch-engine") {
     outPath[0] = '\0';
     char dir[MAX_PATH];
     if (!crashLogDir(dir, sizeof(dir))) return;
@@ -440,8 +442,8 @@ void writeDump(EXCEPTION_POINTERS* ep, char* outPath, size_t outLen) {
     const std::time_t tt = std::time(nullptr);
     std::tm tm{};
     localtime_s(&tm, &tt);
-    std::snprintf(outPath, outLen, "%s\\scorch-engine-%04d%02d%02d-%02d%02d%02d.dmp",
-                  crashDir, tm.tm_year + 1900, tm.tm_mon + 1, tm.tm_mday,
+    std::snprintf(outPath, outLen, "%s\\%s-%04d%02d%02d-%02d%02d%02d.dmp",
+                  crashDir, prefix, tm.tm_year + 1900, tm.tm_mon + 1, tm.tm_mday,
                   tm.tm_hour, tm.tm_min, tm.tm_sec);
     HMODULE dh = LoadLibraryA("dbghelp.dll");
     if (dh == nullptr) { outPath[0] = '\0'; return; }
@@ -475,14 +477,62 @@ void writeDump(EXCEPTION_POINTERS* ep, char* outPath, size_t outLen) {
     CloseHandle(file);
 }
 
+// ─── D13 (dump 211647): the process must not survive its own crash dump ───
+// The 0.14.0-era last-chance filter returned EXCEPTION_EXECUTE_HANDLER and
+// relied on termination semantics; worse, ANY /EHa catch(...) frame between
+// the fault and the filter swallows the AV BEFORE the filter ever runs — the
+// engine could limp on past its own dump (or past no dump at all). D13: a
+// FIRST-CHANCE vectored handler terminates the process deterministically on
+// the fatal cohort, AFTER the dump + receipt. The ONE sanctioned exception is
+// the M1 audio contract: ensureAudioReady()'s /EHa catch(...) converts a
+// device-init AV into the clean no_audio_device protocol error (CI Test B
+// depends on it) — that scope sets the thread-local flag below, and an AV on
+// the probing thread inside that window passes through to the frame
+// handlers exactly as before. Every other AV on every other thread: dump →
+// receipt → TerminateProcess. Nothing catches TerminateProcess.
+thread_local bool t_audioSehProbe = false;
+struct AudioSehProbeScope {
+    AudioSehProbeScope() { t_audioSehProbe = true; }
+    ~AudioSehProbeScope() { t_audioSehProbe = false; }
+    AudioSehProbeScope(const AudioSehProbeScope&) = delete;
+    AudioSehProbeScope& operator=(const AudioSehProbeScope&) = delete;
+};
+
+LONG NTAPI vehFilter(PEXCEPTION_POINTERS ep) {
+    if (ep == nullptr || ep->ExceptionRecord == nullptr) return EXCEPTION_CONTINUE_SEARCH;
+    const unsigned long code = ep->ExceptionRecord->ExceptionCode;
+    const bool fatal = code == EXCEPTION_ACCESS_VIOLATION          // 0xC0000005
+                    || code == 0xC0000409ul                        // fail-fast
+                    || code == EXCEPTION_ILLEGAL_INSTRUCTION        // 0xC000001D
+                    || code == EXCEPTION_STACK_OVERFLOW;            // 0xC00000FD
+    if (!fatal) return EXCEPTION_CONTINUE_SEARCH;
+    if (t_audioSehProbe) return EXCEPTION_CONTINUE_SEARCH;   // M1 audio contract (thread-local: only the probing thread's own AV passes)
+    if (g_crashHandled.exchange(true) == false) {
+        char dump[MAX_PATH];
+        writeDump(ep, dump, sizeof(dump));
+        rawReceipt("veh-fatal", code, ep->ExceptionRecord->ExceptionAddress, dump);
+        std::fflush(nullptr);
+    }
+    // Even if a prior handler already receipted this process, a NEW fatal AV
+    // still ends here: the process never survives its own crash dump.
+    TerminateProcess(GetCurrentProcess(), code);
+    return EXCEPTION_CONTINUE_SEARCH;   // unreachable
+}
+
 LONG WINAPI sehFilter(EXCEPTION_POINTERS* ep) {
     if (g_crashHandled.exchange(true) == false && ep != nullptr && ep->ExceptionRecord != nullptr) {
         char dump[MAX_PATH];
         writeDump(ep, dump, sizeof(dump));
         rawReceipt("seh", ep->ExceptionRecord->ExceptionCode,
                    ep->ExceptionRecord->ExceptionAddress, dump);
+        std::fflush(nullptr);
     }
-    return EXCEPTION_EXECUTE_HANDLER;   // default unwinding proceeds — we never continue
+    // D13: deterministic death — no reliance on filter-return semantics.
+    TerminateProcess(GetCurrentProcess(),
+                     ep != nullptr && ep->ExceptionRecord != nullptr
+                         ? ep->ExceptionRecord->ExceptionCode
+                         : EXCEPTION_ACCESS_VIOLATION);
+    return EXCEPTION_EXECUTE_HANDLER;   // unreachable
 }
 
 void signalReceipt(int sig) {
@@ -520,6 +570,9 @@ void purecallReceipt() {
 }
 
 void install() {
+    // D13: FIRST-CHANCE — the fatal cohort never reaches a frame handler that
+    // could swallow it (except the sanctioned audio-probe scope).
+    AddVectoredExceptionHandler(1 /* call first */, vehFilter);
     SetUnhandledExceptionFilter(sehFilter);
     std::signal(SIGABRT, signalReceipt);
     std::signal(SIGSEGV, signalReceipt);
@@ -554,7 +607,7 @@ namespace {
 #define SCORCH_ENGINE_COMMIT "dev-unpinned"
 #endif
 
-constexpr const char* kEngineVersion = "0.14.1";   // D12 (field bench run 190901): the init watchdog is progress-aware (60 s zero-movement stall + 600 s hard cap + 10 s heartbeat + last-call breadcrumb bundle), state-capture is gated off still-initializing plugins and thread-documented, and shutdown abandons a wedged init worker (bounded 10 s wait, detach, hard exit — terminal receipts always emitted). 0.14.0 was the TASK J root fix: teardown ordering load-bearing (destroy windows -> drain -> unload; owner-thread destroy via the init-worker teardown jobs), the module-guard demoted to the fail-loud verify+PIN backstop
+constexpr const char* kEngineVersion = "0.14.2";   // D13 (field dump 211647): the 0.14.1 init rework is REVERTED to the 0.14.0 semantics that ran the Falcon leg clean twice — the watchdog is the FLAT wall clock again (SCORCH_INIT_TERMINAL_TIMEOUT_MS, default 120000; the 60 s zero-movement stall declared legitimately-slow single plugin calls — a GB-scale load inside ONE call has no phase transitions — and handed a healthy init to the abandon/discard machinery, whose half-wired plugin then met the message-thread pump: AV inside the LOADED Falcon's WNDPROC, init incomplete), and the MM state-capture gate is removed (state-capture is back to the exact 0.14.0 placement). KEPT from the rework: the shutdown abandonment (exit-path only — it never declares and never touches plugin state — bisect verdict: not in the dump-211647 chain) and all additive receipts (per-phase timings, breadcrumbs, heartbeats). NEW diagnostics (D13, mandatory): 10 s init heartbeats (phase + elapsed + zero-movement + last call), a full-process ALL-THREAD diagnostic dump at every watchdog declaration (the worker's REAL stack names the wedge — superseding the D12 no-suspend policy per directive), and dump-then-TERMINATE on any AV-class first-chance exception (the process must not survive its own crash dump; the M1 audio-probe AV contract keeps its thread-local carve-out). 0.14.1 was the D12 rework; 0.14.0 was the TASK J root fix
 constexpr int kProtocolVersion = 1;
 constexpr int kDefaultPort = 9377;
 constexpr int kMaxVoices = 64;
@@ -2273,39 +2326,27 @@ struct InitReceiptRecord {
 std::mutex g_initReceiptMutex;
 std::vector<InitReceiptRecord> g_initReceipts;   // small (a handful of live requests)
 
-// The stall + cap bounds (D12 — the watchdog is PROGRESS-AWARE, not a wall
-// clock; field bench run 190901: the flat 120 s wall clock killed a
-// GB-scale first load that may have been moving normally between slow
-// phases). Two bounds now govern the terminal declaration:
-//   stall — fail only after initStallTimeoutMs() of ZERO phase/progress
-//           movement (default 60 s). SCORCH_INIT_TERMINAL_TIMEOUT_MS (the
-//           old wall-clock knob) is honored as an alias so CI's existing
-//           12 s wiring keeps its exact timing: during a jam there IS no
-//           movement, so the fire moment is identical.
-//   cap   — SCORCH_INIT_HARD_CAP_MS total per request (default 600 s)
-//           regardless of movement: a slow-but-alive multi-phase load gets
-//           its headroom, and nothing runs forever.
-// Log-only: the declaration never touches the wedged thread.
-static long long initStallTimeoutMs() {
+// The terminal declaration bound — REVERTED to the 0.14.0 FLAT WALL CLOCK
+// (D13, field dump 211647). Why the 0.14.1 progress-aware stall was the
+// firing pin: a GB-scale first load spends MINUTES inside ONE engine→plugin
+// call (create/prepare streaming samples from disk) — no phase transitions,
+// no breadcrumb returns, so its zero-movement clock crossed 60 s while the
+// load was perfectly healthy; the watchdog declared it failed and handed a
+// HALF-CONSTRUCTED plugin to the abandon/discard machinery. The flat wall
+// clock is the semantics the Falcon leg ran clean with TWICE on the field
+// machine (2026-10-22, runs 1 and 2). SCORCH_INIT_PROGRESS_STALL_MS and
+// SCORCH_INIT_HARD_CAP_MS are no longer read (their era is named in the
+// bench canon); SCORCH_INIT_TERMINAL_TIMEOUT_MS keeps its original meaning
+// (default 120000; CI's 12 s jam wiring unchanged — a jam never completes,
+// so the flat clock fires at exactly the CI-set age). Log-only: the
+// declaration never touches the wedged thread; the diagnostic dump (D13)
+// suspends threads inside MiniDumpWriteDump — the sanctioned mechanism.
+static long long initTerminalTimeoutMs() {
     static const long long v = [] {
-        long long x = 60000;
-        if (const char* e = std::getenv("SCORCH_INIT_PROGRESS_STALL_MS")) {
+        long long x = 120000;
+        if (const char* e = std::getenv("SCORCH_INIT_TERMINAL_TIMEOUT_MS")) {
             const long long p = std::atoll(e);
             if (p >= 1000) x = p;
-        } else if (const char* e2 = std::getenv("SCORCH_INIT_TERMINAL_TIMEOUT_MS")) {
-            const long long p = std::atoll(e2);
-            if (p >= 1000) x = p;
-        }
-        return x;
-    }();
-    return v;
-}
-static long long initHardCapMs() {
-    static const long long v = [] {
-        long long x = 600000;
-        if (const char* e = std::getenv("SCORCH_INIT_HARD_CAP_MS")) {
-            const long long p = std::atoll(e);
-            if (p >= 5000) x = p;
         }
         return x;
     }();
@@ -3751,6 +3792,12 @@ std::string ensureAudioReady() {
     if (g_audio.ready) return "";
     if (g_forcedNoAudio) return "--no-audio: forced device-less mode";
 
+#ifdef _WIN32
+    // D13: the M1 audio AV contract keeps its carve-out — device-init AVs on
+    // THIS thread pass through the first-chance vehFilter to the /EHa
+    // catch(...) below (clean no_audio_device protocol error, CI Test B).
+    scorchcrash::AudioSehProbeScope _audioSehProbeGuard;
+#endif
     try {
         if (g_nullAudio) {
             // CI / device-less: the engine's null device — the graph runs in
@@ -7081,20 +7128,12 @@ void handle_close_editor(const juce::var& json) {
 // carrying its instanceId so the app embeds it in the right LibraryGroup.
 void handle_capture_state() {
     juce::MessageManager::callAsync([] {
-        // D12 audit: state-capture NEVER runs against a plugin the init worker
-        // may be inside. The worker serializes every state op on the live set
-        // (state-restore on a kept instance, capture on an outgoing one); a
-        // concurrent MM getStateInformation against the SAME plugin is
-        // unbounded plugin-internal-lock contention — the wedge class run
-        // 190901 died in. The published set only ever holds COMMITTED
-        // instances, but a committed instance can be mid-restore/mid-prepare
-        // inside the worker's CURRENT request — so the gate is the load flag,
-        // not the set membership. Skip with a named receipt; the frontend
-        // re-asks when idle.
-        if (g_pluginLoadActive.load(std::memory_order_acquire)) {
-            engineLog("[plugin] capture SKIPPED (request) — an init is in flight; state-capture never runs against a plugin the worker may be inside (D12 audit); re-ask when the load settles");
-            return;
-        }
+        // D13 REVERT (dump 211647): the 0.14.1 gate on g_pluginLoadActive is
+        // GONE — state-capture is back to the exact 0.14.0 placement and
+        // semantics (always capture, on the MM, exactly as every CI-green era
+        // did). The gate was part of the rework the field run bisected out;
+        // nothing in 0.14.0 ever needed it and the bench canon names the
+        // revert.
         // Milestone 2: EVERY live instance — one pluginSavedState per
         // instance, each carrying its instanceId (slot order, deterministic).
         for (HostedPlugin* h : liveSetSnapshot()->bySlot) {
@@ -8900,18 +8939,22 @@ int main(int argc, char** argv) {
     //                 a busy worker), repeated every 10 s — a stuck worker is
     //                 visible in engine.log within seconds, the same pattern
     //                 as the editor's >10s pending watchdog.
-    //   zero phase/progress movement > initStallTimeoutMs() (default 60 s;
-    //                 SCORCH_INIT_TERMINAL_TIMEOUT_MS honored as the CI alias)
-    //                 → the TERMINAL DECLARATION on the wedged request's
+    //   total age > initTerminalTimeoutMs() (default 120 s — the 0.14.0 FLAT
+    //                 wall clock, RESTORED by D13 after dump 211647: the 0.14.1
+    //                 zero-movement stall declared legitimately-slow single
+    //                 plugin calls — a GB-scale load inside ONE call has no
+    //                 phase transitions — and armed the abandon/discard
+    //                 machinery against a healthy init) →
+    //                 the TERMINAL DECLARATION on the wedged request's
     //                 behalf: "init failed: seq= reason=terminal-timeout ..."
     //                 for the in-flight one, "... reason=queued-behind-jammed-init"
-    //                 for the queued ones; total age > SCORCH_INIT_HARD_CAP_MS
-    //                 (default 600 s) declares regardless of movement. A
-    //                 STALL-BUNDLE line (phase, zero-movement age, last
-    //                 engine→plugin call breadcrumb, worker tid) precedes the
-    //                 declaration — the slow-load vs deadlock evidence.
-    //                 Exactly-one is enforced by initRegistryMarkTerminal; the
-    //                 worker discovers the declaration and discards its result
+    //                 for the queued ones. A STALL-BUNDLE line (phase,
+    //                 zero-movement age, last engine→plugin call breadcrumb,
+    //                 worker tid) precedes the declaration and an init-stall
+    //                 ALL-THREAD dump follows it (the worker's REAL stack —
+    //                 D13 stack capture on watchdog fire). Exactly-one is
+    //                 enforced by initRegistryMarkTerminal; the worker
+    //                 discovers the declaration and discards its result
     //                 when it unblocks.
     std::thread plugin_init_watchdog([&server]() {
         while (!g_should_exit.load()) {
@@ -8938,23 +8981,14 @@ int main(int argc, char** argv) {
                     g_initPhase.named = true;   // one WATCHDOG line per phase occurrence
                 }
             }
-            // ── 0.9.2 registry sweep — D12: PROGRESS-AWARE ──
-            const long long stallMs = initStallTimeoutMs();
-            const long long capMs = initHardCapMs();
-            std::chrono::steady_clock::time_point workerPhaseSince{};
-            bool workerPhaseActive = false;
-            {
-                std::lock_guard<std::mutex> lk(g_initPhase.mtx);
-                workerPhaseSince = g_initPhase.startedAt;
-                workerPhaseActive = g_initPhase.active;
-            }
+            // ── 0.9.2 registry sweep — D13: the FLAT wall clock (reverted) ──
+            const long long terminalMs = initTerminalTimeoutMs();
+            bool stallDumped = false;
             struct Declaration { long long seq; std::string line; bool wireError; std::string iid; std::string detail; };
             std::vector<Declaration> declarations;
             {
                 std::lock_guard<std::mutex> lk(g_initReceiptMutex);
                 const auto now = std::chrono::steady_clock::now();
-                const long long workerMoveMs = std::chrono::duration_cast<std::chrono::milliseconds>(
-                    now - workerPhaseSince).count();
                 for (auto& r : g_initReceipts) {
                     if (r.terminal) continue;
                     const long long age = std::chrono::duration_cast<std::chrono::milliseconds>(
@@ -8962,20 +8996,20 @@ int main(int argc, char** argv) {
                     const long long zeroMoveMs = std::chrono::duration_cast<std::chrono::milliseconds>(
                         now - (r.phaseSince == std::chrono::steady_clock::time_point{}
                                    ? r.queuedAt : r.phaseSince)).count();
-                    // D12 fire conditions —
-                    //   stall  (in-flight): ZERO phase/progress movement for stallMs
-                    //   queued: the worker's LIVE phase has not moved for stallMs
-                    //           (it never reached this request and, jammed, cannot)
-                    //   cap:    total age >= capMs regardless of movement
-                    const bool stallFire = r.inFlight && zeroMoveMs >= stallMs;
-                    const bool queuedFire = !r.inFlight && workerPhaseActive && workerMoveMs >= stallMs;
-                    const bool capFire = age >= capMs;
-                    if (stallFire || queuedFire || capFire) {
-                        // D12 diagnostic bundle FIRST — the log reads cause →
+                    // D13 fire condition — the 0.14.0 FLAT WALL CLOCK: total
+                    // age >= initTerminalTimeoutMs(). No zero-movement stall,
+                    // no hard cap: a slow-but-moving load is NEVER declared
+                    // (that was the 0.14.1 regression — dump 211647). The
+                    // zero-movement age and the last-call breadcrumb stay in
+                    // the receipts as DIAGNOSTICS only.
+                    if (age >= terminalMs) {
+                        // D13 diagnostic bundle FIRST — the log reads cause →
                         // verdict. "Slow first load" vs "deadlock": lastCall
                         // INSIDE with a growing age names the wedged call;
                         // lastCall returned with fresh stamps names a
-                        // slow-but-alive load between phases.
+                        // slow-but-alive load between phases. The dump receipt
+                        // (emitted right after the sweep, below) carries the
+                        // worker's REAL stack.
                         declarations.push_back({r.seq,
                             "[plugin] init STALL-BUNDLE seq=" + std::to_string(r.seq) +
                             " phase=" + (r.phase.empty() ? "unknown" : r.phase) +
@@ -8984,42 +9018,30 @@ int main(int argc, char** argv) {
                             " totalAge=" + std::to_string(age / 1000) + "s" +
                             " " + initBreadcrumbSuffix() +
                             " workerTid=" + std::to_string(scorchguard::g_initWorkerTid.load(std::memory_order_acquire)) +
-                            " (D12: no raw stack — suspending a thread that may hold plugin/JUCE locks is its own wedge risk)",
+                            " (D13: the all-thread diagnostic dump follows this bundle)",
                             false, "", ""});
+                        stallDumped = true;
                         // The terminal declaration on the wedged request's
                         // behalf (emitted outside the mutex).
                         if (r.inFlight) {
-                            const bool capNotStall = capFire && !stallFire;
                             declarations.push_back({r.seq,
                                 "[plugin] init failed: seq=" + std::to_string(r.seq) +
-                                (capNotStall
-                                    ? " reason=init-hard-cap-timeout (total init age " +
-                                      std::to_string(age / 1000) + "s >= cap " +
-                                      std::to_string(capMs / 1000) + "s despite movement; last phase=" +
-                                      (r.phase.empty() ? "unknown" : r.phase) + ")"
-                                    : " reason=terminal-timeout (no phase/progress movement for " +
-                                      std::to_string(zeroMoveMs / 1000) + "s — progress-aware watchdog; worker stuck in phase=" +
-                                      (r.phase.empty() ? "unknown" : r.phase) + " instance=" +
-                                      (r.instanceId.empty() ? "-" : r.instanceId) +
-                                      " for " + std::to_string(zeroMoveMs / 1000) + "s)") +
-                                " — declared by the watchdog; the worker's eventual result will be discarded",
+                                " reason=terminal-timeout (worker stuck in phase=" +
+                                (r.phase.empty() ? "unknown" : r.phase) + " instance=" +
+                                (r.instanceId.empty() ? "-" : r.instanceId) +
+                                " for " + std::to_string(age / 1000) +
+                                "s; no terminal receipt is possible from a wedged worker) — declared by the watchdog;"
+                                " the worker's eventual result will be discarded",
                                 true, !r.firstIid.empty() ? r.firstIid : r.instanceId,
-                                capNotStall
-                                    ? "init declared failed after " + std::to_string(age / 1000) +
-                                      "s (init-hard-cap-timeout — total age " + std::to_string(age / 1000) +
-                                      "s, cap " + std::to_string(capMs / 1000) + "s)"
-                                    : "init declared failed after " + std::to_string(age / 1000) +
-                                      "s (terminal-timeout — zero phase progress for " +
-                                      std::to_string(zeroMoveMs / 1000) + "s in phase " +
-                                      (r.phase.empty() ? "unknown" : r.phase) + ")"});
+                                "init declared failed after " + std::to_string(age / 1000) +
+                                "s (terminal-timeout — worker stuck in phase " +
+                                (r.phase.empty() ? "unknown" : r.phase) + ")"});
                         } else {
                             declarations.push_back({r.seq,
                                 "[plugin] init failed: seq=" + std::to_string(r.seq) +
                                 " reason=queued-behind-jammed-init (the worker has not reached this request for " +
                                 std::to_string(age / 1000) +
-                                "s and its live phase has not moved for " +
-                                std::to_string(workerMoveMs / 1000) +
-                                "s — an older init is stuck) — declared by the watchdog; reload to retry",
+                                "s; an older init is stuck) — declared by the watchdog; reload to retry",
                                 true, !r.firstIid.empty() ? r.firstIid : r.instanceId,
                                 "init declared failed after " + std::to_string(age / 1000) +
                                 "s (queued-behind-jammed-init — the worker never reached this request)"});
@@ -9044,23 +9066,36 @@ int main(int argc, char** argv) {
                                     " (" + std::to_string(secs) + "s)" +
                                     " zeroMovement=" + std::to_string(zeroMoveMs / 1000) + "s" +
                                     " " + initBreadcrumbSuffix() +
-                                    " — the init is still running (stall declaration after " +
-                                    std::to_string(stallMs / 1000) + "s of zero movement, hard cap " +
-                                    std::to_string(capMs / 1000) + "s) | " + mmOccupancySuffix(),
+                                    " — the init is still running (terminal declaration at " +
+                                    std::to_string(terminalMs / 1000) + "s) | " + mmOccupancySuffix(),
                                     false, "", ""});
                             } else {
                                 declarations.push_back({r.seq,
                                     "[plugin] init queued >10s seq " + std::to_string(r.seq) +
                                     " (" + std::to_string(secs) +
-                                    "s) — the worker has not reached this request yet (stall declaration after " +
-                                    std::to_string(stallMs / 1000) + "s of worker zero movement, hard cap " +
-                                    std::to_string(capMs / 1000) + "s) | " + mmOccupancySuffix(),
+                                    "s) — the worker has not reached this request yet (terminal declaration at " +
+                                    std::to_string(terminalMs / 1000) + "s) | " + mmOccupancySuffix(),
                                     false, "", ""});
                             }
                         }
                     }
                 }
             }
+#ifdef _WIN32
+            // D13: stack capture on watchdog fire — ONE all-thread diagnostic
+            // dump per declaration sweep, BEFORE the receipts emit. The worker's
+            // REAL stack (plus every other thread's) is in the file; this
+            // supersedes the D12 no-suspend policy per directive —
+            // MiniDumpWriteDump freezes threads internally (the sanctioned
+            // mechanism), and the declared init is dead by definition.
+            if (stallDumped) {
+                char stallDumpPath[MAX_PATH];
+                scorchcrash::writeDump(nullptr, stallDumpPath, sizeof(stallDumpPath), "init-stall");
+                engineLog(std::string("[plugin] init stall-dump: ") +
+                          (stallDumpPath[0] != '\0' ? stallDumpPath : "(dump write failed)") +
+                          " (D13: ALL-thread snapshot at the declaration — the worker's REAL stack names the wedge)");
+            }
+#endif
             for (const auto& d : declarations) {
                 engineLog(d.line);
                 // The wire-side twin of the failed declaration: the frontend's
@@ -9287,6 +9322,12 @@ int main(int argc, char** argv) {
     // non-terminal seq (queued or in-flight) gets its named engine-shutdown
     // failed receipt NOW, before we know whether the worker can exit; the
     // in-flight line names the phase + zero-movement age.
+    // D13 bisect verdict: this block STAYS — it is EXIT-PATH only (it never
+    // declares mid-run and never touches plugin state: the invariant "a
+    // plugin window receives dispatched messages ONLY while its wrapper is
+    // fully constructed and attached" is untouched by it) and it is not in
+    // the dump-211647 chain; it is what replaced 190901's unbounded join →
+    // force-kill shape.
     {
         std::vector<std::string> abandonLines;
         {

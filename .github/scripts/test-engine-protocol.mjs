@@ -184,7 +184,7 @@ const fixtureDir = process.argv[4] ?? "";
 const url = `ws://127.0.0.1:${port}`;
 // D12: the expected engine identity — ONE knob for every mode's hello check
 // (the bench ps1 halts on any other build).
-const EXPECTED_ENGINE_VERSION = "0.14.1";
+const EXPECTED_ENGINE_VERSION = "0.14.2";
 // D12 receipt-provenance: the engine self-reports the exact commit it was
 // built at (hello.commit — CMake pins SCORCH_ENGINE_COMMIT from git at
 // configure time; pre-embed builds simply omit the field). EVERY mode logs it

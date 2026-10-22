@@ -18,7 +18,7 @@
 # Usage (from the bench folder):
 #   powershell -ExecutionPolicy Bypass -File .\field-bench.ps1
 # Options:
-#   -EngineExe .\scorch-engine.exe     (the 0.14.1 engine from the CI artifact)
+#   -EngineExe .\scorch-engine.exe     (the 0.14.2 engine from the CI artifact)
 #   -ScanDirs "C:\Program Files\Common Files\VST3","C:\Program Files (x86)\Common Files\VST3"
 #   -Cycles 50    -Port 9421    -Seed 20261023    -OutDir .\field-bench-<ts>
 # ============================================================================
@@ -87,8 +87,8 @@ Write-Host "engine: $engineVersion"
 Write-Host "node:   $nodeVersion"
 Write-Host "scan dirs: $($dirsOk -join ' | ')"
 Write-Host "cycles per leg: $Cycles  seed: $Seed  require-both-legs: 1"
-if ($engineVersion -notmatch "0\.14\.1") {
-  Verdict "HALT: the engine did not report 0.14.1 ('$engineVersion'). This bench validates the TASK J + D12 branch build — use the scorch-engine-windows-exe artifact from the LATEST fieldbench CI run (the D12 build, not the older 0.14.0)."
+if ($engineVersion -notmatch "0\.14\.2") {
+  Verdict "HALT: the engine did not report 0.14.2 ('$engineVersion'). This bench validates the TASK J + D13 branch build (the 0.14.1 init rework REVERTED to the 0.14.0 semantics + dump-then-TERMINATE crash forensics) — use the scorch-engine-windows-exe artifact from the LATEST fieldbench CI run (the D13 build, not the older 0.14.0/0.14.1)."
   exit 2
 }
 
@@ -176,6 +176,8 @@ elseif ($unresolvedGuard.Count -gt 0) { $verdict = "RED"; $verdictWhy += "UNRESO
 elseif ($singleLeg) { $verdict = "PARTIAL"; $verdictWhy += "only ONE plugin's cycle leg ran (the other was absent) — a single-leg run has no cross-plugin orphaning retire, so its windows=0 count is 0 by construction; the adjudication requires BOTH legs" }
 
 $receipt = @()
+# ── D13: the receipt HEADER is the engine build commit — ONE line, first ──
+$receipt += "engine commit: $engineCommit   (0.14.2 — the exact build this receipt describes)"
 $receipt += "SCORSH TASK J FIELD BENCH — receipt"
 $receipt += "UTC:      $((Get-Date).ToUniversalTime().ToString('yyyy-MM-dd HH:mm:ss'))"
 $receipt += "engine:   $engineVersion"

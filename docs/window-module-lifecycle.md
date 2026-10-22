@@ -271,13 +271,24 @@ to the ordering.
 - Engine changes only on the branch; tag approved-45787bb-v1 does not move;
   main carries this fix only after the branch proves green.
 
-## 7. The state-capture thread map + the init watchdog/shutdown contract (D12, 0.14.1)
+## 7. The state-capture thread map + the init watchdog/shutdown contract (D12, 0.14.1 — AMENDED by D13, 0.14.2)
 
 Field bench run 190901 (2026-10-22): the BBCSO leg's init was declared failed
 by the flat 120 s wall-clock watchdog while the worker sat in phase
 state-capture, and shutdown then hung on the unbounded init-worker join (the
-engine stayed alive until the bench script force-stopped it). D12 closes the
-class. This section is the audit deliverable.
+engine stayed alive until the bench script force-stopped it). D12 closed the
+class. **D13 (field dump 211647, 2026-10-22) REVERTED the parts of that
+rework that regressed the field**: the 60 s zero-movement stall declared
+legitimately-slow single plugin calls failed (a GB-scale load spends minutes
+inside ONE call — no phase transitions, no breadcrumb returns) and armed the
+abandon/discard machinery against a HEALTHY init; the half-wired plugin then
+met the message-thread pump — AV inside the LOADED Falcon's WNDPROC, init
+incomplete. The watchdog is the 0.14.0 flat wall clock again (default 120 s,
+`SCORCH_INIT_TERMINAL_TIMEOUT_MS`), the MM state-capture gate is gone, and
+the diagnostics are real: an ALL-THREAD dump (`init-stall-*.dmp`) at every
+declaration and dump-then-TERMINATE on any AV-class exception. The thread
+map (§7.1) and the shutdown contract (§7.4) are unchanged by D13. This
+section is the audit deliverable.
 
 ### 7.1 Which thread state-capture uses
 
@@ -301,34 +312,44 @@ half-created plugin by set membership. The real exposure is CONCURRENCY: a
 committed instance can be mid-restore/mid-prepare inside the worker's
 CURRENT request while an MM captureState walks the same set — two concurrent
 state ops against one plugin is unbounded plugin-internal-lock contention
-(the wedge class run 190901 died in). Enforcement (0.14.1):
+(the wedge class run 190901 died in). **D13 REVERTED the 0.14.1 MM gate**
+(`g_pluginLoadActive` skip): state-capture is back to the exact 0.14.0
+placement — the MM `captureState` request path always captures, exactly as
+every CI-green era did. The gate was part of the rework the field run
+bisected out; the concurrency exposure it addressed is real but was never
+the field failure, and 0.14.0's placement is the twice-field-proven shape.
+Enforcement (0.14.2): the worker capture sites are serialized behind the
+worker itself (one request at a time) — the invariant's structural half,
+unchanged since the m1-hotfix era; the wire's explicit captureState always
+runs (0.14.0 semantics).
 
-- the MM `captureState` path is GATED on `g_pluginLoadActive` — an init in
-  flight skips the capture with a named receipt (`capture SKIPPED (request)
-  — an init is in flight ...`); the frontend re-asks when idle;
-- the worker capture sites are serialized behind the worker itself (one
-  request at a time), which is the invariant's second half by construction.
+### 7.3 The init watchdog — the FLAT wall clock (D13 revert) + real diagnostics
 
-### 7.3 The progress-aware init watchdog (replaces the 120 s wall clock)
-
-- **stall**: a request is declared failed only after
-  `SCORCH_INIT_PROGRESS_STALL_MS` (default 60 s) of ZERO phase/progress
-  movement. Movement = a phase transition (`init stage=` receipts) or a
-  plugin call returning (the D12 breadcrumb's exit stamp). The old
-  `SCORCH_INIT_TERMINAL_TIMEOUT_MS` knob is honored as an alias so CI's 12 s
-  jam wiring keeps its exact fire moment (a jam has no movement).
-- **hard cap**: `SCORCH_INIT_HARD_CAP_MS` (default 600 s) total per request
-  regardless of movement — slow-but-alive multi-phase loads get headroom,
-  nothing runs forever (`reason=init-hard-cap-timeout`).
-- **heartbeat**: the >10 s warnings now carry `zeroMovement=<s>s` plus the
-  last engine→plugin call breadcrumb every 10 s.
+- **fire condition**: total request age >= `SCORCH_INIT_TERMINAL_TIMEOUT_MS`
+  (default 120000; CI 12000) — the exact 0.14.0 semantics that ran the
+  Falcon leg clean twice. The 0.14.1 zero-movement stall (60 s) and hard cap
+  are GONE; `SCORCH_INIT_PROGRESS_STALL_MS` / `SCORCH_INIT_HARD_CAP_MS` are
+  no longer read. A slow-but-moving load is NEVER declared.
+- **heartbeat**: the >10 s warnings carry phase + elapsed +
+  `zeroMovement=<s>s` + the last engine→plugin call breadcrumb every 10 s
+  (diagnostics only — the fire condition is the flat age).
 - **STALL-BUNDLE**: every terminal declaration is preceded by a bundle line —
   phase, instance, zero-movement age, total age, `lastCall=<site>
-  (INSIDE for|returned <n> ms ago)`, worker tid. `INSIDE` + growing age =
-  wedged call (deadlock class); fresh `returned` stamps = slow-but-alive
-  load. No raw stack is taken: suspending a thread that may hold plugin/JUCE
-  locks is its own wedge risk (declined by policy — the breadcrumb is the
-  sanctioned evidence).
+  (INSIDE for|returned <n> ms ago)`, worker tid.
+- **stack capture (D13)**: ONE all-thread diagnostic dump per declaration
+  sweep (`%APPDATA%\scorch\crashes\init-stall-<ts>.dmp`, the P1 dump flags)
+  — the worker's REAL stack names the wedge. This supersedes the D12
+  no-suspend policy per directive: MiniDumpWriteDump freezes threads
+  internally (the sanctioned mechanism), and the declared init is dead by
+  definition.
+- **dump-then-TERMINATE (D13)**: a FIRST-CHANCE vectored handler terminates
+  the process on any AV-class exception (0xC0000005, fail-fast, illegal
+  instruction, stack overflow) AFTER the P1 dump + `[crash]` receipt — the
+  process never survives its own crash dump, and no /EHa `catch(...)` frame
+  can swallow the fault into a limp. The ONE carve-out is the M1 audio
+  contract: a device-init AV inside `ensureAudioReady`'s scope passes
+  through (thread-local flag) to the sanctioned `no_audio_device`
+  conversion. The last-chance SEH filter terminates deterministically too.
 
 ### 7.4 Shutdown never blocks on a wedged init worker
 
