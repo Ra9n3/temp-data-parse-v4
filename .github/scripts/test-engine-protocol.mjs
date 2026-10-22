@@ -601,6 +601,7 @@ let fbLegs = [];               // [{key, row, instanceId, vehicle}] in load orde
 let fbLeg = -1;                // index of the leg currently cycling
 let fbLive = null;             // instanceId whose editor is cycling
 let fbLoadInFlight = null;     // instanceId awaiting plugin_state loaded
+let fbAbsentPass = false;      // hosted legs-absent verdict — the machine exits at phase 1 BY DESIGN (it never enters the leg machinery), so allOk must accept it explicitly
 let fbSeq = 30;                // load seq counter (this machine owns the wire)
 let fbOpened = { falcon: 0, bbcso: 0 };
 let fbClosed = { falcon: 0, bbcso: 0 };
@@ -2009,6 +2010,7 @@ ws.addEventListener("message", (event) => {
       if (present.length === 0) {
         if (FB_REQUIRE) fail("field bench: BOTH legs absent under SCORCH_FIELD_REQUIRE=1 — a desktop bench that cannot see Falcon AND BBCSO is a mis-scanned bench (check the dirs passed to field-bench.ps1)");
         console.log("[test] field legs ABSENT — hosted harness-validation pass (0 field cycles; the desktop run exercises the real legs)");
+        fbAbsentPass = true;
         fbStamp();
         finishAndShutdown();
         return;
@@ -3587,10 +3589,12 @@ ws.addEventListener("close", () => {
   } else if (mode === "fieldbench") {
     const fbCycleLegs = fbLegs.filter((l) => !l.vehicle);
     const legsPresent = fbCycleLegs.length > 0;
-    allOk = helloOk && fbErrors.length === 0 && fbLoadInFlight == null && fbPhase >= 4 &&
-      (!legsPresent ||
-        (fbCycleLegs.every((l) => fbCyclesDone[l.key] >= FB_CYCLES && fbOpened[l.key] === fbClosed[l.key]) &&
-         fbClosed.falcon + fbClosed.bbcso === fbOpened.falcon + fbOpened.bbcso)) &&
+    allOk = helloOk && fbErrors.length === 0 && fbLoadInFlight == null &&
+      (fbAbsentPass ||
+        (fbPhase >= 4 &&
+          (!legsPresent ||
+            (fbCycleLegs.every((l) => fbCyclesDone[l.key] >= FB_CYCLES && fbOpened[l.key] === fbClosed[l.key]) &&
+             fbClosed.falcon + fbClosed.bbcso === fbOpened.falcon + fbOpened.bbcso)))) &&
       (!FB_REQUIRE || legsPresent);
     if (allOk) {
       console.log("");
