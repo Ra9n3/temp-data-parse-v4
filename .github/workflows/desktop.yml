@@ -1927,7 +1927,7 @@ jobs:
           $src = Join-Path $env:APPDATA 'scorch\engine.log'
           if (Test-Path $src) { Copy-Item $src 'engine-d10-engine.log' -Force; Write-Host "engine.log staged ($((Get-Item 'engine-d10-engine.log').Length) bytes)" } else { Write-Host "no engine.log at $src" }
 
-      - name: Stage stress dumps inside the workspace (D13: the init-stall + crash dumps land in %APPDATA% — upload-artifact v4 ERRORS on any path outside the repo root, run 39848150272)
+      - name: Stage stress dumps inside the workspace (D13 — the init-stall and crash dumps land in APPDATA; upload-artifact v4 errors on any path outside the repo root, run 39848150272)
         if: always()
         shell: pwsh
         run: |
