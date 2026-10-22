@@ -1927,14 +1927,24 @@ jobs:
           $src = Join-Path $env:APPDATA 'scorch\engine.log'
           if (Test-Path $src) { Copy-Item $src 'engine-d10-engine.log' -Force; Write-Host "engine.log staged ($((Get-Item 'engine-d10-engine.log').Length) bytes)" } else { Write-Host "no engine.log at $src" }
 
+      - name: Stage stress dumps inside the workspace (D13: the init-stall + crash dumps land in %APPDATA% — upload-artifact v4 ERRORS on any path outside the repo root, run 39848150272)
+        if: always()
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path stress-dumps | Out-Null
+          if (Test-Path $env:SCORCH_CRASH_DIR) { Get-ChildItem $env:SCORCH_CRASH_DIR -Filter *.dmp -ErrorAction SilentlyContinue | Copy-Item -Destination stress-dumps -Force }
+          if (Test-Path $env:SCORCH_CRASH_LOG) { Copy-Item $env:SCORCH_CRASH_LOG stress-dumps -Force }
+          $staged = @(Get-ChildItem stress-dumps -ErrorAction SilentlyContinue)
+          Write-Host "stress-dumps staged: $($staged.Count) file(s)"
+          $staged | Select-Object Name,Length | Format-Table | Out-String | Write-Host
+
       - name: Upload stress dumps (TASK J repro instrument — always on)
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: stress-dumps-taskj-${{ github.run_id }}-${{ github.run_attempt }}
           path: |
-            ${{ env.SCORCH_CRASH_DIR }}\*.dmp
-            ${{ env.SCORCH_CRASH_LOG }}
+            stress-dumps\*
             engine-d10-engine.log
             engine-d10-stdout.txt
             engine-d10-stderr.txt
