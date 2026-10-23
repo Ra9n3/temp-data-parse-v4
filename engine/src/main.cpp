@@ -7668,11 +7668,10 @@ int main(int argc, char** argv) {
     // minidump) instead of leaving a [mm] wedge and a respawn as the only
     // evidence.
     scorchcrash::install();
-#if defined(_WIN32)
-    std::cout << "[engine] WER LocalDumps: "
-              << (scorchcrash::g_werArmed ? "armed -> " : "arm FAILED (best-effort) ")
-              << scorchcrash::g_werDumpFolder << std::endl;
-#endif
+    // D14b: the WER banner prints AFTER arg handling (next to the listening
+    // line) — the --version stdout contract is exactly one version line +
+    // nothing else (run 131's CI version check feeds the whole stdout to a
+    // strict -notmatch; a pre-arg-loop banner broke it).
 #endif
 
     int port = kDefaultPort;
@@ -9808,6 +9807,11 @@ int main(int argc, char** argv) {
 
     std::cout << "[engine] scorch-engine " << kEngineVersion
               << " listening on 127.0.0.1:" << port << std::endl;
+#ifdef _WIN32
+    std::cout << "[engine] WER LocalDumps: "
+              << (scorchcrash::g_werArmed ? "armed -> " : "arm FAILED (best-effort) ")
+              << scorchcrash::g_werDumpFolder << std::endl;
+#endif
 
     auto res = server.listen();
     if (!res.first) {
