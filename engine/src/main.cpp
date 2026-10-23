@@ -7832,7 +7832,6 @@ int main(int argc, char** argv) {
                 broadcastJson(std::string("{\"type\":\"engineDiagnostic\",\"mm\":\"recovered\",\"seconds\":") +
                               std::to_string(s) + "}");
             }
-        }
             } catch (const std::exception& thEx) {
                 std::string whatSafe;
                 try { whatSafe = thEx.what(); } catch (...) { whatSafe = "(what() threw)"; }
@@ -7841,7 +7840,7 @@ int main(int argc, char** argv) {
                           " — the loop continues (D14b: no silent thread death)");
             } catch (...) {
                 engineLog("[engine] MM heartbeat thread exception: unknown (non-std throwable) — the loop continues (D14b)");
-        }});
+        }}});
 
     // D14: the bound monitor — names capture/teardown steps that blew the
     // 5 s ceiling (additive; the D13 watchdog is untouched).
@@ -7964,15 +7963,6 @@ int main(int argc, char** argv) {
                 } else {
                     ws.send("{\"type\":\"error\",\"code\":\"unknown\",\"echo\":\"" + escape_json(message) + "\"}");
                 }
-            } else if (msg->type == ix::WebSocketMessageType::Close) {
-                // Panic on disconnect — no stuck notes (self-serviced kill,
-                // Stage 3c-polish D2: no cross-thread voice access).
-                g_engine.playing.store(false);
-                g_voiceKillPending.store(true, std::memory_order_relaxed);
-                g_pendingPanic.store(true);
-                std::cout << "[engine] client disconnected (panic)" << std::endl;
-                engineLog("[ws] client disconnected (panic)");
-            }
                 } catch (const std::exception& wsEx) {
                     std::string whatSafe;
                     try { whatSafe = wsEx.what(); } catch (...) { whatSafe = "(what() threw)"; }
@@ -7986,7 +7976,17 @@ int main(int argc, char** argv) {
                 } catch (...) {
                     engineLog("[ws] handler exception: unknown (non-std throwable) — the dispatch continues (D14b: no silent thread death)");
                     try { ws.send("{\"type\":\"error\",\"code\":\"handler_exception\",\"detail\":\"unknown\"}"); } catch (...) {}
-            }});
+                }
+            } else if (msg->type == ix::WebSocketMessageType::Close) {
+                // Panic on disconnect — no stuck notes (self-serviced kill,
+                // Stage 3c-polish D2: no cross-thread voice access).
+                g_engine.playing.store(false);
+                g_voiceKillPending.store(true, std::memory_order_relaxed);
+                g_pendingPanic.store(true);
+                std::cout << "[engine] client disconnected (panic)" << std::endl;
+                engineLog("[ws] client disconnected (panic)");
+            }
+            });
 
     // State broadcast thread (~30Hz)
     std::thread state_thread([&server]() {
@@ -8035,7 +8035,6 @@ int main(int argc, char** argv) {
                 }
             }
             std::this_thread::sleep_for(std::chrono::milliseconds(33));
-        }
             } catch (const std::exception& thEx) {
                 std::string whatSafe;
                 try { whatSafe = thEx.what(); } catch (...) { whatSafe = "(what() threw)"; }
@@ -8044,7 +8043,7 @@ int main(int argc, char** argv) {
                           " — the loop continues (D14b: no silent thread death)");
             } catch (...) {
                 engineLog("[engine] state broadcaster thread exception: unknown (non-std throwable) — the loop continues (D14b)");
-        }});
+        }}});
 
     // Stage 3c-regression — plugin init worker: instantiates VST3s OFF the WS
     // thread (BBCSO took 5.7s and froze the loop behind it). Single worker,
@@ -9601,7 +9600,6 @@ int main(int argc, char** argv) {
                         if (client) client->send(ps);
                 }
             }
-        }
             } catch (const std::exception& thEx) {
                 std::string whatSafe;
                 try { whatSafe = thEx.what(); } catch (...) { whatSafe = "(what() threw)"; }
@@ -9610,7 +9608,7 @@ int main(int argc, char** argv) {
                           " — the loop continues (D14b: no silent thread death)");
             } catch (...) {
                 engineLog("[engine] init watchdog thread exception: unknown (non-std throwable) — the loop continues (D14b)");
-        }});
+        }}});
 
     // ─── Stage 3f-2 — background scan-probe thread ─────────────────────────
     // Probes each queued scan row SEQUENTIALLY: one --probe-worker child per
@@ -9798,7 +9796,6 @@ int main(int argc, char** argv) {
             }
             std::cout << "[engine] scan_probe " << outcome
                       << " (" << elapsedMs() << "ms)" << std::endl;
-        }
             } catch (const std::exception& thEx) {
                 std::string whatSafe;
                 try { whatSafe = thEx.what(); } catch (...) { whatSafe = "(what() threw)"; }
@@ -9807,7 +9804,7 @@ int main(int argc, char** argv) {
                           " — the loop continues (D14b: no silent thread death)");
             } catch (...) {
                 engineLog("[engine] scan probe thread exception: unknown (non-std throwable) — the loop continues (D14b)");
-        }});
+        }}});
 
     std::cout << "[engine] scorch-engine " << kEngineVersion
               << " listening on 127.0.0.1:" << port << std::endl;
