@@ -1,4 +1,4 @@
-# ============================================================================
+﻿# ============================================================================
 # field-bench.ps1 — TASK J FIELD BENCH (the adjudication's desktop leg)
 # ============================================================================
 # Runs the fieldbench harness against the REAL plugins on THIS machine:
