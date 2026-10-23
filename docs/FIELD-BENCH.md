@@ -2,8 +2,13 @@
 
 Canon: this file is the bench contract. The harness mode is `fieldbench` in
 `.github/scripts/test-engine-protocol.mjs`; the desktop runner script is
-`.github/scripts/field-bench.ps1`. The engine build under test is **0.14.3**
-(TASK J root fix + D13 — the 0.14.1 init rework REVERTED to the 0.14.0
+`.github/scripts/field-bench.ps1`. The engine build under test is **0.14.4**
+(D14a — the post-receipt exit is `TerminateProcess`, DETACH-FREE: no
+still-loaded module's `DLL_PROCESS_DETACH` — Falcon is the live-at-exit
+module in this bench's 3-leg shape — can wedge the process past its final
+`clean exit 0` receipt; field-observed 2026-10-23 12:24, the process was
+alive 29 s past the receipt with everything already flushed and joined.
+On top of D14 + TASK J root fix + D13 — the 0.14.1 init rework REVERTED to the 0.14.0
 semantics: flat 120 s wall-clock watchdog, state-capture placement, 10 s init
 heartbeats, an ALL-THREAD `init-stall-*.dmp` at every watchdog declaration,
 dump-then-TERMINATE on any AV-class exception — plus **D14**: the

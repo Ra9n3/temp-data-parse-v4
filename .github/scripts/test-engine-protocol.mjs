@@ -184,11 +184,15 @@ const fixtureDir = process.argv[4] ?? "";
 const url = `ws://127.0.0.1:${port}`;
 // D12: the expected engine identity — ONE knob for every mode's hello check
 // (the bench ps1 halts on any other build).
+// 0.14.4 = D14a: the post-receipt exit is TerminateProcess (detach-free — a
+// still-loaded module's DLL_PROCESS_DETACH can no longer wedge the process
+// past its final receipt; field-observed 2026-10-23 12:24, the 3-leg shape
+// ending live on Falcon).
 // 0.14.3 = D14: bounded retire-captures (SendMessageTimeout, SMTO_ABORTIFHUNG,
 // 5 s) + discard-class retires (this harness marks every field leg
 // discardRetire:true) + the receipt debts (scan failed-plugin name, per-leg
 // init timings, (panic)/exit-vs-running in the ps1 half).
-const EXPECTED_ENGINE_VERSION = "0.14.3";
+const EXPECTED_ENGINE_VERSION = "0.14.4";
 // D12 receipt-provenance: the engine self-reports the exact commit it was
 // built at (hello.commit — CMake pins SCORCH_ENGINE_COMMIT from git at
 // configure time; pre-embed builds simply omit the field). EVERY mode logs it

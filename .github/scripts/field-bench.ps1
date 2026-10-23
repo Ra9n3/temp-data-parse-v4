@@ -16,6 +16,12 @@
 #     per-leg init timings, capture-abandon + STALL-BUNDLE lines. D13
 #     machinery (flat 120 s watchdog, STALL-BUNDLE + workerTid, all-thread
 #     dump, dump-then-TERMINATE) untouched.
+#   - D14a (0.14.4): the exit contract is TerminateProcess (detach-free) —
+#     no still-loaded module's DLL_PROCESS_DETACH can wedge the process past
+#     its final 'clean exit 0' receipt (field: 2026-10-23 12:24, the process
+#     was alive 29 s past the receipt with Falcon live at exit). The
+#     force-stop timestamp is captured with explicit global scope — the
+#     'force-stopped at ?' shape cannot recur.
 #   - P1 ARMED (in-engine crash handler + MiniDumpWithUnloadedModules, always
 #     compiled in): ANY crash = HALT-AND-ADJUDICATE — the receipt names the
 #     dump, the bench exits RED, nothing is cleaned up.
@@ -25,7 +31,7 @@
 # Usage (from the bench folder):
 #   powershell -ExecutionPolicy Bypass -File .\field-bench.ps1
 # Options:
-#   -EngineExe .\scorch-engine.exe     (the 0.14.3 engine from the CI artifact)
+#   -EngineExe .\scorch-engine.exe     (the 0.14.4 engine from the CI artifact)
 #   -ScanDirs "C:\Program Files\Common Files\VST3","C:\Program Files (x86)\Common Files\VST3"
 #   -Cycles 50    -Port 9421    -Seed 20261023    -OutDir .\field-bench-<ts>
 # ============================================================================
@@ -94,8 +100,8 @@ Write-Host "engine: $engineVersion"
 Write-Host "node:   $nodeVersion"
 Write-Host "scan dirs: $($dirsOk -join ' | ')"
 Write-Host "cycles per leg: $Cycles  seed: $Seed  require-both-legs: 1"
-if ($engineVersion -notmatch "0\.14\.3") {
-  Verdict "HALT: the engine did not report 0.14.3 ('$engineVersion'). This bench validates the TASK J + D14 build (bounded retire-captures + discard-class bench retires on top of the D13 revert/diagnostics) — use the scorch-engine-windows-exe artifact from the LATEST fieldbench CI run (the 0.14.3/D14 build, not the older 0.14.0/0.14.1/0.14.2)."
+if ($engineVersion -notmatch "0\.14\.4") {
+  Verdict "HALT: the engine did not report 0.14.4 ('$engineVersion'). This bench validates the TASK J + D14 + D14a build (bounded retire-captures + discard-class bench retires + the detach-free exit, on top of the D13 revert/diagnostics) — use the scorch-engine-windows-exe artifact from the LATEST fieldbench CI run (the 0.14.4/D14a build, not the older 0.14.0/0.14.1/0.14.2/0.14.3)."
   exit 2
 }
 
@@ -126,10 +132,10 @@ $harnessEndAt = Get-Date
 # silent when the process was killed.
 $proc.WaitForExit(30000) | Out-Null
 $engineExit = $null
-$forceStopAt = $null
+$global:forceStopAt = $null
 if ($proc.HasExited) { $engineExit = $proc.ExitCode }
 else {
-  $forceStopAt = Get-Date
+  $global:forceStopAt = Get-Date
   Write-Host "note: engine still running 30 s after the harness exit — stopping it (shutdown-hang shape; the receipt will say so, with the log-silence timestamps)"
   Stop-Process -Id $proc.Id -Force -ErrorAction SilentlyContinue
 }
@@ -213,7 +219,7 @@ elseif ($singleLeg) { $verdict = "PARTIAL"; $verdictWhy += "only ONE plugin's cy
 
 $receipt = @()
 # ── D13/D14: the receipt HEADER is the engine build commit — ONE line, first ──
-$receipt += "engine commit: $engineCommit   (0.14.3 — the exact build this receipt describes)"
+$receipt += "engine commit: $engineCommit   (0.14.4 — the exact build this receipt describes)"
 $receipt += "SCORSH TASK J FIELD BENCH — receipt"
 $receipt += "UTC:      $((Get-Date).ToUniversalTime().ToString('yyyy-MM-dd HH:mm:ss'))"
 $receipt += "engine:   $engineVersion"
@@ -272,11 +278,11 @@ if ($engineExit -ne $null) {
   }
   $receipt += "engine exit: $exitDesc"
 } else {
-  $stopRef = $forceStopAt
+  $stopRef = $global:forceStopAt
   if ($stopRef -eq $null) { $stopRef = Get-Date }
   $age = -1
   if ($lastLogTs -ne $null) { $age = [int]($stopRef - $lastLogTs).TotalSeconds }
-  $receipt += "engine exit: STILL RUNNING — force-stopped at $(if ($forceStopAt -ne $null) { $forceStopAt.ToString('HH:mm:ss.fff') } else { '?' })"
+  $receipt += "engine exit: STILL RUNNING — force-stopped at $(if ($global:forceStopAt -ne $null) { $global:forceStopAt.ToString('HH:mm:ss.fff') } else { '?' })"
   $receipt += "  last engine.log line at $(if ($lastLogTs -ne $null) { $lastLogTs.ToString('HH:mm:ss.fff') } else { 'none' }) (age ${age}s at the force-stop — the log-silence window; the shutdown-hang shape, timestamped)"
   $receipt += "  last line: $lastLogLine"
 }
