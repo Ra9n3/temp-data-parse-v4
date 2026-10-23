@@ -607,7 +607,7 @@ namespace {
 #define SCORCH_ENGINE_COMMIT "dev-unpinned"
 #endif
 
-constexpr const char* kEngineVersion = "0.14.2";   // D13 (field dump 211647): the 0.14.1 init rework is REVERTED to the 0.14.0 semantics that ran the Falcon leg clean twice — the watchdog is the FLAT wall clock again (SCORCH_INIT_TERMINAL_TIMEOUT_MS, default 120000; the 60 s zero-movement stall declared legitimately-slow single plugin calls — a GB-scale load inside ONE call has no phase transitions — and handed a healthy init to the abandon/discard machinery, whose half-wired plugin then met the message-thread pump: AV inside the LOADED Falcon's WNDPROC, init incomplete), and the MM state-capture gate is removed (state-capture is back to the exact 0.14.0 placement). KEPT from the rework: the shutdown abandonment (exit-path only — it never declares and never touches plugin state — bisect verdict: not in the dump-211647 chain) and all additive receipts (per-phase timings, breadcrumbs, heartbeats). NEW diagnostics (D13, mandatory): 10 s init heartbeats (phase + elapsed + zero-movement + last call), a full-process ALL-THREAD diagnostic dump at every watchdog declaration (the worker's REAL stack names the wedge — superseding the D12 no-suspend policy per directive), and dump-then-TERMINATE on any AV-class first-chance exception (the process must not survive its own crash dump; the M1 audio-probe AV contract keeps its thread-local carve-out). 0.14.1 was the D12 rework; 0.14.0 was the TASK J root fix
+constexpr const char* kEngineVersion = "0.14.3";   // D14 (field runs 190901 + the run-4 init-stall dump): the retire-capture wedge class is closed at BOTH sites without touching the D13 machinery. FIX A: an outgoing state capture (diff-remove/replace/unload (worker)) no longer runs unbounded on the init worker — it rides the plugin's own message thread (the MM pump thread) via SendMessageTimeout (SMTO_ABORTIFHUNG, 5 s hard ceiling) to the D14 MM capture window; on timeout/abort the capture is ABANDONED with the named receipt "[plugin] retire-capture abandoned (plugin MM wedged)" and the destroy→drain→unload continues (a lost autosave is acceptable; a wedged host is not). The ceiling is MANDATORY on every capture path, on-MM or direct: captureAndBroadcastState stamps a 5 s deadline around getStateInformation and the D14 monitor thread names any breach ("[plugin] capture abandoned (plugin MM wedged)"); a capture completing after its abandon is receipted and its result DISCARDED, never broadcast. Teardown bounds: every DestroyWindow step in the retire teardown stamps the same deadline; overruns are named abandon receipts — TASK J ordering (owner-thread destroy, drain) untouched, the bounds only observe. FIX B: discard-class retires skip capture ENTIRELY — the load request's additive "discardRetire":true (the field bench sends it on every leg) and the shutdown path both emit "[plugin] state capture SKIPPED (discard-class retire|engine shutting down)"; the bench path never depends on a plugin's message-thread health. OPTIONAL (non-gating) analysis, recorded in FIELD-BENCH.md: the wedged handler's async completion (BBCSO under play) needed the audio device cycle — Fix A's capture-on-MM + the open device processing through the retire is the sanctioned shape; a keep-device-open-on-silence policy stays parked. 0.14.2 was the D13 revert+diagnostics (field dump 211647: the 0.14.1 init rework is REVERTED to the 0.14.0 semantics that ran the Falcon leg clean twice — the watchdog is the FLAT wall clock again (SCORCH_INIT_TERMINAL_TIMEOUT_MS, default 120000; the 60 s zero-movement stall declared legitimately-slow single plugin calls — a GB-scale load inside ONE call has no phase transitions — and handed a healthy init to the abandon/discard machinery, whose half-wired plugin then met the message-thread pump: AV inside the LOADED Falcon's WNDPROC, init incomplete), and the MM state-capture gate is removed (state-capture is back to the exact 0.14.0 placement). KEPT from the rework: the shutdown abandonment (exit-path only — it never declares and never touches plugin state — bisect verdict: not in the dump-211647 chain) and all additive receipts (per-phase timings, breadcrumbs, heartbeats). NEW diagnostics (D13, mandatory): 10 s init heartbeats (phase + elapsed + zero-movement + last call), a full-process ALL-THREAD diagnostic dump at every watchdog declaration (the worker's REAL stack names the wedge — superseding the D12 no-suspend policy per directive), and dump-then-TERMINATE on any AV-class first-chance exception (the process must not survive its own crash dump; the M1 audio-probe AV contract keeps its thread-local carve-out). 0.14.1 was the D12 rework; 0.14.0 was the TASK J root fix
 constexpr int kProtocolVersion = 1;
 constexpr int kDefaultPort = 9377;
 constexpr int kMaxVoices = 64;
@@ -2097,6 +2097,56 @@ void openEditorWindow(const std::string& iid, HostedPlugin* owner) {
               " " + std::to_string(cw) + "x" + std::to_string(ch));
 }
 
+// ─── D14: the bounded-op tokens (the 5 s ceiling machinery) ─────────────
+// The 2026-10-22 run-4 field dump + the 190901 STALL-BUNDLE named the same
+// wedge twice: a thread (the init worker in the field, potentially the MM)
+// parked INSIDE a plugin call that never returns, while the code around it
+// waited unbounded. D14 gives every outgoing capture and every teardown
+// window-destroy a hard 5 s ceiling with a NAMED abandon receipt. The bound
+// cannot unstick a call already running inside plugin code (thread physics,
+// documented — not hidden): what it buys is (1) the caller stops WAITING
+// (the worker's SendMessageTimeout), (2) the wedge is NAMED at 5 s and
+// FORENSIC at 120 s (the D13 watchdog + all-thread dump, untouched).
+constexpr unsigned kCaptureBoundMs = 5000;   // the hard ceiling (the 3–5 s band, upper edge)
+
+struct CaptureBoundToken {
+    std::mutex mtx;
+    bool active = false;
+    bool fired = false;        // one abandon receipt per stamped step
+    long long deadlineMs = 0;
+    long long gen = 0;         // the abandon generation at stamp time
+    std::string what;          // "capture" | "teardown-destroy" | "editor-destroy"
+    std::string iid, detail;
+};
+CaptureBoundToken g_captureBound;    // getStateInformation bounds (on-MM + direct paths)
+CaptureBoundToken g_windowOpBound;   // DestroyWindow bounds (retire teardown steps)
+std::atomic<long long> g_captureAbandonGen{0};   // bumped by the monitor on a capture abandon
+// Sender-watched captures (the worker's SendMessageTimeout wait) skip the
+// monitor token: the kernel wait IS their bound. Set only by the MM capture
+// window proc around its own captureAndBroadcastState call.
+thread_local bool t_captureSenderWatched = false;
+
+static long long d14SteadyMsNow() {
+    return std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::steady_clock::now().time_since_epoch()).count();
+}
+static long long captureBoundStamp(CaptureBoundToken& t, const char* what,
+                                   const std::string& iid, const std::string& detail) {
+    std::lock_guard<std::mutex> lk(t.mtx);
+    t.active = true;
+    t.fired = false;
+    t.deadlineMs = d14SteadyMsNow() + static_cast<long long>(kCaptureBoundMs);
+    t.gen = g_captureAbandonGen.load(std::memory_order_acquire);
+    t.what = what;
+    t.iid = iid;
+    t.detail = detail;
+    return t.gen;
+}
+static void captureBoundClear(CaptureBoundToken& t) {
+    std::lock_guard<std::mutex> lk(t.mtx);
+    t.active = false;
+}
+
 // Message-thread side of close. Every path (protocol close, X button,
 // retirement) converges here; the map is the single source of truth.
 // captureOnClose: USER-initiated closes (protocol closeEditor, the X button)
@@ -2123,8 +2173,13 @@ void destroyEditorWindow(const std::string& iid, bool captureOnClose) {
         // leaves the BEGIN line as the last receipt.
         const auto tc0 = std::chrono::steady_clock::now();
         engineLog("[editor] close BEGIN instance=" + iid);
+        // D14 teardown bound: the editor destructor runs plugin code — the
+        // same 5 s ceiling, named overrun receipt on breach.
+        captureBoundStamp(g_windowOpBound, "editor-destroy", iid,
+                          "editor window delete (plugin destructor runs)");
         win->setVisible(false);
         delete win;   // setContentOwned(ed, true) frees the editor with the window
+        captureBoundClear(g_windowOpBound);
         const long long closeMs = std::chrono::duration_cast<std::chrono::milliseconds>(
             std::chrono::steady_clock::now() - tc0).count();
         engineLog("[editor] close END instance=" + iid + " " + std::to_string(closeMs) + " ms");
@@ -2234,6 +2289,14 @@ void captureAndBroadcastState(juce::AudioPluginInstance* inst, const HostedPlugi
     // (getStateInformation) and END with the elapsed ms after it — the same
     // receipt shape the editor close got, so a slow/hung capture is located
     // by its last line in engine.log.
+    // D14 Fix B (shutdown): the exit path is discard-class by definition —
+    // no capture can ship anywhere useful once the client is gone, and a
+    // shutdown-time capture must never be the thing a wedged plugin hangs.
+    if (g_should_exit.load(std::memory_order_acquire)) {
+        engineLog("[plugin] state capture SKIPPED (engine shutting down) instance=" + h.instanceId +
+                  " (" + trigger + ") — discard-class at shutdown (D14 Fix B)");
+        return;
+    }
     if (inst == nullptr) {
         engineLog("[plugin] capture SKIPPED instance=" + h.instanceId + " (" + trigger +
                   ") — no live plugin instance (already retired)");
@@ -2244,9 +2307,25 @@ void captureAndBroadcastState(juce::AudioPluginInstance* inst, const HostedPlugi
     try {
         juce::MemoryBlock mb;
         InitBreadcrumbScope _bc("getStateInformation");   // D12: the watchdog's last-call breadcrumb covers ALL capture triggers
+        // D14: the hard ceiling on EVERY capture path (on-MM or direct).
+        // Sender-watched captures (the worker's SendMessageTimeout wait) are
+        // exempt — the kernel wait is their bound.
+        const bool stampBound = !t_captureSenderWatched;
+        long long genBefore = 0;
+        if (stampBound)
+            genBefore = captureBoundStamp(g_captureBound, "capture", h.instanceId, trigger);
         inst->getStateInformation(mb);
+        if (stampBound) captureBoundClear(g_captureBound);
         const long long capMs = std::chrono::duration_cast<std::chrono::milliseconds>(
             std::chrono::steady_clock::now() - tc0).count();
+        if (stampBound && genBefore != g_captureAbandonGen.load(std::memory_order_acquire)) {
+            // The monitor already receipted the abandon — this result is
+            // DEAD. Nothing ships: the caller moved on at the ceiling.
+            engineLog("[plugin] capture completed AFTER abandon instance=" + h.instanceId +
+                      " " + std::to_string(capMs) + " ms (" + trigger +
+                      ") — result DISCARDED (the abandon receipt is above; nothing ships)");
+            return;
+        }
         engineLog("[plugin] capture END instance=" + h.instanceId + " " +
                   std::to_string(capMs) + " ms (" + trigger + ")");
         const size_t n = mb.getSize();
@@ -2277,6 +2356,175 @@ void captureAndBroadcastState(juce::AudioPluginInstance* inst, const HostedPlugi
                   (e.what() ? e.what() : "unknown"));
     } catch (...) {
         engineLog(std::string("[plugin] state capture FAILED (") + trigger + "): SEH/unknown");
+    }
+}
+
+// ─── D14 Fix A: the MM capture window + the bounded sender ────────────
+// The window lives ON the MM pump thread (created by the pump lambda before
+// runDispatchLoop) — the thread the plugins treat as their own message
+// thread. The worker's outgoing captures are SENT here with
+// SendMessageTimeout(SMTO_ABORTIFHUNG, 5 s): a healthy plugin sees the
+// capture run in its home context (exactly the receipts it always had); a
+// wedged MM leaves the wait timing out and the capture ABANDONED — the named
+// receipt fires in the sender and the destroy→drain→unload continues.
+#ifdef _WIN32
+struct BoundedCaptureRequest {
+    juce::AudioPluginInstance* inst;
+    const HostedPlugin* meta;
+    const char* trigger;
+    std::atomic<bool> abandoned{false};
+};
+std::mutex g_boundedCaptureMutex;
+BoundedCaptureRequest* g_boundedCaptureReq = nullptr;   // single slot: the init worker is the only sender, the MM the only server
+std::atomic<HWND> g_mmCaptureWindow{nullptr};
+constexpr UINT WM_SCORCH_BOUNDED_CAPTURE = WM_APP + 0x0D14;   // SENT (never posted) — the bounded capture request
+
+LRESULT CALLBACK mmCaptureWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
+    if (msg == WM_SCORCH_BOUNDED_CAPTURE) {
+        BoundedCaptureRequest* req = nullptr;
+        {
+            std::lock_guard<std::mutex> lk(g_boundedCaptureMutex);
+            req = g_boundedCaptureReq;
+            g_boundedCaptureReq = nullptr;   // served — the slot clears before the capture runs (the sender's 5 s wait is not extended by the capture)
+        }
+        if (req == nullptr) return 1;   // stale send (sender already abandoned+cleared) — nothing to do
+        if (req->abandoned.load(std::memory_order_acquire)) {
+            engineLog(std::string("[plugin] bounded capture arrived AFTER the abandon (") +
+                      req->trigger + ") — the retire already proceeded; no capture runs");
+            return 0;
+        }
+        t_captureSenderWatched = true;
+        struct SenderWatched { ~SenderWatched() { t_captureSenderWatched = false; } } _sw;
+        // The capture runs HERE — on the plugin's own message thread. The
+        // sender is already watching with its own 5 s kernel wait; the
+        // monitor token is skipped for exactly this path. If the capture
+        // outlives the sender's wait, it still COMPLETES and ships (a slow
+        // but healthy capture loses nothing) — the abandon only stops the
+        // WAITER, which is what keeps destroy→drain→unload moving.
+        captureAndBroadcastState(req->inst, *req->meta, req->trigger);
+        return 0;
+    }
+    return DefWindowProcW(hwnd, msg, wp, lp);
+}
+
+void createMmCaptureWindowOnThisThread() {
+    WNDCLASSW wc{};
+    wc.lpfnWndProc = mmCaptureWndProc;
+    wc.hInstance = GetModuleHandleW(nullptr);
+    wc.lpszClassName = L"ScorchEngineMmCaptureWindow";
+    RegisterClassW(&wc);   // exists-ok on re-entry
+    // HWND_MESSAGE: message-only — no broadcast noise, and invisible to the
+    // module-window sweeps (this window is OURS, never the plugin's).
+    const HWND hwnd = CreateWindowExW(0, wc.lpszClassName, L"", 0,
+                                      0, 0, 0, 0, HWND_MESSAGE, nullptr, wc.hInstance, nullptr);
+    g_mmCaptureWindow.store(hwnd, std::memory_order_release);
+    engineLog(hwnd != nullptr
+        ? std::string("[plugin] D14 MM capture window armed (message-only, on the MM pump thread) — outgoing captures ride it bounded ") +
+              std::to_string(kCaptureBoundMs) + " ms (SMTO_ABORTIFHUNG)"
+        : std::string("[plugin] D14 MM capture window FAILED (err=") + std::to_string(GetLastError()) +
+              ") — outgoing captures fall back to the direct path under the monitor bound");
+}
+
+// The worker's bounded outgoing capture. true = served (the capture ran on
+// the plugin's message thread); false = the bound fired, the capture is
+// ABANDONED (the named receipt is emitted here) and the caller proceeds to
+// destroy→drain→unload.
+bool boundedRetireCaptureOnMessageThread(juce::AudioPluginInstance* inst,
+                                         const HostedPlugin& h, const char* trigger) {
+    const HWND hwnd = g_mmCaptureWindow.load(std::memory_order_acquire);
+    if (hwnd == nullptr || !IsWindow(hwnd)) {
+        // Startup/shutdown race: no window (or already reaped). The DIRECT
+        // capture path — still bounded by the monitor token, never bare.
+        engineLog(std::string("[plugin] retire-capture on the DIRECT path (no MM window; ") +
+                  trigger + ") — bounded by the D14 monitor token");
+        captureBoundStamp(g_captureBound, "capture", h.instanceId, trigger);
+        captureAndBroadcastState(inst, h, trigger);
+        captureBoundClear(g_captureBound);
+        return true;
+    }
+    BoundedCaptureRequest req{inst, &h, trigger};
+    {
+        std::lock_guard<std::mutex> lk(g_boundedCaptureMutex);
+        if (g_boundedCaptureReq != nullptr) {
+            // A previous request is still unserved — the MM is not pumping
+            // sent messages (the wedged shape). Never queue behind it.
+            engineLog(std::string("[plugin] retire-capture abandoned (plugin MM wedged) instance=") +
+                      h.instanceId + " trigger=" + trigger +
+                      " (a prior bounded capture is still unserved — the MM is not pumping)"
+                      " — a lost autosave is acceptable; a wedged host is not. Continuing destroy→drain→unload.");
+            return false;
+        }
+        g_boundedCaptureReq = &req;
+    }
+    DWORD_PTR dwResult = 0;
+    SetLastError(0);
+    const auto t0 = std::chrono::steady_clock::now();
+    const LRESULT r = SendMessageTimeoutW(hwnd, WM_SCORCH_BOUNDED_CAPTURE, 0, 0,
+                                          SMTO_ABORTIFHUNG, kCaptureBoundMs, &dwResult);
+    const long long waitedMs = d14SteadyMsNow() -
+        std::chrono::duration_cast<std::chrono::milliseconds>(
+            t0.time_since_epoch()).count();
+    {
+        std::lock_guard<std::mutex> lk(g_boundedCaptureMutex);
+        if (g_boundedCaptureReq == &req) g_boundedCaptureReq = nullptr;   // timed out before service — clear our own slot
+    }
+    if (r != 0) {
+        engineLog(std::string("[plugin] retire-capture served on the plugin's message thread (") +
+                  trigger + ") instance=" + h.instanceId +
+                  " wait=" + std::to_string(waitedMs) + " ms");
+        return true;
+    }
+    req.abandoned.store(true, std::memory_order_release);   // a late-arriving handler must no-op
+    engineLog(std::string("[plugin] retire-capture abandoned (plugin MM wedged) instance=") +
+              h.instanceId + " trigger=" + trigger +
+              " bound=" + std::to_string(kCaptureBoundMs) + "ms waited=" + std::to_string(waitedMs) +
+              "ms err=" + std::to_string(GetLastError()) +
+              " — a lost autosave is acceptable; a wedged host is not. Continuing destroy→drain→unload.");
+    return false;
+}
+#else
+// Non-Windows build: the capture is host-callable from any thread (documented
+// since 3d-3); the direct path under the monitor token is the bound.
+bool boundedRetireCaptureOnMessageThread(juce::AudioPluginInstance* inst,
+                                         const HostedPlugin& h, const char* trigger) {
+    captureBoundStamp(g_captureBound, "capture", h.instanceId, trigger);
+    captureAndBroadcastState(inst, h, trigger);
+    captureBoundClear(g_captureBound);
+    return true;
+}
+#endif
+
+// The D14 bound monitor — 1 s slices, additive (the D13 watchdog is
+// untouched). Names any capture / teardown-destroy step that blew its 5 s
+// ceiling, ONCE per stamped step. A capture abandon also bumps the abandon
+// generation: the capturing thread's post-call check then DISCARDS the
+// result. A step that clears inside its ceiling is never spoken of.
+void d14BoundMonitorBody() {
+    while (!g_should_exit.load(std::memory_order_acquire)) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(1000));
+        if (g_should_exit.load(std::memory_order_acquire)) break;
+        const long long now = d14SteadyMsNow();
+        {
+            std::lock_guard<std::mutex> lk(g_captureBound.mtx);
+            if (g_captureBound.active && !g_captureBound.fired && now >= g_captureBound.deadlineMs) {
+                g_captureBound.fired = true;
+                g_captureAbandonGen.fetch_add(1, std::memory_order_acq_rel);
+                engineLog("[plugin] capture abandoned (plugin MM wedged) instance=" + g_captureBound.iid +
+                          " trigger=" + g_captureBound.detail +
+                          " bound=" + std::to_string(kCaptureBoundMs) +
+                          "ms — the caller no longer waits; the result is discarded when/if the call returns");
+            }
+        }
+        {
+            std::lock_guard<std::mutex> lk(g_windowOpBound.mtx);
+            if (g_windowOpBound.active && !g_windowOpBound.fired && now >= g_windowOpBound.deadlineMs) {
+                g_windowOpBound.fired = true;
+                engineLog("[plugin] teardown destroy overrun (abandon receipt) instance=" + g_windowOpBound.iid +
+                          " (" + g_windowOpBound.what + ": " + g_windowOpBound.detail +
+                          ") — DestroyWindow did not return within " + std::to_string(kCaptureBoundMs) +
+                          "ms; TASK J ordering continues around it when it returns (the D13 watchdog is the forensic backstop)");
+            }
+        }
     }
 }
 
@@ -2518,6 +2766,12 @@ struct PluginInitRequest {
     // publish (after the loaded receipts) on the async path; the reuse path
     // honors its own copy on the WS thread.
     bool openEditor = false;
+    // D14 Fix B: additive "discardRetire":true — this request's OUTGOING
+    // retires are discard-class: NO state capture runs on the retiring
+    // instances (the field bench marks every leg; the shutdown path is
+    // discard-class by definition). The bench path never depends on a
+    // plugin's message-thread health.
+    bool discardRetire = false;
 };
 std::mutex g_pluginInitMutex;
 std::condition_variable g_pluginInitCv;
@@ -4182,6 +4436,20 @@ void queueProbeForClassId(const std::string& classId, ix::WebSocket* replyTo) {
 // deduped, first by scan order. Since 3f-7 the rows are RECORDED for lazy
 // probing — the frontend requests probes for the rows it shows (probe /
 // probeAll) and loaded plugins are probed automatically.
+// D14 receipt debt: the failed scan row carries the plugin NAME — the
+// receipt names the failed plugin, not just its path. A .vst3 BUNDLE (a
+// directory) is named by the bundle; a flat DLL by the file basename.
+static std::string scanRowNameFor(const std::string& path) {
+    const auto slash = path.find_last_of("/\\");
+    std::string base = (slash == std::string::npos) ? path : path.substr(slash + 1);
+    if (base.size() > 5) {
+        std::string tail = base.substr(base.size() - 5);
+        for (auto& c : tail) if (c >= 'A' && c <= 'Z') c = static_cast<char>(c - 'A' + 'a');
+        if (tail == ".vst3") base.erase(base.size() - 5);
+    }
+    return base;
+}
+
 void handle_scan(const juce::var& json, ix::WebSocket& ws) {
     juce::DynamicObject* obj = json.getDynamicObject();
     std::vector<std::string> dirs;
@@ -4216,6 +4484,7 @@ void handle_scan(const juce::var& json, ix::WebSocket& ws) {
         std::string tail = out.size() > 2000 ? out.substr(out.size() - 2000) : out;
         if (!failedJson.empty()) failedJson += ",";
         failedJson += std::string("{\"path\":\"") + escape_json(path) +
+                      "\",\"name\":\"" + escape_json(scanRowNameFor(path)) +
                       "\",\"error\":\"" + escape_json(error) +
                       "\",\"exitCode\":" + std::to_string(code) +
                       ",\"elapsedMs\":" + std::to_string(ms) +
@@ -4641,6 +4910,11 @@ int destroyAndDrainOnThisThread(const std::vector<ModuleWindow>& wins,
                                 const std::string& iid, const std::string& path) {
     const DWORD self = GetCurrentThreadId();
     int destroyed = 0;
+    // D14 teardown bound: the whole destroy+drain step is ONE stamped op —
+    // a plugin wedging inside WM_DESTROY is a named overrun receipt, not a
+    // silent hang (the D13 watchdog remains the forensic backstop).
+    captureBoundStamp(g_windowOpBound, "teardown-destroy", iid,
+                      "module windows destroy+drain on the owner thread");
     for (const ModuleWindow& w : wins) {
         if (w.tid != self) continue;   // not ours — never DestroyWindow cross-thread
         // THE 445e7cf RUN'S BUG (acceptance 39687874816: 46 retires, every
@@ -4658,7 +4932,7 @@ int destroyAndDrainOnThisThread(const std::vector<ModuleWindow>& wins,
                   " (current-thread destroy — WM_DESTROY delivered inline) ok=" + (ok ? "1" : "0") +
                   " instance=" + iid + " module=" + wideToUtf8(w.module));
     }
-    if (destroyed == 0) return 0;
+    if (destroyed == 0) { captureBoundClear(g_windowOpBound); return 0; }
     int drained = 0;
     MSG msg;
     while (drained < 256 && PeekMessageW(&msg, nullptr, 0, 0, PM_REMOVE)) {
@@ -4670,6 +4944,7 @@ int destroyAndDrainOnThisThread(const std::vector<ModuleWindow>& wins,
         engineLog("[module-teardown] drained " + std::to_string(drained) +
                   " queued message(s) on thread " + std::to_string(self) +
                   " while the module is still mapped instance=" + iid + " module=" + path);
+    captureBoundClear(g_windowOpBound);
     return destroyed;
 }
 
@@ -5275,6 +5550,11 @@ void handle_load(const juce::var& json, ix::WebSocket& ws, size_t byteSize) {
     // Milestone 1 — EXPLICIT UNLOAD: {"plugins": []} (an empty ARRAY, not an
     // absent field) means "host zero plugins". Documented in ASSUMPTIONS.md.
     const bool unloadRequested = pluginsArraySent && !pluginRequested && !channelsBad;
+    // D14 Fix B: additive "discardRetire":true — the caller marks this
+    // request's outgoing retires discard-class (the field bench marks every
+    // leg): no state capture runs on the retiring instances at all.
+    const bool discardRetireRequested =
+        static_cast<bool>(static_cast<double>(obj->getProperty("discardRetire")));
 
     // Routing: NEW routing map first; legacy flat channels map otherwise.
     // Both normalize into channelOfTrack (WIDE channels) + instanceOfTrack.
@@ -5821,7 +6101,7 @@ void handle_load(const juce::var& json, ix::WebSocket& ws, size_t byteSize) {
                     // superseded by the request that replaces it.
                     supersededPendingSeq = g_pluginInitRequest.seq;
                 }
-                g_pluginInitRequest = PluginInitRequest{std::move(entries), seq, false, loadWantsEditor};
+                g_pluginInitRequest = PluginInitRequest{std::move(entries), seq, false, loadWantsEditor, discardRetireRequested};
                 g_pluginInitPending = true;
                 ++g_pluginInitGen;
                 g_pluginInitNewestSeq = seq;
@@ -5855,7 +6135,7 @@ void handle_load(const juce::var& json, ix::WebSocket& ws, size_t byteSize) {
             if (g_pluginInitPending) {
                 supersededPendingSeq = g_pluginInitRequest.seq;   // 0.9.2: no silent drops
             }
-            g_pluginInitRequest = PluginInitRequest{{}, seq, true, false};
+            g_pluginInitRequest = PluginInitRequest{{}, seq, true, false, discardRetireRequested};
             g_pluginInitPending = true;
             ++g_pluginInitGen;
             g_pluginInitNewestSeq = seq;
@@ -7372,6 +7652,11 @@ int main(int argc, char** argv) {
         // change WITHOUT notifying (2-identical-reads debounce there).
         g_latencyWatch = new LatencyWatchTimer();
         g_latencyWatch->startTimer(2000);
+#ifdef _WIN32
+        // D14 Fix A: the bounded-capture target lives ON the MM pump thread —
+        // the thread every hosted plugin treats as its own message thread.
+        createMmCaptureWindowOnThisThread();
+#endif
         // Blocks until main() calls stopDispatchLoop() at shutdown. The loop
         // is event-driven (no polling, no keep-alive): it wakes for every
         // posted JUCE message and sleeps otherwise.
@@ -7428,6 +7713,10 @@ int main(int argc, char** argv) {
             }
         }
     });
+
+    // D14: the bound monitor — names capture/teardown steps that blew the
+    // 5 s ceiling (additive; the D13 watchdog is untouched).
+    std::thread d14_bound_monitor([]() { d14BoundMonitorBody(); });
 
     // Stage 3b-fix: NO audio initialization at startup. Audio is brought up
     // lazily on the first transport play (or simulated via --null-audio), so
@@ -8044,12 +8333,24 @@ int main(int argc, char** argv) {
                     juce::AudioPluginInstance* oldInst =
                         oldMeta->rawInstance.load(std::memory_order_acquire);
                     if (oldInst == nullptr) continue;
+                    if (req.discardRetire) {
+                        // D14 Fix B: discard-class unload — no capture (see
+                        // the diff-remove site).
+                        engineLog("[plugin] state capture SKIPPED (discard-class retire) instance=" +
+                                  oldMeta->instanceId +
+                                  " (unload (worker)) | seq " + std::to_string(req.seq) +
+                                  " — destroy→drain→unload proceeds with no plugin-call dependency (D14 Fix B)");
+                        continue;
+                    }
                     // 0.9.2: the capture is a NAMED phase now — a hung
                     // getStateInformation here was invisible to the
                     // watchdog (no phase record) and the request had
                     // no path to a terminal receipt.
+                    // D14 Fix A: the phase guard now wraps a BOUNDED send
+                    // (the plugin's message thread, 5 s ceiling) — never a
+                    // bare worker-side plugin call.
                     InitPhaseGuard pg("state-capture", oldMeta->instanceId, req.seq);
-                    captureAndBroadcastState(oldInst, *oldMeta, "unload (worker)");
+                    boundedRetireCaptureOnMessageThread(oldInst, *oldMeta, "unload (worker)");
                 }
                 auto doneU = std::make_shared<std::atomic<bool>>(false);
                 juce::MessageManager::callAsync([doneU] {
@@ -8179,6 +8480,9 @@ int main(int argc, char** argv) {
                 engineLog("[plugin] instance changed instance=" + id +
                           " (binary swapped — retire old, instantiate new, SAME slot) | seq " +
                           std::to_string(req.seq));
+            if (req.discardRetire)
+                engineLog("[plugin] discard-class retires for seq " + std::to_string(req.seq) +
+                          " (client-marked) — outgoing captures SKIPPED (D14 Fix B: the retire path never depends on a plugin's message-thread health)");
             // ── REMOVED pass (before anything else — survivors must never
             // wait behind a removal). Per instance: worker-side state capture
             // ("diff-remove (worker)") → retire MM job → bounded wait → free
@@ -8191,8 +8495,23 @@ int main(int argc, char** argv) {
                 if (m == nullptr) continue;
                 juce::AudioPluginInstance* oldInst = m->rawInstance.load(std::memory_order_acquire);
                 if (oldInst != nullptr) {
-                    InitPhaseGuard pg("state-capture", iid, req.seq);
-                    captureAndBroadcastState(oldInst, *m, "diff-remove (worker)");
+                    if (req.discardRetire) {
+                        // D14 Fix B: the bench (and any client that marks it)
+                        // retires DISCARD-CLASS — no capture at all. The
+                        // harness path must never depend on a plugin's
+                        // message-thread health.
+                        engineLog("[plugin] state capture SKIPPED (discard-class retire) instance=" + iid +
+                                  " (diff-remove (worker)) | seq " + std::to_string(req.seq) +
+                                  " — destroy→drain→unload proceeds with no plugin-call dependency (D14 Fix B)");
+                    } else {
+                        // D14 Fix A: the outgoing capture rides the plugin's
+                        // own message thread, bounded 5 s (SendMessageTimeout,
+                        // SMTO_ABORTIFHUNG). A wedge here can no longer hold
+                        // the worker: timeout → abandon receipt → the
+                        // destroy→drain→unload below proceeds.
+                        InitPhaseGuard pg("state-capture", iid, req.seq);
+                        boundedRetireCaptureOnMessageThread(oldInst, *m, "diff-remove (worker)");
+                    }
                 }
                 auto doneR = std::make_shared<std::atomic<bool>>(false);
                 juce::MessageManager::callAsync([doneR, iid] {
@@ -8464,11 +8783,21 @@ int main(int argc, char** argv) {
                         juce::AudioPluginInstance* oldInst =
                             oldMeta->rawInstance.load(std::memory_order_acquire);
                         if (oldInst != nullptr) {
-                            // 0.9.2: NAMED phase — a hung getStateInformation in
-                            // the replace capture was invisible to the watchdog
-                            // (no phase record between "prepare" and "commit").
-                            InitPhaseGuard pg("state-capture", oldMeta->instanceId, req.seq);
-                            captureAndBroadcastState(oldInst, *oldMeta, "replace (worker)");
+                            if (req.discardRetire) {
+                                // D14 Fix B: discard-class replace — no capture.
+                                engineLog("[plugin] state capture SKIPPED (discard-class retire) instance=" +
+                                          oldMeta->instanceId +
+                                          " (replace (worker)) | seq " + std::to_string(req.seq) +
+                                          " — destroy→drain→unload proceeds with no plugin-call dependency (D14 Fix B)");
+                            } else {
+                                // 0.9.2: NAMED phase — a hung getStateInformation in
+                                // the replace capture was invisible to the watchdog
+                                // (no phase record between "prepare" and "commit").
+                                // D14 Fix A: bounded — rides the plugin's message
+                                // thread, 5 s ceiling, never a bare worker call.
+                                InitPhaseGuard pg("state-capture", oldMeta->instanceId, req.seq);
+                                boundedRetireCaptureOnMessageThread(oldInst, *oldMeta, "replace (worker)");
+                            }
                         }
                     }
                 }
@@ -9389,6 +9718,9 @@ int main(int argc, char** argv) {
     plugin_init_watchdog.join();
     // Stage 3f-7 (4a): the heartbeat sleeps in 1 s slices — join is bounded.
     mm_heartbeat_thread.join();
+    // D14: the bound monitor sleeps in 1 s slices and re-checks the exit
+    // flag — join is bounded.
+    d14_bound_monitor.join();
     // Stage 3f-2: the probe thread checks g_should_exit between its 250 ms
     // wait slices and kills any in-flight probe child — join is bounded.
     scan_probe_thread.join();

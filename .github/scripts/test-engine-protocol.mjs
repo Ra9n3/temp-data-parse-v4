@@ -184,7 +184,11 @@ const fixtureDir = process.argv[4] ?? "";
 const url = `ws://127.0.0.1:${port}`;
 // D12: the expected engine identity — ONE knob for every mode's hello check
 // (the bench ps1 halts on any other build).
-const EXPECTED_ENGINE_VERSION = "0.14.2";
+// 0.14.3 = D14: bounded retire-captures (SendMessageTimeout, SMTO_ABORTIFHUNG,
+// 5 s) + discard-class retires (this harness marks every field leg
+// discardRetire:true) + the receipt debts (scan failed-plugin name, per-leg
+// init timings, (panic)/exit-vs-running in the ps1 half).
+const EXPECTED_ENGINE_VERSION = "0.14.3";
 // D12 receipt-provenance: the engine self-reports the exact commit it was
 // built at (hello.commit — CMake pins SCORCH_ENGINE_COMMIT from git at
 // configure time; pre-embed builds simply omit the field). EVERY mode logs it
@@ -641,6 +645,9 @@ let fbCyclesDone = { falcon: 0, bbcso: 0 };
 let fbPeak = 0, fbErrors = [];
 let fbLastProgressAt = 0;
 let fbConnectedAt = 0;
+// D14 receipt debt: per-leg init timings — the wire-attested wall time from
+// the leg's load request to its plugin_state "loaded" receipt.
+const fbLegInitMs = {};   // instanceId -> ms
 const fbStamp = () => { fbLastProgressAt = Date.now(); };
 const fbStateDump = (why) =>
   `field bench stall (${why}): phase=${fbPhase} leg=${fbLeg}/${fbLegs.length} live=${fbLive} loadInFlight=${fbLoadInFlight} falcon=${fbCyclesDone.falcon}/${FB_CYCLES} bbcso=${fbCyclesDone.bbcso}/${FB_CYCLES} opened=${fbOpened.falcon + fbOpened.bbcso} closed=${fbClosed.falcon + fbClosed.bbcso} peak=${fbPeak.toFixed(3)} errors=${fbErrors.length} | age since last progress=${Date.now() - fbLastProgressAt}ms | the load payload (byte-length = the fingerprint) is logged above as "field bench load payload"`;
@@ -649,9 +656,15 @@ const fbSendLoad = (leg) => {
     type: "load", seq: ++fbSeq, events: fbEvents, meta: FB_META,
     routing: { t1: { inst: leg.instanceId, ch: 1 } },
     plugins: [{ instanceId: leg.instanceId, uid: leg.row.uid, path: leg.row.path, name: leg.row.name }],
+    // D14 Fix B: every field-bench retire is DISCARD-CLASS — the engine skips
+    // the outgoing state capture entirely. The bench path must never depend
+    // on a plugin's message-thread health (the run-4/190901 wedge class);
+    // a lost autosave is acceptable on the bench by definition.
+    discardRetire: true,
   });
-  console.log(`[test] field bench load payload (${payload.length} bytes): ${payload}`);
+  console.log(`[test] field bench load payload (${payload.length} bytes, discardRetire=true — D14 Fix B): ${payload}`);
   ws.send(payload);
+  fbLegInitMs[leg.instanceId] = -Date.now();   // armed (negative = start epoch); completed at the loaded receipt
 };
 const fbOpen = () => ws.send(JSON.stringify({ type: "openEditor", instanceId: fbLive }));
 const fbFinishLegOrStop = () => {
@@ -665,6 +678,9 @@ const fbFinishLegOrStop = () => {
     fbSendLoad(next);
   } else {
     console.log(`[test] all field legs done — stopping the transport (falcon=${fbCyclesDone.falcon}/${FB_CYCLES} bbcso=${fbCyclesDone.bbcso}/${FB_CYCLES})`);
+    const legTiming = Object.entries(fbLegInitMs).filter(([, v]) => v > 0)
+      .map(([k, v]) => `${k}=${(v / 1000).toFixed(1)}s`).join(" ");
+    console.log(`[test] per-leg init timings: ${legTiming || "none"} (load request → loaded, D14 receipt debt)`);
     fbPhase = 4;
     fbStamp();
     ws.send(JSON.stringify({ type: "transport", command: "stop" }));
@@ -2076,6 +2092,15 @@ ws.addEventListener("message", (event) => {
       if (falconRow) present.push({ key: "falcon", row: falconRow, instanceId: "field-falcon", vehicle: false });
       if (bbcsoRow) present.push({ key: "bbcso", row: bbcsoRow, instanceId: "field-bbcso", vehicle: false });
       console.log(`[test] field bench legs: falcon=${falconRow ? `${falconRow.name} (${falconRow.uid})` : "ABSENT"} bbcso=${bbcsoRow ? `${bbcsoRow.name} (${bbcsoRow.uid})` : "ABSENT"} — the scan saw ${(msg.plugins ?? []).length} plugin(s)`);
+      // D14 receipt debt: name every FAILED scan row (the receipt names the
+      // failed plugin — the engine's failed[] rows carry "name" since 0.14.3;
+      // the path basename is the fallback for pre-0.14.3 engines).
+      const failedRows = msg.failed ?? [];
+      for (const f of failedRows) {
+        const nm = f.name || String(f.path ?? "?").split(/[\\/]/).pop();
+        console.log(`[test] scan failed-plugin: ${nm} — ${f.error} (exit ${f.exitCode}, ${f.elapsedMs} ms)`);
+      }
+      if (failedRows.length) console.log(`[test] scan failed-plugin count: ${failedRows.length} (named above — D14 receipt debt)`);
       if (present.length === 0) {
         if (FB_REQUIRE) fbBail("field bench: BOTH legs absent under SCORCH_FIELD_REQUIRE=1 — a desktop bench that cannot see Falcon AND BBCSO is a mis-scanned bench (check the dirs passed to field-bench.ps1)");
         console.log("[test] field legs ABSENT — hosted harness-validation pass (0 field cycles; the desktop run exercises the real legs)");
@@ -2102,6 +2127,10 @@ ws.addEventListener("message", (event) => {
       fbLive = fbLoadInFlight;
       fbLoadInFlight = null;
       const leg = fbLegs[fbLeg];
+      if (fbLegInitMs[leg.instanceId] < 0) {
+        fbLegInitMs[leg.instanceId] += Date.now();
+        console.log(`[test] leg init timing: ${leg.row.name} (${leg.instanceId}) ${(fbLegInitMs[leg.instanceId] / 1000).toFixed(1)} s — load request → plugin_state loaded (wire-attested; D14 receipt debt)`);
+      }
       if (leg.vehicle || fbCyclesDone[leg.key] > 0) {
         console.log(`[test] ${fbLive} (${leg.row.name}) live — retire-vehicle leg: no cycles, advancing to stop (the module it retired is engine.log's half of the receipt)`);
         fbFinishLegOrStop();

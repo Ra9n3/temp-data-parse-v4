@@ -9,6 +9,13 @@
 #     engine's '[module-guard] retire instance=field-<plugin> orphan=yes
 #     windows=0 pinned=0 failed=0' teardown receipts are counted from
 #     engine.log (this script's half of the receipt)
+#   - D14 (0.14.3): every bench retire is DISCARD-CLASS (the harness marks
+#     discardRetire:true — the bench path never depends on a plugin's
+#     message-thread health) + the receipt debts land here: exit-0 vs STILL
+#     RUNNING via timestamps, the (panic) tag, the scan failed-plugin name,
+#     per-leg init timings, capture-abandon + STALL-BUNDLE lines. D13
+#     machinery (flat 120 s watchdog, STALL-BUNDLE + workerTid, all-thread
+#     dump, dump-then-TERMINATE) untouched.
 #   - P1 ARMED (in-engine crash handler + MiniDumpWithUnloadedModules, always
 #     compiled in): ANY crash = HALT-AND-ADJUDICATE — the receipt names the
 #     dump, the bench exits RED, nothing is cleaned up.
@@ -18,7 +25,7 @@
 # Usage (from the bench folder):
 #   powershell -ExecutionPolicy Bypass -File .\field-bench.ps1
 # Options:
-#   -EngineExe .\scorch-engine.exe     (the 0.14.2 engine from the CI artifact)
+#   -EngineExe .\scorch-engine.exe     (the 0.14.3 engine from the CI artifact)
 #   -ScanDirs "C:\Program Files\Common Files\VST3","C:\Program Files (x86)\Common Files\VST3"
 #   -Cycles 50    -Port 9421    -Seed 20261023    -OutDir .\field-bench-<ts>
 # ============================================================================
@@ -87,8 +94,8 @@ Write-Host "engine: $engineVersion"
 Write-Host "node:   $nodeVersion"
 Write-Host "scan dirs: $($dirsOk -join ' | ')"
 Write-Host "cycles per leg: $Cycles  seed: $Seed  require-both-legs: 1"
-if ($engineVersion -notmatch "0\.14\.2") {
-  Verdict "HALT: the engine did not report 0.14.2 ('$engineVersion'). This bench validates the TASK J + D13 branch build (the 0.14.1 init rework REVERTED to the 0.14.0 semantics + dump-then-TERMINATE crash forensics) — use the scorch-engine-windows-exe artifact from the LATEST fieldbench CI run (the D13 build, not the older 0.14.0/0.14.1)."
+if ($engineVersion -notmatch "0\.14\.3") {
+  Verdict "HALT: the engine did not report 0.14.3 ('$engineVersion'). This bench validates the TASK J + D14 build (bounded retire-captures + discard-class bench retires on top of the D13 revert/diagnostics) — use the scorch-engine-windows-exe artifact from the LATEST fieldbench CI run (the 0.14.3/D14 build, not the older 0.14.0/0.14.1/0.14.2)."
   exit 2
 }
 
@@ -110,13 +117,20 @@ if ($proc.HasExited) {
 
 node $Mjs $Port fieldbench @dirsOk 2>&1 | Tee-Object -FilePath $transcript
 $mjsExit = $LASTEXITCODE
+$harnessEndAt = Get-Date
 
 # ---- engine exit (exit-verified read — the log is final once the process is gone)
+# D14 receipt debt: exit-0 vs STILL RUNNING decided by TIMESTAMPS, not hope —
+# the engine's own exit receipt ([engine] clean exit 0 / exit 0 (...)) carries
+# the engine.log wall clock; a force-stop records how long the log had been
+# silent when the process was killed.
 $proc.WaitForExit(30000) | Out-Null
 $engineExit = $null
+$forceStopAt = $null
 if ($proc.HasExited) { $engineExit = $proc.ExitCode }
 else {
-  Write-Host "note: engine still running 30 s after the harness exit — stopping it (shutdown-hang shape; the receipt will say so)"
+  $forceStopAt = Get-Date
+  Write-Host "note: engine still running 30 s after the harness exit — stopping it (shutdown-hang shape; the receipt will say so, with the log-silence timestamps)"
   Stop-Process -Id $proc.Id -Force -ErrorAction SilentlyContinue
 }
 
@@ -133,6 +147,28 @@ function Count-Windows0($lines) { return @($lines | Where-Object { $_.Line -matc
 $pinCount = @($retireAll | Where-Object { $_.Line -match "pinned=[1-9]" -or $_.Line -match "failed=[1-9]" }).Count
 $pinnedGuard = @($procLines | Select-String -Pattern "\[module-guard\] PINNED")
 $unresolvedGuard = @($procLines | Select-String -Pattern "\[module-guard\] UNRESOLVED")
+
+# ---- D14 receipt debts: bounded-capture lines, STALL-BUNDLE, per-leg timings, timestamps
+function LogTs([string]$line) {
+  if ($line -match '^\[(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}\.\d{3})\]') {
+    try { return [datetime]::ParseExact($Matches[1], 'yyyy-MM-dd HH:mm:ss.fff', $null) } catch { return $null }
+  }
+  return $null
+}
+$lastLogLine = ""
+$lastLogTs = $null
+for ($i = $procLines.Count - 1; $i -ge 0; $i--) {
+  $t = "" + $procLines[$i]
+  if ($t.Trim().Length -gt 0) { $lastLogLine = $t.Trim(); $lastLogTs = LogTs $t; break }
+}
+$exitReceiptLine = @($procLines | Select-String -Pattern '\[engine\] (clean exit 0|exit 0 \()') | Select-Object -Last 1
+$abandonLines = @($procLines | Select-String -Pattern 'retire-capture abandoned|capture abandoned|capture completed AFTER abandon|bounded capture arrived AFTER')
+$skipLines = @($procLines | Select-String -Pattern 'state capture SKIPPED|discard-class retires for seq')
+$stallLines = @($procLines | Select-String -Pattern 'STALL-BUNDLE')
+$initTimingLines = @($procLines | Select-String -Pattern '\[plugin\] init timing phase=')
+$transcriptLines = Get-Content $transcript -ErrorAction SilentlyContinue
+$legTimingLines = @($transcriptLines | Select-String -Pattern 'leg init timing:|per-leg init timings:')
+$scanFailedLines = @($transcriptLines | Select-String -Pattern 'scan failed-plugin:')
 
 # ---- P1: crash channel ------------------------------------------------------
 $crashLines = @($procLines | Select-String -Pattern "\[crash\]")
@@ -167,7 +203,7 @@ $singleLeg = (-not $legsAbsent) -and (($retireFalcon.Count -eq 0) -or ($retireBb
 
 $verdict = "GREEN"
 $verdictWhy = @()
-if ($crashed) { $verdict = "HALT-AND-ADJUDICATE"; $verdictWhy += "crash evidence on the record (see the P1 section) — adjudicate the dump before ANY further run" }
+if ($crashed) { $verdict = "HALT-AND-ADJUDICATE (panic)"; $verdictWhy += "PANIC — crash evidence on the record (see the P1 section): the run is a panic, not a completed bench. Adjudicate the dump before ANY further run" }
 elseif (-not $mjsGreen) { $verdict = "RED"; $verdictWhy += "the fieldbench harness exited $mjsExit (see the harness half below)" }
 elseif ($legsAbsent) { $verdict = "RED"; $verdictWhy += "both field legs were ABSENT to the harness — a desktop bench must see Falcon AND BBCSO (SCORCH_FIELD_REQUIRE=1 should have failed it; adjudicate the scan)" }
 elseif ($pinCount -gt 0) { $verdict = "RED"; $verdictWhy += "pin count $pinCount > 0 — teardown-order residue refused an unload (a leak, never an unmapped dispatch; adjudicate the per-window receipts)" }
@@ -176,8 +212,8 @@ elseif ($unresolvedGuard.Count -gt 0) { $verdict = "RED"; $verdictWhy += "UNRESO
 elseif ($singleLeg) { $verdict = "PARTIAL"; $verdictWhy += "only ONE plugin's cycle leg ran (the other was absent) — a single-leg run has no cross-plugin orphaning retire, so its windows=0 count is 0 by construction; the adjudication requires BOTH legs" }
 
 $receipt = @()
-# ── D13: the receipt HEADER is the engine build commit — ONE line, first ──
-$receipt += "engine commit: $engineCommit   (0.14.2 — the exact build this receipt describes)"
+# ── D13/D14: the receipt HEADER is the engine build commit — ONE line, first ──
+$receipt += "engine commit: $engineCommit   (0.14.3 — the exact build this receipt describes)"
 $receipt += "SCORSH TASK J FIELD BENCH — receipt"
 $receipt += "UTC:      $((Get-Date).ToUniversalTime().ToString('yyyy-MM-dd HH:mm:ss'))"
 $receipt += "engine:   $engineVersion"
@@ -199,8 +235,52 @@ foreach ($l in $pinnedGuard) { $receipt += "  $($l.Line.Trim())" }
 $receipt += "[module-guard] UNRESOLVED lines: $($unresolvedGuard.Count)"
 foreach ($l in $unresolvedGuard) { $receipt += "  $($l.Line.Trim())" }
 $receipt += ""
+$receipt += "[D14 — bounded capture / discard-class retires (the bench legs are discardRetire:true: ZERO capture lines is the GREEN shape)]"
+$receipt += "capture-abandon lines: $($abandonLines.Count)  (GREEN expectation: 0 — a nonzero count means a real plugin wedged its message thread mid-retire; the retire CONTINUED anyway)"
+foreach ($l in $abandonLines) { $receipt += "  $($l.Line.Trim())" }
+$receipt += "discard-class skip lines: $($skipLines.Count)  (GREEN expectation: 1 'discard-class retires for seq' per load + 1 'state capture SKIPPED (discard-class retire)' per retired module)"
+foreach ($l in $skipLines) { $receipt += "  $($l.Line.Trim())" }
+$receipt += ""
+$receipt += "[D13 — STALL-BUNDLE lines (with workerTid; GREEN expectation: 0)]"
+$receipt += "STALL-BUNDLE count: $($stallLines.Count)"
+foreach ($l in $stallLines) { $receipt += "  $($l.Line.Trim())" }
+$receipt += ""
+$receipt += "[D14 — per-leg init timings (harness wire-attested wall times + the engine's per-phase receipts)]"
+foreach ($l in $legTimingLines) { $receipt += "  $($l.Line.Trim())" }
+foreach ($inst in @('field-falcon', 'field-bbcso', 'field-falcon2')) {
+  $instLines = @($initTimingLines | Where-Object { $_.Line -match "instance=$inst " })
+  if ($instLines.Count -gt 0) {
+    $receipt += "  $inst phase breakdown (engine.log):"
+    foreach ($l in $instLines) { $receipt += "    $($l.Line.Trim())" }
+  }
+}
+if (($legTimingLines.Count -eq 0) -and ($initTimingLines.Count -eq 0)) { $receipt += "  (no init-timing lines — the legs were absent, or a pre-0.14.3 harness produced this log)" }
+$receipt += ""
+$receipt += "[D14 — scan failures (named; GREEN expectation: none)]"
+$receipt += "scan failed-plugin lines: $($scanFailedLines.Count)"
+foreach ($l in $scanFailedLines) { $receipt += "  $($l.Line.Trim())" }
+$receipt += ""
 $receipt += "[P1 — crash channel (MiniDumpWithUnloadedModules armed)]"
-$receipt += "engine exit code: $(if ($engineExit -ne $null) { $engineExit } else { 'STILL RUNNING (stopped; shutdown-hang shape)' })"
+# D14 receipt debts: exit-0 vs STILL RUNNING via TIMESTAMPS + the (panic) tag.
+if ($engineExit -ne $null) {
+  $exitDesc = "exit code $engineExit"
+  if ($exitReceiptLine) {
+    $t = LogTs $exitReceiptLine.Line
+    if ($t -ne $null) { $exitDesc += " — exit receipt at $($t.ToString('HH:mm:ss.fff')) (timestamp-verified: the engine said goodbye in engine.log before the process died)" }
+  } else {
+    $exitDesc += " — NO exit receipt in engine.log (the process died without its own receipt — treat as a crash shape)"
+  }
+  $receipt += "engine exit: $exitDesc"
+} else {
+  $stopRef = $forceStopAt
+  if ($stopRef -eq $null) { $stopRef = Get-Date }
+  $age = -1
+  if ($lastLogTs -ne $null) { $age = [int]($stopRef - $lastLogTs).TotalSeconds }
+  $receipt += "engine exit: STILL RUNNING — force-stopped at $(if ($forceStopAt -ne $null) { $forceStopAt.ToString('HH:mm:ss.fff') } else { '?' })"
+  $receipt += "  last engine.log line at $(if ($lastLogTs -ne $null) { $lastLogTs.ToString('HH:mm:ss.fff') } else { 'none' }) (age ${age}s at the force-stop — the log-silence window; the shutdown-hang shape, timestamped)"
+  $receipt += "  last line: $lastLogLine"
+}
+$receipt += "panic: $(if ($crashed) { 'YES — the engine died on a crash path (the P1 evidence below); the verdict is tagged (panic)' } else { 'none — no crash-path death on the record' })"
 $receipt += "[crash] lines in the engine.log slice: $($crashLines.Count)"
 foreach ($l in $crashLines) { $receipt += "  $($l.Line.Trim())" }
 $receipt += "engine-crash.log: $(if ($crashLogNow) { 'present' } else { 'absent' })$(if ($crashLogTail) { ' (NEW since this bench started)' })"
@@ -212,8 +292,8 @@ $receipt += ""
 $receipt += "VERDICT: $verdict"
 foreach ($w in $verdictWhy) { $receipt += "  - $w" }
 if ($verdict -eq "GREEN") {
-  $receipt += "  - falcon: $($retireFalcon.Count) retire receipt(s), $falconRetires0 windows=0; bbcso: $($retireBbcso.Count) retire receipt(s), $bbcsoRetires0 windows=0; pin count $pinCount; engine exit 0"
-  $receipt += "  - the dangling-WNDPROC class held closed under the REAL editors, REAL audio, mid-play module retires"
+  $receipt += "  - falcon: $($retireFalcon.Count) retire receipt(s), $falconRetires0 windows=0; bbcso: $($retireBbcso.Count) retire receipt(s), $bbcsoRetires0 windows=0; pin count $pinCount; capture-abandons: $($abandonLines.Count); STALL-BUNDLEs: $($stallLines.Count); engine exit 0 (timestamp-verified)"
+  $receipt += "  - the dangling-WNDPROC class held closed under the REAL editors, REAL audio, mid-play module retires (discard-class, D14)"
 }
 $receipt | Out-File -FilePath $receiptPath -Encoding utf8
 

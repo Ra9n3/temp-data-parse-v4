@@ -2,13 +2,25 @@
 
 Canon: this file is the bench contract. The harness mode is `fieldbench` in
 `.github/scripts/test-engine-protocol.mjs`; the desktop runner script is
-`.github/scripts/field-bench.ps1`. The engine build under test is **0.14.2**
-(TASK J root fix + D13: the 0.14.1 init rework REVERTED to the 0.14.0
-semantics — flat 120 s wall-clock watchdog, state-capture at the exact
-0.14.0 placement — plus real diagnostics: 10 s init heartbeats, an
-ALL-THREAD `init-stall-*.dmp` at every watchdog declaration, and
-dump-then-TERMINATE on any AV-class exception); the bench exercises the
-exact load/open/close/retire paths the app uses. The build **self-reports
+`.github/scripts/field-bench.ps1`. The engine build under test is **0.14.3**
+(TASK J root fix + D13 — the 0.14.1 init rework REVERTED to the 0.14.0
+semantics: flat 120 s wall-clock watchdog, state-capture placement, 10 s init
+heartbeats, an ALL-THREAD `init-stall-*.dmp` at every watchdog declaration,
+dump-then-TERMINATE on any AV-class exception — plus **D14**: the
+retire-capture wedge class closed at both sites. Fix A: an outgoing state
+capture rides the plugin's own message thread via `SendMessageTimeout`
+(`SMTO_ABORTIFHUNG`, 5 s hard ceiling) to a message-only MM window; on
+timeout the capture is ABANDONED — the named receipt
+`retire-capture abandoned (plugin MM wedged)` fires and the destroy→drain→unload
+continues; the ceiling is enforced on EVERY capture path (the D14 monitor
+names on-MM/direct breaches and discards late results). Fix B: the bench's
+retires are DISCARD-CLASS — the harness marks `discardRetire:true` on every
+leg load and the engine skips outgoing captures entirely (plus at shutdown);
+the bench path never depends on a plugin's message-thread health. Teardown
+bounds: every DestroyWindow step in the retire teardown carries the same 5 s
+deadline with named overrun receipts — TASK J owner-thread ordering
+untouched. D13 machinery is untouched); the bench exercises the exact
+load/open/close/retire paths the app uses. The build **self-reports
 its commit** (CMake pins `SCORCH_ENGINE_COMMIT` from `git rev-parse` at
 configure time; `-dirty` on a dirty tree, `unknown` on a non-git configure)
 in the `--version` output, the hello payload, and the `[engine] start`
@@ -45,6 +57,30 @@ halt-and-adjudicate on any crash. On green → merge.
   each cycled module retires UNDER PLAY at the next leg's load, and the final
   vehicle re-load retires the last cycled module (nothing frees at exit).
 - **pin count**: retires with `pinned=[1-9]` or `failed=[1-9]` — expected 0.
+- **capture-abandon lines** (D14): `retire-capture abandoned (plugin MM
+  wedged)` / `capture abandoned (plugin MM wedged)` / `capture completed
+  AFTER abandon` — expected **0** on GREEN (the bench legs are
+  discard-class, so no capture runs at all; a nonzero count on an app-shaped
+  run means a real plugin wedged its message thread mid-retire and the
+  retire CONTINUED — the evidence the ruling asked for).
+- **discard-class skip lines** (D14): 1 `discard-class retires for seq` line
+  per leg load + 1 `state capture SKIPPED (discard-class retire)` per retired
+  module — the Fix B proof that the bench path touches no plugin message
+  thread on the retire side.
+- **per-leg init timings** (D14 receipt debt): the harness's wire-attested
+  `leg init timing: <name> (<instance>) <sec> s` lines + the engine's
+  per-phase `[plugin] init timing phase=...` receipts, grouped per leg in the
+  receipt — where each leg's init time actually went, per run.
+- **exit-0 vs STILL RUNNING via timestamps** (D14 receipt debt): the
+  receipt's exit line is decided by engine.log wall clocks — an exit is
+  timestamp-verified against the engine's own exit receipt; a force-stop
+  records the log-silence window (last line age at the kill).
+- **(panic) tag** (D14 receipt debt): any crash-path death tags the verdict
+  `HALT-AND-ADJUDICATE (panic)` and the receipt carries an explicit
+  `panic: YES/none` line.
+- **scan failed-plugin name** (D14 receipt debt): every failed scan row is
+  NAMED (the engine's `failed[]` rows carry `name` since 0.14.3; the harness
+  prints `scan failed-plugin: <name> — <error>`) and lands in the receipt.
 
 ## Prerequisites (once)
 
@@ -65,7 +101,7 @@ powershell -ExecutionPolicy Bypass -File .\field-bench.ps1
 
 What it does: checks prereqs → records the P1 baseline (engine.log offset,
 existing dumps — nothing is ever deleted) → verifies the engine reports
-0.14.1 → starts the engine **with the REAL audio device** (the field shape)
+0.14.3 → starts the engine **with the REAL audio device** (the field shape)
 → runs the fieldbench machine: scan → play tick 0 → Falcon leg (50 editor
 open/close cycles, seeded jitter 200–600 ms close / 0–160 ms reopen) → mid-play
 BBCSO load (Falcon's module retires UNDER PLAY) → BBCSO leg (50 cycles) →
@@ -195,6 +231,38 @@ Env knobs (harness side, normally untouched): `SCORCH_FB_LOAD_STALL_MS`
   and drains messages BEFORE touching the wrapper. Contract unchanged:
   >=50 clean cycles per plugin. Re-run: same command (engine artifact: the
   NEW scorch-engine-windows-exe 0.14.2).
+- **2026-10-22/23 (run 4, init-stall dump) — RED, adjudicated ENGINE: the
+  retire-capture wedge closed at BOTH sites (D14, engine 0.14.3).** 0.14.2
+  un-broke Falcon (50/50 clean on real hardware) but the BBCSO
+  state-capture hang returned, the same shape as 0.14.0/190901 — and the
+  init-stall dump + two independent parses agreed on the site: the init
+  WORKER parked inside the outgoing plugin's `getStateInformation`
+  (retire-UNDER-PLAY; the plugin-internal lock held by its own message
+  thread's activity). D12 had gated the WRONG site (the MM `captureState`
+  request); the worker-side retire-capture wedge was never fixed — until
+  D14. FIX A: outgoing captures ride the plugin's own message thread,
+  bounded `SendMessageTimeout(SMTO_ABORTIFHUNG, 5 s)` to a message-only MM
+  window; timeout → `retire-capture abandoned (plugin MM wedged)` →
+  destroy→drain→unload continues (a lost autosave is acceptable; a wedged
+  host is not). The ceiling is mandatory on EVERY capture path: the D14
+  monitor names on-MM/direct breaches (`capture abandoned (plugin MM
+  wedged)`) and late results are DISCARDED, never shipped. FIX B: the
+  bench's retires are DISCARD-CLASS — the harness marks `discardRetire:true`
+  on every leg; the engine skips outgoing captures entirely (and at
+  shutdown): the bench path never depends on a plugin's message-thread
+  health. Teardown bounds: every DestroyWindow step in the retire teardown
+  carries the same deadline with named overrun receipts; TASK J owner-thread
+  ordering intact; D13 machinery untouched (it proved itself). Receipt
+  debts landed in the same build: commit-hash header (kept), per-leg init
+  timings, scan failed-plugin name, capture-abandon lines, STALL-BUNDLE with
+  workerTid (kept from D13), exit-0 vs STILL RUNNING via timestamps, the
+  `(panic)` tag. OPTIONAL (non-gating, adjudicated): the wedged handler's
+  async completion needed the audio device cycle — Fix A's capture-on-MM +
+  the open device processing through the retire is the sanctioned shape; a
+  keep-device-open-processing-silence policy stays PARKED (documented here,
+  not implemented). Contract unchanged: >=50 clean cycles per plugin.
+  Re-run: same command (engine artifact: the NEW scorch-engine-windows-exe
+  0.14.3).
 
 ## Hosted-CI counterpart
 

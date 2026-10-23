@@ -271,7 +271,7 @@ to the ordering.
 - Engine changes only on the branch; tag approved-45787bb-v1 does not move;
   main carries this fix only after the branch proves green.
 
-## 7. The state-capture thread map + the init watchdog/shutdown contract (D12, 0.14.1 — AMENDED by D13, 0.14.2)
+## 7. The state-capture thread map + the init watchdog/shutdown contract (D12, 0.14.1 — AMENDED by D13, 0.14.2; AMENDED by D14, 0.14.3)
 
 Field bench run 190901 (2026-10-22): the BBCSO leg's init was declared failed
 by the flat 120 s wall-clock watchdog while the worker sat in phase
@@ -292,17 +292,48 @@ section is the audit deliverable.
 
 ### 7.1 Which thread state-capture uses
 
-| trigger | thread | site |
-|---|---|---|
-| `diff-remove (worker)` | the init worker | the REMOVED pass of a load whose set drops a live instance |
-| `replace (worker)` | the init worker | the CHANGED-entry capture before the commit |
-| `unload (worker)` | the init worker | the explicit `{"plugins":[]}` retire loop |
-| `request` (wire `captureState`) | the message thread (MM), via `callAsync` | `handle_capture_state` → every live instance |
+| trigger | thread | site | D14 shape |
+|---|---|---|---|
+| `diff-remove (worker)` | the init worker → the MM | the REMOVED pass of a load whose set drops a live instance | **bounded send** (SendMessageTimeout, SMTO_ABORTIFHUNG, 5 s) or **skipped** (discard-class) |
+| `replace (worker)` | the init worker → the MM | the CHANGED-entry capture before the commit | **bounded send** or **skipped** (discard-class) |
+| `unload (worker)` | the init worker → the MM | the explicit `{"plugins":[]}` retire loop | **bounded send** or **skipped** (discard-class) |
+| `request` (wire `captureState`) | the message thread (MM), via `callAsync` | `handle_capture_state` → every live instance | on-MM under the D14 monitor bound |
+| `editor-close` (user-initiated close) | the MM | the close's natural commit point | on-MM under the D14 monitor bound |
 
-A heavyweight library's `getStateInformation` is seconds-class and must never
-sit inside a message-thread job (the M1-hotfix rule) — the retire-path
-captures live on the worker for exactly that reason. The MM path exists only
-for the wire's explicit captureState request.
+**D14 (0.14.3) supersedes the M1-hotfix rule** ("a heavyweight library's
+getStateInformation must never sit inside a message-thread job; the retire
+captures live on the worker"): run 190901 and the run-4 init-stall dump named
+the worker-side capture as THE wedge — parked inside the outgoing plugin's
+getStateInformation (retire-UNDER-PLAY; the plugin-internal lock held by its
+own message-thread activity), able neither to capture, nor to retire, nor to
+speak. The rule traded one exposure (MM occupancy) for a worse one (an
+unbounded worker-side plugin call). D14's shape: the capture RIDES the
+plugin's own message thread (where the plugin-internal locks are same-thread
+acquisitions) with a 5 s SendMessageTimeout bound — a healthy plugin behaves
+exactly as before; a wedged one costs at most 5 s, then the capture is
+ABANDONED (named receipt) and the destroy→drain→unload proceeds. The MM
+occupancy exposure is real and accepted: seconds-class captures on the MM
+starve the pump for their duration — the 3f-7 heartbeat NAMES it (>3 s
+unresponsive), and the D14 monitor bound (every path) + the D13 watchdog
+(120 s flat) are the escalation. A capture completing after its abandon is
+receipted and its result DISCARDED, never shipped.
+
+**Discard-class retires (D14 Fix B)**: a load request may carry additive
+`"discardRetire":true` (the field bench marks every leg) and the shutdown
+path is discard-class by definition — the outgoing captures are SKIPPED
+entirely (`state capture SKIPPED (discard-class retire)` /
+`(engine shutting down)` receipts). The bench path never depends on a
+plugin's message-thread health.
+
+**Teardown bounds (D14)**: every DestroyWindow step in the retire teardown
+(the editor-window delete and the module-window destroy+drain on the owner
+thread) stamps the same 5 s deadline; a breach is a named overrun receipt
+(`teardown destroy overrun (abandon receipt)`). TASK J ordering — owner-
+thread destroy, bounded drain, verify, then the free — is untouched by the
+bounds: they only OBSERVE the same steps. Thread physics, documented: a
+bound cannot unstick a call already running inside plugin code — what it
+buys is a caller that stops waiting and a wedge that is NAMED at 5 s and
+FORENSIC at 120 s (the D13 watchdog + all-thread dump, untouched).
 
 ### 7.2 The never-against-a-still-initializing-plugin invariant
 
