@@ -157,6 +157,43 @@ Env knobs (harness side, normally untouched): `SCORCH_FB_LOAD_STALL_MS`
 
 ## Field receipts (desktop runs)
 
+- **2026-10-23 20:42 — RED, adjudicated ENGINE (D14b, engine 0.14.5): the
+  silent fail-fast.** The run HALTED with exit code `-1073740791`
+  (`0xC0000409`, the abort()/fail-fast family) during the FIRST leg's async
+  plugin init (falcon queued, seq 31; stdout ends at `plugin init queued`) —
+  NO dump, NO `[crash]` line, NO exit receipt, on the same 0.14.4 build that
+  went green twice the same day (12:24: 50/50+50/50; 16:53: green with the
+  ps1 empty-ExitCode anomaly). The engine's crash machinery receipts every
+  path it can see (the 11:30 veh-fatal dump — an AV INSIDE BBCSO's own
+  create code, `BBC Symphony Orchestra (64 Bit).vst3+0x2208B86`, read-AV,
+  adjudicated plugin-internal — proves the machinery dumps and names), so the
+  silent shape is the un-interceptable cohort: a std::terminate racing its
+  receipt window, or the int-29h failfast class (GS-cookie / heap corruption /
+  RaiseFailFastException) that bypasses VEH/SEH/terminate BY DESIGN. D14b
+  (engine 0.14.5) closes both cohorts: catch-alls on every engine thread (a
+  throwable is a named receipt + terminal, never an unobserved terminate),
+  stderr-mirrored + flushed crash receipts, `TerminateProcess(0xC0000409)`
+  after the terminate receipt (no CRT cascade), and WER LocalDumps armed at
+  every start (the failfast cohort dumps OUT-of-process). The ps1 half (same
+  unit): crash-log delta always surfaced, Application event-log 1000/1001
+  pulled for the run window, WER armed ps1-side, the 16:53 empty-ExitCode
+  shape fallback-adjudicated (`GREEN*`), and the C-style `\"` ParserError in
+  the ps1 fixed (verified under real pwsh 7.4.6: 6/6 gates, 4/4 mock smoke,
+  commit-assert both paths). Re-run: same command; the 0.14.4 exe stays
+  accepted (commit-pinned `1b1789ac9fdd`) so the evidence upgrade runs BEFORE
+  the 0.14.5 artifact exists.
+- **2026-10-23 16:53 — GREEN with a ps1 verification anomaly (adjudicated
+  ps1, not engine; D14b closes it).** falcon 50/50 + bbcso 50/50 under play,
+  3 legs retired in-play, errorReceipts=0, windows=0, pinned=0,
+  STALL-BUNDLE=0 — and the engine's stdout ended `clean exit 0` with two
+  independent in-log attestations — but the ps1 read an EMPTY ExitCode
+  (`HasExited=True`, no force-stop) and REDed its own verdict. The 20:42
+  shape's mirror image: the block's self-adjudicating raw-observations design
+  worked exactly as intended (the receipt itself said "ps1 verification
+  anomaly, NOT a confirmed hang"). D14b's fallback: the engine's own exit
+  receipt + HasExited=True + no force-stop = `GREEN*` (exit 0), anomaly
+  noted on the record.
+
 - **2026-10-22 — RED, adjudicated HARNESS (not product).** Falcon leg
   **PASSED: 50/50 cycles, 0 errors, no crash, no pins** on the real Falcon —
   the TASK J real-world evidence: the crash repro stayed clean on the real

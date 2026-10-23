@@ -184,6 +184,13 @@ const fixtureDir = process.argv[4] ?? "";
 const url = `ws://127.0.0.1:${port}`;
 // D12: the expected engine identity — ONE knob for every mode's hello check
 // (the bench ps1 halts on any other build).
+// 0.14.5 = D14b: the silent fail-fast closed — every engine thread runs under
+// a catch-all (a C++ throwable is a named receipt + terminal, never an
+// unobserved std::terminate), the crash receipts mirror to stderr + flush,
+// terminateReceipt TerminateProcess(0xC0000409) directly (no CRT cascade),
+// and every start arms WER LocalDumps (the int-29h fastfail cohort — GS-cookie
+// / heap corruption — is dumpable out-of-process). Field driver: the 20:42
+// run died with exit 0xC0000409, no dump, no receipt.
 // 0.14.4 = D14a: the post-receipt exit is TerminateProcess (detach-free — a
 // still-loaded module's DLL_PROCESS_DETACH can no longer wedge the process
 // past its final receipt; field-observed 2026-10-23 12:24, the 3-leg shape
@@ -192,7 +199,11 @@ const url = `ws://127.0.0.1:${port}`;
 // 5 s) + discard-class retires (this harness marks every field leg
 // discardRetire:true) + the receipt debts (scan failed-plugin name, per-leg
 // init timings, (panic)/exit-vs-running in the ps1 half).
-const EXPECTED_ENGINE_VERSION = "0.14.4";
+// D14b: BOTH builds are accepted (the transition window — the 0.14.4 exe is
+// field-proven, the 0.14.5 exe rides the same CI artifact); the ps1 pins the
+// per-version commit (SCORCH_FB_EXPECT_COMMIT) so the identity stays exact.
+const ACCEPTED_ENGINE_VERSIONS = ["0.14.5", "0.14.4"];
+const EXPECTED_ENGINE_VERSION = ACCEPTED_ENGINE_VERSIONS[0];
 // D12 receipt-provenance: the engine self-reports the exact commit it was
 // built at (hello.commit — CMake pins SCORCH_ENGINE_COMMIT from git at
 // configure time; pre-embed builds simply omit the field). EVERY mode logs it
@@ -202,10 +213,10 @@ const EXPECTED_ENGINE_VERSION = "0.14.4";
 // assert; unset = record-only, never a gate.
 const EXPECTED_ENGINE_COMMIT = process.env.SCORCH_FB_EXPECT_COMMIT || "";
 function checkHelloVersion(msg, bail = fail) {
-  if (msg.engineVersion !== EXPECTED_ENGINE_VERSION) bail(`expected ${EXPECTED_ENGINE_VERSION}, got ${msg.engineVersion}`);
+  if (!ACCEPTED_ENGINE_VERSIONS.includes(msg.engineVersion)) bail(`expected one of ${ACCEPTED_ENGINE_VERSIONS.join("/")}, got ${msg.engineVersion}`);
   const c = typeof msg.commit === "string" && msg.commit.length > 0 ? msg.commit : "";
   if (EXPECTED_ENGINE_COMMIT && c !== EXPECTED_ENGINE_COMMIT) bail(`engine commit mismatch: expected ${EXPECTED_ENGINE_COMMIT}, got ${c || "(not reported)"}`);
-  console.log(`[test] engine build: ${EXPECTED_ENGINE_VERSION} ${c ? `commit=${c}` : "commit=(not reported — pre-embed build)"}`);
+  console.log(`[test] engine build: ${msg.engineVersion} ${c ? `commit=${c}` : "commit=(not reported — pre-embed build)"}`);
   return c;
 }
 

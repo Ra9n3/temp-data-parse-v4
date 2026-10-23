@@ -87,21 +87,63 @@ $appdataScorch = Join-Path $env:APPDATA "scorch"
 $engineLog = Join-Path $appdataScorch "engine.log"
 $crashLog = Join-Path $appdataScorch "engine-crash.log"
 $crashDir = Join-Path $appdataScorch "crashes"
+$werDir = Join-Path $appdataScorch "crashes-wer"
 $logLinesBefore = 0
 if (Test-Path $engineLog) { $logLinesBefore = (Get-Content $engineLog | Measure-Object -Line).Lines }
 $crashLogBefore = Test-Path $crashLog
+$crashLogLinesBefore = 0
+if ($crashLogBefore) { $crashLogLinesBefore = (Get-Content $crashLog | Measure-Object -Line).Lines }
 $dumpsBefore = @()
 if (Test-Path $crashDir) { $dumpsBefore = @(Get-ChildItem $crashDir -Filter *.dmp -ErrorAction SilentlyContinue | ForEach-Object { $_.Name }) }
+$werDumpsBefore = @()
+if (Test-Path $werDir) { $werDumpsBefore = @(Get-ChildItem $werDir -Filter *.dmp -ErrorAction SilentlyContinue | ForEach-Object { $_.Name }) }
+$runStartAt = Get-Date
+$isWin = ($PSVersionTable.PSEdition -eq 'Desktop') -or ($env:OS -eq 'Windows_NT')
+# D14b: WER LocalDumps — the belt-and-braces that catches what NO in-process
+# handler can: the int-29h failfast cohort (GS-cookie, heap corruption,
+# RaiseFailFastException) bypasses VEH/SEH/terminate BY DESIGN, so the engine's
+# own MiniDumpWithUnloadedModules never fires (the 2026-10-23 20:42 shape:
+# exit 0xC0000409 with no dump and no receipt). WER is out-of-process and DOES
+# see it. HKCU = no admin required. The 0.14.5 engine arms the same key itself
+# at startup; this covers the older exe too.
+$werNote = ""
+if ($isWin) {
+  try {
+    $werKey = 'HKCU:\SOFTWARE\Microsoft\Windows\Windows Error Reporting\LocalDumps\scorch-engine.exe'
+    New-Item -Path $werKey -Force -ErrorAction SilentlyContinue | Out-Null
+    New-Item -ItemType Directory -Force -Path $werDir -ErrorAction SilentlyContinue | Out-Null
+    Set-ItemProperty -Path $werKey -Name DumpFolder -Value $werDir -Type ExpandString -ErrorAction SilentlyContinue
+    Set-ItemProperty -Path $werKey -Name DumpType -Value 2 -Type DWord -ErrorAction SilentlyContinue
+    Set-ItemProperty -Path $werKey -Name DumpCount -Value 10 -Type DWord -ErrorAction SilentlyContinue
+    $werNote = "armed (HKCU LocalDumps\scorch-engine.exe -> $werDir, full dump, count 10)"
+  } catch { $werNote = "arm FAILED (best-effort): $($_.Exception.Message)" }
+} else {
+  $werNote = "skipped (non-Windows host — the sandbox/mock runs)"
+}
 
 # ---- engine identity -------------------------------------------------------
+# D14b: the transition gate — BOTH field-proven builds are accepted, with the
+# commit identity exact where it is knowable: the 0.14.4 artifact was built at
+# 1b1789ac9fdd (pinned — the mjs hello hard-asserts it via SCORCH_FB_EXPECT_COMMIT);
+# a 0.14.5 artifact's own commit is RECORDED in the receipt (the CMake pin is
+# the build-time tip — the hash only exists after the push, so the pin trails
+# by construction) and SCORCH_FB_EXPECT_COMMIT stays the hard-assert escape
+# hatch for CI/adjudication runs. ANY other version = HALT (the stale-ps1
+# masking class can never recur).
 $engineVersion = (& $EngineExe --version 2>&1 | Out-String).Trim()
 $nodeVersion = (node --version 2>&1 | Out-String).Trim()
 Write-Host "engine: $engineVersion"
 Write-Host "node:   $nodeVersion"
 Write-Host "scan dirs: $($dirsOk -join ' | ')"
 Write-Host "cycles per leg: $Cycles  seed: $Seed  require-both-legs: 1"
-if ($engineVersion -notmatch "0\.14\.4") {
-  Verdict "HALT: the engine did not report 0.14.4 ('$engineVersion'). This bench validates the TASK J + D14 + D14a build (bounded retire-captures + discard-class bench retires + the detach-free exit, on top of the D13 revert/diagnostics) — use the scorch-engine-windows-exe artifact from the LATEST fieldbench CI run (the 0.14.4/D14a build, not the older 0.14.0/0.14.1/0.14.2/0.14.3)."
+$env:SCORCH_FB_EXPECT_COMMIT = ""
+if ($engineVersion -match "0\.14\.4") {
+  $env:SCORCH_FB_EXPECT_COMMIT = "1b1789ac9fdd"   # the D14a artifact's exact build
+} elseif ($engineVersion -match "0\.14\.5") {
+  $env:SCORCH_FB_EXPECT_COMMIT = ""               # D14b: commit recorded, not gated (pin trails the push)
+}
+if ($engineVersion -notmatch "0\.14\.[45]") {
+  Verdict "HALT: the engine did not report 0.14.4/0.14.5 ('$engineVersion'). This bench validates the TASK J + D14 + D14a/D14b builds (bounded retire-captures + discard-class bench retires + the detach-free exit + the silent-fail-fast closure, on top of the D13 revert/diagnostics) — use the scorch-engine-windows-exe artifact from the LATEST fieldbench CI run (the 0.14.4/D14a or 0.14.5/D14b build, not the older 0.14.0/0.14.1/0.14.2/0.14.3)."
   exit 2
 }
 
@@ -161,7 +203,7 @@ if ($hasExitedRaw -eq "True") {
     $dumpPath = Join-Path $OutDir ("engine-unkillable-{0}.dmp" -f (Get-Date -Format 'yyyyMMdd-HHmmss'))
     $null = & rundll32.exe 'comsvcs.dll,MiniDump' "$($proc.Id)" "$dumpPath" full 2>&1
     if (Test-Path $dumpPath) { $global:postKillNote += " — full dump captured: $dumpPath (SEND THIS FILE)" }
-    else { $global:postKillNote += " — dump capture FAILED (send: tasklist /v /fi \"PID eq $($proc.Id)\" output)" }
+    else { $global:postKillNote += " — dump capture FAILED (send: tasklist /v /fi `"PID eq $($proc.Id)`" output)" }
   } else {
     $global:postKillNote = "post-force-stop check: process gone (the kill took effect)"
   }
@@ -207,10 +249,34 @@ $scanFailedLines = @($transcriptLines | Select-String -Pattern 'scan failed-plug
 $crashLines = @($procLines | Select-String -Pattern "\[crash\]")
 $crashLogNow = Test-Path $crashLog
 $crashLogTail = ""
-if ($crashLogNow -and -not $crashLogBefore) { $crashLogTail = (Get-Content $crashLog -Tail 12 | Out-String) }
+$crashLogNewLines = @()
+if ($crashLogNow) {
+  $allCrashLines = @(Get-Content $crashLog)
+  if ($allCrashLines.Count -gt $crashLogLinesBefore) {
+    # D14b: lines ADDED during THIS run — always surfaced, never gated on file
+    # newness (the 20:42 receipt would have been hidden by the old gate: the
+    # file existed since 11:30, so the tail was suppressed).
+    $crashLogNewLines = @($allCrashLines | Select-Object -Skip $crashLogLinesBefore)
+    $crashLogTail = ($crashLogNewLines | Out-String)
+    try { Copy-Item $crashLog (Join-Path $OutDir "engine-crash.snapshot.log") -Force -ErrorAction SilentlyContinue } catch {}
+  }
+}
 $dumpsNow = @()
 if (Test-Path $crashDir) { $dumpsNow = @(Get-ChildItem $crashDir -Filter *.dmp -ErrorAction SilentlyContinue) }
+$werDumpsNow = @()
+if (Test-Path $werDir) { $werDumpsNow = @(Get-ChildItem $werDir -Filter *.dmp -ErrorAction SilentlyContinue) }
 $newDumps = @($dumpsNow | Where-Object { $dumpsBefore -notcontains $_.Name })
+$newWerDumps = @($werDumpsNow | Where-Object { $werDumpsBefore -notcontains $_.Name })
+# D14b: the Application event log names the faulting module + exception code
+# for a death the engine could not receipt (Event 1000 'Application Error',
+# 1001 'Windows Error Reporting') — this alone adjudicates a silent fastfail.
+$eventLogRows = @()
+if ($isWin -and (Get-Command Get-WinEvent -ErrorAction SilentlyContinue)) {
+  try {
+    $eventLogRows = @(Get-WinEvent -FilterHashtable @{ LogName='Application'; Id=1000,1001; StartTime=$runStartAt.AddSeconds(-5) } -ErrorAction SilentlyContinue |
+      Where-Object { $_.Message -match 'scorch' } | Select-Object -First 4)
+  } catch { $eventLogRows = @() }
+}
 $engineCrashy = $false
 if ($engineExit -ne $null) {
   if ($engineExit -ne 0) { $engineCrashy = $true }   # nonzero (incl. 0xC0000005 as negative int) = the engine did NOT exit clean
@@ -219,9 +285,19 @@ if ($engineExit -ne $null) {
 # ---- receipt ----------------------------------------------------------------
 $falconRetires0 = Count-Windows0 $retireFalcon
 $bbcsoRetires0 = Count-Windows0 $retireBbcso
-$crashed = ($crashLines.Count -gt 0) -or ($newDumps.Count -gt 0) -or ($crashLogNow -and -not $crashLogBefore) -or $engineCrashy
+$crashed = ($crashLines.Count -gt 0) -or ($newDumps.Count -gt 0) -or ($newWerDumps.Count -gt 0) -or ($crashLogNewLines.Count -gt 0) -or $engineCrashy
 $mjsGreen = ($mjsExit -eq 0)
 $mjsOut = (Get-Content $transcript -ErrorAction SilentlyContinue | Out-String)
+# D14b: the empty-ExitCode fallback adjudication (the 16:53 field shape:
+# HasExited=True, NO force-stop, the ExitCode read empty/THREW — a ps1 read
+# anomaly, not an engine hang). The engine's OWN exit receipt in engine.log is
+# the fallback authority: '[engine] clean exit 0' / 'exit 0 (...)' as the LAST
+# engine.log line + HasExited=True = the engine exited clean BY ITS OWN
+# RECEIPT; the ps1 notes the read anomaly instead of REDing a green run.
+$ps1ExitAnomaly = $false
+if ($engineExit -eq $null -and $global:forceStopAt -eq $null -and $hasExitedRaw -eq "True") {
+  if ($exitReceiptLine) { $ps1ExitAnomaly = $true }
+}
 # D12 receipt-provenance: the engine build commit, parsed FIRST from the
 # wire-attested harness transcript (the harness logs it from the engine's
 # hello — the engine pins SCORCH_ENGINE_COMMIT at build time), with the
@@ -240,13 +316,13 @@ if ($crashed) { $verdict = "HALT-AND-ADJUDICATE (panic)"; $verdictWhy += "PANIC 
 elseif (-not $mjsGreen) { $verdict = "RED"; $verdictWhy += "the fieldbench harness exited $mjsExit (see the harness half below)" }
 elseif ($legsAbsent) { $verdict = "RED"; $verdictWhy += "both field legs were ABSENT to the harness — a desktop bench must see Falcon AND BBCSO (SCORCH_FIELD_REQUIRE=1 should have failed it; adjudicate the scan)" }
 elseif ($pinCount -gt 0) { $verdict = "RED"; $verdictWhy += "pin count $pinCount > 0 — teardown-order residue refused an unload (a leak, never an unmapped dispatch; adjudicate the per-window receipts)" }
-elseif ($engineExit -eq $null) { $verdict = "RED"; $verdictWhy += "the engine did not cleanly exit after the harness finished (no exit code captured; $(if ($global:forceStopAt -ne $null) { 'force-stopped — a real hang' } else { 'NO force-stop ran — ps1 verification anomaly, see the raw observations' }); adjudicate the stdout tail + raw observations)" }
+elseif ($ps1ExitAnomaly) { $verdict = "GREEN*"; $verdictWhy += "engine clean BY ITS OWN RECEIPT ('[engine] clean exit 0' / 'exit 0 (...)' is the last engine.log line and HasExited=True with no force-stop) — the unreadable ExitCode is a PS1 READ ANOMALY (raw observations below), not an engine failure; the asterisk marks the fallback adjudication" }
 elseif ($unresolvedGuard.Count -gt 0) { $verdict = "RED"; $verdictWhy += "UNRESOLVED guard line(s) — the refuse-unload backstop could not pin a window; do not run again before adjudication" }
 elseif ($singleLeg) { $verdict = "PARTIAL"; $verdictWhy += "only ONE plugin's cycle leg ran (the other was absent) — a single-leg run has no cross-plugin orphaning retire, so its windows=0 count is 0 by construction; the adjudication requires BOTH legs" }
 
 $receipt = @()
 # ── D13/D14: the receipt HEADER is the engine build commit — ONE line, first ──
-$receipt += "engine commit: $engineCommit   (0.14.4 — the exact build this receipt describes)"
+$receipt += "engine commit: $engineCommit   (0.14.4/0.14.5 — the exact build this receipt describes)"
 $receipt += "SCORSH TASK J FIELD BENCH — receipt"
 $receipt += "UTC:      $((Get-Date).ToUniversalTime().ToString('yyyy-MM-dd HH:mm:ss'))"
 $receipt += "engine:   $engineVersion"
@@ -319,16 +395,23 @@ if ($engineExit -ne $null) {
 $receipt += "panic: $(if ($crashed) { 'YES — the engine died on a crash path (the P1 evidence below); the verdict is tagged (panic)' } else { 'none — no crash-path death on the record' })"
 $receipt += "[crash] lines in the engine.log slice: $($crashLines.Count)"
 foreach ($l in $crashLines) { $receipt += "  $($l.Line.Trim())" }
-$receipt += "engine-crash.log: $(if ($crashLogNow) { 'present' } else { 'absent' })$(if ($crashLogTail) { ' (NEW since this bench started)' })"
-if ($crashLogTail) { $receipt += $crashLogTail.TrimEnd() }
-$receipt += "new .dmp files: $(if ($newDumps.Count -eq 0) { 'none' } else { ($newDumps | ForEach-Object { $_.FullName }) -join '; ' })"
+$receipt += "engine-crash.log lines ADDED during this run: $($crashLogNewLines.Count)$(if ($crashLogNow -and $crashLogNewLines.Count -eq 0) { ' (file present, nothing new — the D14b delta view; the old file-newness gate that hid the 20:42 receipt is gone)' })"
+foreach ($l in $crashLogNewLines) { $receipt += "  $l" }
+$receipt += "WER LocalDumps: $werNote"
+$receipt += "new .dmp files (engine crashes dir): $(if ($newDumps.Count -eq 0) { 'none' } else { ($newDumps | ForEach-Object { $_.FullName }) -join '; ' })"
+$receipt += "new .dmp files (WER LocalDumps dir): $(if ($newWerDumps.Count -eq 0) { 'none' } else { ($newWerDumps | ForEach-Object { $_.FullName }) -join '; ' })"
+$receipt += "Application event log (Id 1000/1001 mentioning scorch, this run window): $(if ($eventLogRows.Count -eq 0) { 'none' } else { '' })"
+foreach ($e in $eventLogRows) {
+  $receipt += "  [$($e.TimeCreated.ToString('HH:mm:ss'))] Id=$($e.Id) — $(($e.Message -split "`n" | Select-Object -First 6) -join ' | ')"
+  try { $e | Export-Clixml -Path (Join-Path $OutDir ("wer-event-{0}.xml" -f $e.Id)) -ErrorAction SilentlyContinue } catch {}
+}
 $receipt += "engine stdout tail:"
 Get-Content (Join-Path $OutDir "engine-stdout.txt") -Tail 25 -ErrorAction SilentlyContinue | ForEach-Object { $receipt += "  $_" }
 $receipt += ""
 $receipt += "VERDICT: $verdict"
 foreach ($w in $verdictWhy) { $receipt += "  - $w" }
-if ($verdict -eq "GREEN") {
-  $receipt += "  - falcon: $($retireFalcon.Count) retire receipt(s), $falconRetires0 windows=0; bbcso: $($retireBbcso.Count) retire receipt(s), $bbcsoRetires0 windows=0; pin count $pinCount; capture-abandons: $($abandonLines.Count); STALL-BUNDLEs: $($stallLines.Count); engine exit 0 (timestamp-verified)"
+if ($verdict -eq "GREEN" -or $verdict -eq "GREEN*") {
+  $receipt += "  - falcon: $($retireFalcon.Count) retire receipt(s), $falconRetires0 windows=0; bbcso: $($retireBbcso.Count) retire receipt(s), $bbcsoRetires0 windows=0; pin count $pinCount; capture-abandons: $($abandonLines.Count); STALL-BUNDLEs: $($stallLines.Count); engine exit 0 $(if ($verdict -eq 'GREEN*') { '(BY ITS OWN RECEIPT — the ExitCode read anomaly is noted above; timestamp-verified fallback)' } else { '(timestamp-verified)' })"
   $receipt += "  - the dangling-WNDPROC class held closed under the REAL editors, REAL audio, mid-play module retires (discard-class, D14)"
 }
 $receipt | Out-File -FilePath $receiptPath -Encoding utf8
@@ -337,4 +420,4 @@ Write-Host ""
 Write-Host "receipt: $receiptPath"
 Get-Content $receiptPath | ForEach-Object { Write-Host $_ }
 Verdict "FIELD BENCH VERDICT: $verdict $(if ($verdictWhy.Count -gt 0) { '— ' + ($verdictWhy -join ' | ') })"
-if ($verdict -eq "GREEN") { exit 0 } else { exit 1 }
+if ($verdict -eq "GREEN" -or $verdict -eq "GREEN*") { exit 0 } else { exit 1 }
