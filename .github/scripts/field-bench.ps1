@@ -130,14 +130,41 @@ $harnessEndAt = Get-Date
 # the engine's own exit receipt ([engine] clean exit 0 / exit 0 (...)) carries
 # the engine.log wall clock; a force-stop records how long the log had been
 # silent when the process was killed.
-$proc.WaitForExit(30000) | Out-Null
+# D14a receipt anomaly (field 2026-10-23 14:49): a receipt printed "STILL
+# RUNNING — force-stopped at ?" with age 1s — a shape the canonical control
+# flow cannot produce ('?' = NO force-stop ran; the STILL RUNNING branch = NO
+# exit code was captured; both at once is impossible in this block). The block
+# is now SELF-ADJUDICATING: every raw Process observation is echoed into the
+# receipt, the ExitCode read is exception-guarded, a force-stop is VERIFIED
+# 3 s later, and a process that survives the kill gets a full comsvcs MiniDump
+# captured automatically (kernel-stuck-thread class). No ambiguous receipt
+# shape is left.
+$wf = "n/a"
+try { $wf = "$($proc.WaitForExit(30000))" } catch { $wf = "THREW: $($_.Exception.Message)" }
 $engineExit = $null
 $global:forceStopAt = $null
-if ($proc.HasExited) { $engineExit = $proc.ExitCode }
-else {
+$global:postKillNote = $null
+$hasExitedRaw = "?"
+$exitCodeRaw = "not-read"
+try { $hasExitedRaw = "$($proc.HasExited)" } catch { $hasExitedRaw = "THREW: $($_.Exception.Message)" }
+if ($hasExitedRaw -eq "True") {
+  try { $engineExit = $proc.ExitCode; $exitCodeRaw = "$engineExit" } catch { $exitCodeRaw = "THREW: $($_.Exception.Message)" }
+} elseif ($hasExitedRaw -eq "False") {
   $global:forceStopAt = Get-Date
   Write-Host "note: engine still running 30 s after the harness exit — stopping it (shutdown-hang shape; the receipt will say so, with the log-silence timestamps)"
   Stop-Process -Id $proc.Id -Force -ErrorAction SilentlyContinue
+  Start-Sleep -Seconds 3
+  $stillAlive = $null
+  try { $stillAlive = Get-Process -Id $proc.Id -ErrorAction SilentlyContinue } catch { $stillAlive = $null }
+  if ($stillAlive) {
+    $global:postKillNote = "post-force-stop check: PROCESS STILL ALIVE 3 s after Stop-Process — the kill did NOT take (kernel-stuck-thread class; the engine's own TerminateProcess already ran inside its exit path, before the final receipt)"
+    $dumpPath = Join-Path $OutDir ("engine-unkillable-{0}.dmp" -f (Get-Date -Format 'yyyyMMdd-HHmmss'))
+    $null = & rundll32.exe 'comsvcs.dll,MiniDump' "$($proc.Id)" "$dumpPath" full 2>&1
+    if (Test-Path $dumpPath) { $global:postKillNote += " — full dump captured: $dumpPath (SEND THIS FILE)" }
+    else { $global:postKillNote += " — dump capture FAILED (send: tasklist /v /fi \"PID eq $($proc.Id)\" output)" }
+  } else {
+    $global:postKillNote = "post-force-stop check: process gone (the kill took effect)"
+  }
 }
 
 # ---- engine.log half: the teardown receipts --------------------------------
@@ -213,7 +240,7 @@ if ($crashed) { $verdict = "HALT-AND-ADJUDICATE (panic)"; $verdictWhy += "PANIC 
 elseif (-not $mjsGreen) { $verdict = "RED"; $verdictWhy += "the fieldbench harness exited $mjsExit (see the harness half below)" }
 elseif ($legsAbsent) { $verdict = "RED"; $verdictWhy += "both field legs were ABSENT to the harness — a desktop bench must see Falcon AND BBCSO (SCORCH_FIELD_REQUIRE=1 should have failed it; adjudicate the scan)" }
 elseif ($pinCount -gt 0) { $verdict = "RED"; $verdictWhy += "pin count $pinCount > 0 — teardown-order residue refused an unload (a leak, never an unmapped dispatch; adjudicate the per-window receipts)" }
-elseif ($engineExit -eq $null) { $verdict = "RED"; $verdictWhy += "the engine never exited after the harness finished — shutdown hang (stopped forcibly; adjudicate the stdout tail)" }
+elseif ($engineExit -eq $null) { $verdict = "RED"; $verdictWhy += "the engine did not cleanly exit after the harness finished (no exit code captured; $(if ($global:forceStopAt -ne $null) { 'force-stopped — a real hang' } else { 'NO force-stop ran — ps1 verification anomaly, see the raw observations' }); adjudicate the stdout tail + raw observations)" }
 elseif ($unresolvedGuard.Count -gt 0) { $verdict = "RED"; $verdictWhy += "UNRESOLVED guard line(s) — the refuse-unload backstop could not pin a window; do not run again before adjudication" }
 elseif ($singleLeg) { $verdict = "PARTIAL"; $verdictWhy += "only ONE plugin's cycle leg ran (the other was absent) — a single-leg run has no cross-plugin orphaning retire, so its windows=0 count is 0 by construction; the adjudication requires BOTH legs" }
 
@@ -277,13 +304,16 @@ if ($engineExit -ne $null) {
     $exitDesc += " — NO exit receipt in engine.log (the process died without its own receipt — treat as a crash shape)"
   }
   $receipt += "engine exit: $exitDesc"
+  $receipt += "  raw observations: WaitForExit(30000)=$wf ; HasExited=$hasExitedRaw ; ExitCode=$exitCodeRaw ; engine PID=$($proc.Id)"
 } else {
   $stopRef = $global:forceStopAt
   if ($stopRef -eq $null) { $stopRef = Get-Date }
   $age = -1
   if ($lastLogTs -ne $null) { $age = [int]($stopRef - $lastLogTs).TotalSeconds }
-  $receipt += "engine exit: STILL RUNNING — force-stopped at $(if ($global:forceStopAt -ne $null) { $global:forceStopAt.ToString('HH:mm:ss.fff') } else { '?' })"
-  $receipt += "  last engine.log line at $(if ($lastLogTs -ne $null) { $lastLogTs.ToString('HH:mm:ss.fff') } else { 'none' }) (age ${age}s at the force-stop — the log-silence window; the shutdown-hang shape, timestamped)"
+  $receipt += "engine exit: NOT cleanly exited per the Process observation — force-stop issued: $(if ($global:forceStopAt -ne $null) { $global:forceStopAt.ToString('HH:mm:ss.fff') } else { 'NO — no force-stop ran and no exit code was captured (raw observations below — ps1 verification anomaly, NOT a confirmed hang)' })"
+  if ($global:postKillNote) { $receipt += "  $global:postKillNote" }
+  $receipt += "  raw observations: WaitForExit(30000)=$wf ; HasExited=$hasExitedRaw ; ExitCode=$exitCodeRaw ; engine PID=$($proc.Id)"
+  $receipt += "  last engine.log line at $(if ($lastLogTs -ne $null) { $lastLogTs.ToString('HH:mm:ss.fff') } else { 'none' }) (age ${age}s — $(if ($global:forceStopAt -ne $null) { 'log-silence window at the force-stop' } else { 'receipt-build time minus the last log line; no force-stop occurred' }))"
   $receipt += "  last line: $lastLogLine"
 }
 $receipt += "panic: $(if ($crashed) { 'YES — the engine died on a crash path (the P1 evidence below); the verdict is tagged (panic)' } else { 'none — no crash-path death on the record' })"
