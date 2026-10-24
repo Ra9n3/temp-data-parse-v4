@@ -60,6 +60,13 @@ export interface LoadAckMessage {
 export interface LoadReceipt {
   ok: true;
   seq: number;
+  /** Routing v1.1 — the request epoch this caller issued (client.loadSeq
+   * request counter). COALESCING: several load() calls can share one
+   * in-flight payload; a caller whose epoch is no longer the client's
+   * latest (currentEpoch()) resolved against a NEWER payload and must skip
+   * its post-load actions (lastLoadedRef cache, transport) — the newest
+   * caller owns them. */
+  epoch: number;
   received: number;
   loaded: number;
   skipped: number;
@@ -74,6 +81,11 @@ export interface LoadFailure {
   /** What the frontend TRIED to send (0 bytes if it never got to send). */
   sentEvents: number;
   sentBytes: number;
+  /** Routing v1.1 — this caller's request epoch. A failure whose epoch is
+   * stale (a newer load is queued or in flight) is bookkeeping, not news:
+   * the caller suppresses its user-facing toast the same way it suppresses
+   * stale success actions. */
+  epoch: number;
 }
 
 /** Stage 3c-1 — one plugin description from the engine's VST3 scan. */
@@ -459,7 +471,77 @@ export interface EngineDiagnosticMessage {
   seconds: number;
 }
 
-type EngineMessage = HelloMessage | PongMessage | ErrorMessage | StateMessage | ScanResultMessage | ScanProbeMessage | PluginStateMessage | LoadAckMessage | EditorEventMessage | PluginSavedStateMessage | PluginCapabilitiesMessage | EngineDiagnosticMessage;
+// ─── Routing v1 — the strips wire contract (engine M3 PR2, additive; ────────
+// protocol stays 1). The app OWNS the wiring table; the engine validates it
+// atomically (R1 atomic-or-nothing) and applies it on the message thread.
+
+/** One wire of the app-owned strip table: instance output pair [pair0,
+ * pair0+1] → a mixer strip. pair0 is the 0-based EVEN (bus-aligned) start
+ * the engine's R1 validation requires. */
+export interface StripWire {
+  strip: string;
+  inst: string;
+  pair0: number;
+}
+
+/** The engine's echo for a strips apply: v advances by EXACTLY ONE per
+ * applied table and is UNCHANGED by a rejection (the atomicity witness). */
+export interface StripsResultMessage {
+  type: "strips_result";
+  applied: boolean;
+  v: number;
+  /** Wired strip count (applied only). */
+  strips?: number;
+  /** Rejection reason (applied:false only) — surfaced, never swallowed. */
+  reason?: string;
+}
+
+/** One instance's LIVE output layout — the `layouts` probe reply rows and
+ * the per-commit `instanceLayout` push share this exact shape. */
+export interface InstanceLayout {
+  instanceId: string;
+  buses: number;
+  channels: number;
+  busChannels: number[];
+}
+
+/** Reply to {"type":"layoutAll"} — every published instance's layout. */
+export interface LayoutsMessage {
+  type: "layouts";
+  instances: InstanceLayout[];
+}
+
+/** Per-commit push (after every plugin load commit): the live-node truth,
+ * NOT the captured table (the R3 guard may just have fired). */
+export interface InstanceLayoutMessage extends InstanceLayout {
+  type: "instanceLayout";
+}
+
+/** The R3 LAYOUT-CHANGE GUARD's push: a table pair the live node can no
+ * longer feed was unwired with named receipts — never a silent dead wire.
+ * The app marks the affected bindings MISSING (derived) and re-resolves
+ * them by itself when a wider layout arrives. */
+export interface StripLayoutChangedMessage {
+  type: "stripLayoutChanged";
+  instanceId: string;
+  liveChannels: number;
+  /** The strip ids the guard unwired. */
+  unwired: string[];
+  reason: string;
+}
+
+/** RESERVED — per-strip audio peaks, the activity-meter feed. The engine
+ * ships per-strip stats as LOG receipts today (SCORCH_STRIP_LOG); when the
+ * wire push lands (engine follow-up), this client already speaks it and
+ * the meters light up with zero frontend redesign. Never sent by current
+ * engines — the UI degrades to an explicit "no levels stream" state. */
+export interface StripLevelsMessage {
+  type: "stripLevels";
+  /** stripId → [prePeak, postPeak] (0..1 linear). */
+  peaks: Record<string, [number, number]>;
+}
+
+type EngineMessage = HelloMessage | PongMessage | ErrorMessage | StateMessage | ScanResultMessage | ScanProbeMessage | PluginStateMessage | LoadAckMessage | EditorEventMessage | PluginSavedStateMessage | PluginCapabilitiesMessage | EngineDiagnosticMessage | StripsResultMessage | LayoutsMessage | InstanceLayoutMessage | StripLayoutChangedMessage | StripLevelsMessage;
 
 // Deterministic backoff sequence (seconds): 1, 2, 4, 8, 16 — no jitter.
 const BACKOFF_SEQUENCE = [1, 2, 4, 8, 16] as const;
@@ -512,6 +594,24 @@ export interface EngineLoadMeta {
   endTick: number;
 }
 
+/** Routing v1.1 — one load() caller's promise hooks, stamped with its
+ * request epoch. Several waiters can share one in-flight payload
+ * (coalescing); each resolves/rejects with its OWN epoch so the caller's
+ * post-load guard (receipt.epoch === client.currentEpoch()) works. */
+interface LoadWaiter {
+  resolve: (r: LoadReceipt) => void;
+  reject: (f: LoadFailure) => void;
+  epoch: number;
+}
+
+/** The load() options shape, named so the coalescing queue can store it. */
+export interface LoadOpts {
+  channels?: Record<string, number>;
+  plugin?: { uid: string; path: string; name?: string; state?: string };
+  routing?: Record<string, { inst: string; ch: number }>;
+  plugins?: Array<{ instanceId: string; uid: string; path: string; name?: string; state?: string }>;
+}
+
 export class EngineClient {
   private ws: WebSocket | null = null;
   private status: EngineStatus = "off";
@@ -536,17 +636,44 @@ export class EngineClient {
   // info panel reads them synchronously) and pushed to the app via callback.
   private capabilities = new Map<string, PluginCapabilitiesMessage>();
   private onPluginCapabilitiesChange: ((msg: PluginCapabilitiesMessage) => void) | null = null;
+  // Routing v1 — strips/layout pushes (all additive; every callback is
+  // optional and the app works fully without any of them).
+  private onStripsResultChange: ((msg: StripsResultMessage) => void) | null = null;
+  private onLayoutsChange: ((msg: LayoutsMessage) => void) | null = null;
+  private onInstanceLayoutChange: ((msg: InstanceLayoutMessage) => void) | null = null;
+  private onStripLayoutChanged: ((msg: StripLayoutChangedMessage) => void) | null = null;
+  private onStripLevelsChange: ((msg: StripLevelsMessage) => void) | null = null;
   private onErrorChange: ((code: string, echo: string, detail: string) => void) | null = null;
-  // Stage 3c-hotfix: the in-flight load awaiting its loadAck (single slot —
-  // a newer load supersedes an older one; see load()).
+  // Routing v1.1 — SINGLE-FLIGHT LOADS WITH COALESCING. The old rule (a
+  // newer load REJECTED the in-flight one with "superseded by a newer load"
+  // and both were sent back-to-back) produced the field failure class:
+  // two racing triggers (play click × binding commit × mid-play reload), the
+  // cancelled caller red-toasting AND starting the web-synth substitute,
+  // masking whatever the newer load was doing. The new contract:
+  //   exactly ONE load ever in flight; a request arriving during flight
+  //   joins the single QUEUED slot (its waiters ride the newest payload);
+  //   on settle (ack / timeout / engine reject) the queued payload ships;
+  //   on disconnect / dispose the queue flushes with the same reason.
+  // No caller is ever rejected for racing. Callers disambiguate staleness
+  // with the epoch guard: receipt.epoch === currentEpoch() (only the newest
+  // request's post-load actions run).
   private loadSeq = 0;
+  /** Monotonic request counter — one increment per load() CALL (not per
+   * send). The freshness anchor for the post-load epoch guard. */
+  private requestEpoch = 0;
   private pendingLoad: {
     seq: number;
     sentEvents: number;
     sentBytes: number;
-    resolve: (r: LoadReceipt) => void;
-    reject: (f: LoadFailure) => void;
+    waiters: LoadWaiter[];
     timer: number;
+  } | null = null;
+  private queuedLoad: {
+    events: PhysicalMidiStreamEvent[];
+    meta: EngineLoadMeta;
+    opts?: LoadOpts;
+    sentEvents: number;
+    waiters: LoadWaiter[];
   } | null = null;
   // M1-hotfix (heavy-load death): 4000 → 120000. The loadAck itself leaves
   // in milliseconds (the engine's WS thread sends it before queueing plugin
@@ -576,6 +703,11 @@ export class EngineClient {
 
   getStatus(): EngineStatus { return this.status; }
   getRtt(): number | null { return this.lastRtt; }
+  /** Routing v1.1 — the latest load() request epoch (the freshness anchor
+   * for post-load actions: run them only when receipt.epoch === this). */
+  currentEpoch(): number { return this.requestEpoch; }
+  /** True while a load is in flight or queued (diagnostic/UX use). */
+  loadPending(): boolean { return this.pendingLoad !== null || this.queuedLoad !== null; }
 
   /** Register a callback for engine state messages (playing + tick). */
   onState(cb: (playing: boolean, tick: number) => void): void {
@@ -622,6 +754,34 @@ export class EngineClient {
    * hosted instance, right after its loaded receipt). */
   onPluginCapabilities(cb: (msg: PluginCapabilitiesMessage) => void): void {
     this.onPluginCapabilitiesChange = cb;
+  }
+
+  /** Routing v1 — the strips apply echo (applied:true advances v; a
+   * rejection carries the engine's reason). */
+  onStripsResult(cb: (msg: StripsResultMessage) => void): void {
+    this.onStripsResultChange = cb;
+  }
+
+  /** Routing v1 — the layoutAll probe reply (every published instance). */
+  onLayouts(cb: (msg: LayoutsMessage) => void): void {
+    this.onLayoutsChange = cb;
+  }
+
+  /** Routing v1 — per-commit layout push (live-node truth after a load). */
+  onInstanceLayout(cb: (msg: InstanceLayoutMessage) => void): void {
+    this.onInstanceLayoutChange = cb;
+  }
+
+  /** Routing v1 — the R3 guard's push: a bound pair the live node can no
+   * longer feed was unwired engine-side (never a silent dead wire). */
+  onStripLayoutChange(cb: (msg: StripLayoutChangedMessage) => void): void {
+    this.onStripLayoutChanged = cb;
+  }
+
+  /** Routing v1 — RESERVED per-strip levels feed (activity meters). No
+   * current engine sends it; registering is always safe. */
+  onStripLevels(cb: (msg: StripLevelsMessage) => void): void {
+    this.onStripLevelsChange = cb;
   }
 
   /** Stage 3e-1: the stored capability record for a hosted instance (the
@@ -713,24 +873,42 @@ export class EngineClient {
           const iid = msg.instanceId || "hosted";
           this.capabilities.set(iid, msg);
           this.onPluginCapabilitiesChange?.(msg);
+        } else if (msg.type === "strips_result") {
+          this.onStripsResultChange?.(msg);
+        } else if (msg.type === "layouts") {
+          this.onLayoutsChange?.(msg);
+        } else if (msg.type === "instanceLayout") {
+          this.onInstanceLayoutChange?.(msg);
+        } else if (msg.type === "stripLayoutChanged") {
+          this.onStripLayoutChanged?.(msg);
+        } else if (msg.type === "stripLevels") {
+          this.onStripLevelsChange?.(msg);
         } else if (msg.type === "loadAck") {
           // Stage 3c-hotfix: the engine's load receipt. Resolve the pending load.
+          // Routing v1.1: EVERY waiter of the settled flight resolves (coalesced
+          // callers included), each stamped with its OWN request epoch — only
+          // the newest caller's epoch matches currentEpoch(), so only it runs
+          // post-load actions. The queued payload (if any) ships next.
           if (this.pendingLoad && (msg.seq === this.pendingLoad.seq || msg.seq === 0)) {
             const pending = this.pendingLoad;
             this.pendingLoad = null;
             window.clearTimeout(pending.timer);
             console.info(`[engine] loadAck: received ${msg.received}, loaded ${msg.loaded}, skipped ${msg.skipped}, byteSize ${msg.byteSize} (seq ${msg.seq})`);
             writeErrorLog("engine", `loadAck: received ${msg.received}, loaded ${msg.loaded}, skipped ${msg.skipped}, firstError ${msg.firstErrorIndex}${msg.firstErrorReason ? ` (${msg.firstErrorReason})` : ""}, byteSize ${msg.byteSize} (seq ${msg.seq}) — sent ${pending.sentEvents} events, ${pending.sentBytes} bytes`);
-            pending.resolve({
-              ok: true,
-              seq: msg.seq,
-              received: msg.received,
-              loaded: msg.loaded,
-              skipped: msg.skipped,
-              firstErrorIndex: msg.firstErrorIndex,
-              firstErrorReason: msg.firstErrorReason,
-              byteSize: msg.byteSize,
-            });
+            for (const w of pending.waiters) {
+              w.resolve({
+                ok: true,
+                seq: msg.seq,
+                epoch: w.epoch,
+                received: msg.received,
+                loaded: msg.loaded,
+                skipped: msg.skipped,
+                firstErrorIndex: msg.firstErrorIndex,
+                firstErrorReason: msg.firstErrorReason,
+                byteSize: msg.byteSize,
+              });
+            }
+            this.dequeue();
           }
         } else if (msg.type === "error") {
           console.warn("[engine] error:", msg.code, msg.echo, msg.detail ?? "");
@@ -739,9 +917,12 @@ export class EngineClient {
           writeErrorLog("engine", `error ${msg.code}${msg.detail ? ` — ${msg.detail}` : ""}${msg.echo ? ` (echo ${msg.echo})` : ""}`);
           this.onErrorChange?.(msg.code, msg.echo, msg.detail ?? "");
           // A load rejected by the engine fails FAST — no point waiting for
-          // an ack that will never come.
+          // an ack that will never come. Routing v1.1: the queued (newer)
+          // payload still ships — it may be exactly the state that fixes the
+          // rejection; if the engine rejects it too, its own receipt speaks.
           if (msg.echo === "load" || msg.code === "bad_load") {
             this.rejectPendingLoad(`engine rejected load: ${msg.code}${msg.detail ? ` (${msg.detail})` : ""}`);
+            this.dequeue();
           }
           // Stage 3b-fix: surface audio-init failure to the UI (footer shows
           // "engine: no audio device" in red while the connection stays up).
@@ -758,8 +939,10 @@ export class EngineClient {
       // Panic on disconnect — no stuck notes. Report the LAST KNOWN tick, not
       // 0: the playhead must freeze at the drop position, not snap to zero.
       if (this.onStateChange) this.onStateChange(false, this.lastKnownTick);
-      // Stage 3c-hotfix: a load in flight can never be acked now.
+      // Stage 3c-hotfix: a load in flight can never be acked now. Routing
+      // v1.1: the queued (never-sent) loads flush with the same reason.
       this.rejectPendingLoad("connection closed while awaiting loadAck");
+      this.flushQueuedLoads("connection closed while a load was queued");
       if (this.status !== "failed" && this.status !== "off") {
         this.scheduleReconnect();
       }
@@ -782,10 +965,34 @@ export class EngineClient {
    * Stage 3c-2: per-track mute/solo. The engine gates at dispatch BEFORE any
    * channel send (and CC120-flushes channels whose audibility was lost, so
    * the change is immediately audible).
+   * Routing v1 (additive): `strip` carries the AUDIO-domain strip fields —
+   * gains (0..4, the engine clamps + names), mutes, solos. The per-TRACK
+   * dispatch gate above is untouched (mute/solo stay global across
+   * instances; strips only carry the per-bound-output preview gains).
    */
-  mix(mutedTrackIds: string[], soloTrackIds: string[]): void {
+  mix(mutedTrackIds: string[], soloTrackIds: string[], strip?: { gains?: Record<string, number> }): void {
     if (this.ws && this.ws.readyState === WebSocket.OPEN) {
-      this.ws.send(JSON.stringify({ type: "mix", mutedTracks: mutedTrackIds, soloTracks: soloTrackIds }));
+      const msg: Record<string, unknown> = { type: "mix", mutedTracks: mutedTrackIds, soloTracks: soloTrackIds };
+      if (strip?.gains && Object.keys(strip.gains).length > 0) msg.stripGains = strip.gains;
+      this.ws.send(JSON.stringify(msg));
+    }
+  }
+
+  /** Routing v1 — send the FULL app-owned strip table (never a delta: the
+   * engine unwires instances absent from the message). The engine validates
+   * atomically; the echo arrives via onStripsResult. */
+  sendStrips(wires: StripWire[]): void {
+    if (this.ws && this.ws.readyState === WebSocket.OPEN) {
+      const payload = wires.map((w) => ({ strip: w.strip, inst: w.inst, pair: [w.pair0, w.pair0 + 1] }));
+      this.ws.send(JSON.stringify({ type: "strips", wires: payload }));
+    }
+  }
+
+  /** Routing v1 — probe every published instance's output layout (the
+   * re-check moments: editor close, transport start, picker open). */
+  requestLayouts(): void {
+    if (this.ws && this.ws.readyState === WebSocket.OPEN) {
+      this.ws.send(JSON.stringify({ type: "layoutAll" }));
     }
   }
 
@@ -798,72 +1005,132 @@ export class EngineClient {
    * one per plugin-bearing library group) + `routing` (trackId → {inst, ch}
    * in the instance's 1–16 namespace) REPLACE the legacy pair — the engine
    * still accepts both shapes (additive protocol).
+   *
+   * Routing v1.1 — SINGLE-FLIGHT: a request arriving while another load is
+   * in flight COALESCES into the queued slot (it never rejects the in-flight
+   * load and never races the engine with back-to-back payloads). When the
+   * in-flight load settles, the queued payload (the LATEST requested state)
+   * ships. Every caller's promise settles when a payload covering its state
+   * has been acked; only the newest caller (receipt.epoch === currentEpoch())
+   * runs post-load actions.
    */
   load(
     events: PhysicalMidiStreamEvent[],
     meta: EngineLoadMeta,
-    opts?: {
-      channels?: Record<string, number>;
-      plugin?: { uid: string; path: string; name?: string; state?: string };
-      routing?: Record<string, { inst: string; ch: number }>;
-      plugins?: Array<{ instanceId: string; uid: string; path: string; name?: string; state?: string }>;
-    },
+    opts?: LoadOpts,
   ): Promise<LoadReceipt> {
+    const epoch = ++this.requestEpoch;
     return new Promise((resolve, reject) => {
       if (!this.ws || this.ws.readyState !== WebSocket.OPEN) {
         const reason = `engine socket not open (status ${this.status}) — load never sent`;
         writeErrorLog("engine", `load FAILED: ${reason} (${events.length} events)`);
-        reject({ ok: false, reason, sentEvents: events.length, sentBytes: 0 });
+        reject({ ok: false, reason, sentEvents: events.length, sentBytes: 0, epoch });
         return;
       }
-      // A newer load supersedes an older in-flight one.
+      const waiter: LoadWaiter = { resolve, reject, epoch };
       if (this.pendingLoad) {
-        this.rejectPendingLoad("superseded by a newer load");
-      }
-      const seq = ++this.loadSeq;
-      // Serialize ONCE and measure: this is the frontend side of the receipt
-      // pair (engine.log logs what the engine received).
-      const msg: Record<string, unknown> = { type: "load", seq, events, meta };
-      if (opts?.routing && Object.keys(opts.routing).length > 0) msg.routing = opts.routing;
-      if (opts?.plugins && opts.plugins.length > 0) msg.plugins = opts.plugins;
-      // Legacy single-plugin shape (still accepted by the engine; kept for
-      // any caller/test that predates 3d-4).
-      if (opts?.channels && Object.keys(opts.channels).length > 0) msg.channels = opts.channels;
-      if (opts?.plugin) msg.plugin = opts.plugin;
-      const payload = JSON.stringify(msg);
-      const bytes = payload.length; // payload is pure ASCII → UTF-16 units == bytes
-      console.info(`[engine] load: ${events.length} events, ${bytes} bytes (seq ${seq})`);
-      writeErrorLog("engine", `load sent: ${events.length} events, ${bytes} bytes (seq ${seq})`);
-      const timer = window.setTimeout(() => {
-        if (this.pendingLoad && this.pendingLoad.seq === seq) {
-          this.pendingLoad = null;
-          // Stage 3f-7 (item 5): name the LIKELY CAUSE from engine messages
-          // already available, not only "never acknowledged".
-          const mm = this.mmUnresponsive !== null
-            ? { seconds: this.mmUnresponsive.seconds, ageMs: Date.now() - this.mmUnresponsive.atMs }
-            : null;
-          const previousLoadUnsettled =
-            this.loadSentSeqAwaitingPluginState !== 0 && this.loadSentSeqAwaitingPluginState < seq;
-          const reason = describeLateLoadAck(EngineClient.LOAD_ACK_TIMEOUT_MS, mm, previousLoadUnsettled);
-          writeErrorLog("engine", `load FAILED: ${reason} (sent ${events.length} events, ${bytes} bytes, seq ${seq})`);
-          reject({ ok: false, reason, sentEvents: events.length, sentBytes: bytes });
+        // Coalesce — never supersede: the queued slot always holds the
+        // LATEST payload; replaced payloads' waiters ride the newest load.
+        if (this.queuedLoad) {
+          this.queuedLoad.waiters.push(waiter);
+        } else {
+          this.queuedLoad = { events, meta, opts, sentEvents: events.length, waiters: [waiter] };
         }
-      }, EngineClient.LOAD_ACK_TIMEOUT_MS);
-      this.pendingLoad = { seq, sentEvents: events.length, sentBytes: bytes, resolve, reject, timer };
-      this.loadSentSeqAwaitingPluginState = seq;
-      this.ws.send(payload);
+        return;
+      }
+      this.sendLoad(events, meta, opts, events.length, [waiter]);
     });
   }
 
+  /** Serialize + send ONE load payload and arm its ack timer. The single
+   * flight path for both immediate and dequeued loads. */
+  private sendLoad(
+    events: PhysicalMidiStreamEvent[],
+    meta: EngineLoadMeta,
+    opts: LoadOpts | undefined,
+    sentEvents: number,
+    waiters: LoadWaiter[],
+  ): void {
+    if (!this.ws || this.ws.readyState !== WebSocket.OPEN) {
+      // The socket died between settle and dequeue — flush these waiters
+      // (onclose already flushed any older queue; this covers the race).
+      const reason = "connection closed before the queued load could send";
+      for (const w of waiters) w.reject({ ok: false, reason, sentEvents, sentBytes: 0, epoch: w.epoch });
+      return;
+    }
+    const seq = ++this.loadSeq;
+    // Serialize ONCE and measure: this is the frontend side of the receipt
+    // pair (engine.log logs what the engine received).
+    const msg: Record<string, unknown> = { type: "load", seq, events, meta };
+    if (opts?.routing && Object.keys(opts.routing).length > 0) msg.routing = opts.routing;
+    if (opts?.plugins && opts.plugins.length > 0) msg.plugins = opts.plugins;
+    // Legacy single-plugin shape (still accepted by the engine; kept for
+    // any caller/test that predates 3d-4).
+    if (opts?.channels && Object.keys(opts.channels).length > 0) msg.channels = opts.channels;
+    if (opts?.plugin) msg.plugin = opts.plugin;
+    const payload = JSON.stringify(msg);
+    const bytes = payload.length; // payload is pure ASCII → UTF-16 units == bytes
+    console.info(`[engine] load: ${events.length} events, ${bytes} bytes (seq ${seq})`);
+    writeErrorLog("engine", `load sent: ${events.length} events, ${bytes} bytes (seq ${seq})`);
+    const timer = window.setTimeout(() => {
+      if (this.pendingLoad && this.pendingLoad.seq === seq) {
+        const slot = this.pendingLoad;
+        this.pendingLoad = null;
+        window.clearTimeout(slot.timer);
+        // Stage 3f-7 (item 5): name the LIKELY CAUSE from engine messages
+        // already available, not only "never acknowledged".
+        const mm = this.mmUnresponsive !== null
+          ? { seconds: this.mmUnresponsive.seconds, ageMs: Date.now() - this.mmUnresponsive.atMs }
+          : null;
+        const previousLoadUnsettled =
+          this.loadSentSeqAwaitingPluginState !== 0 && this.loadSentSeqAwaitingPluginState < seq;
+        const reason = describeLateLoadAck(EngineClient.LOAD_ACK_TIMEOUT_MS, mm, previousLoadUnsettled);
+        writeErrorLog("engine", `load FAILED: ${reason} (sent ${slot.sentEvents} events, ${slot.sentBytes} bytes, seq ${seq})`);
+        for (const w of slot.waiters) {
+          w.reject({ ok: false, reason, sentEvents: slot.sentEvents, sentBytes: slot.sentBytes, epoch: w.epoch });
+        }
+        // The WS is alive — a queued payload (newer requested state) ships.
+        this.dequeue();
+      }
+    }, EngineClient.LOAD_ACK_TIMEOUT_MS);
+    this.pendingLoad = { seq, sentEvents, sentBytes: bytes, waiters, timer };
+    this.loadSentSeqAwaitingPluginState = seq;
+    this.ws.send(payload);
+  }
+
+  /** Ship the queued payload (if any) as the next single flight. */
+  private dequeue(): void {
+    if (!this.queuedLoad) return;
+    const q = this.queuedLoad;
+    this.queuedLoad = null;
+    this.sendLoad(q.events, q.meta, q.opts, q.sentEvents, q.waiters);
+  }
+
+  /** Routing v1.1 — flush every queued (never-sent) load with one reason
+   * (disconnect / dispose). Their callers fail fast instead of waiting on a
+   * payload that will never ship. */
+  private flushQueuedLoads(reason: string): void {
+    if (!this.queuedLoad) return;
+    const q = this.queuedLoad;
+    this.queuedLoad = null;
+    writeErrorLog("engine", `queued load FLUSHED: ${reason} (${q.sentEvents} events waiting)`);
+    for (const w of q.waiters) {
+      w.reject({ ok: false, reason, sentEvents: q.sentEvents, sentBytes: 0, epoch: w.epoch });
+    }
+  }
+
   /** Stage 3c-hotfix: fail the in-flight load with a reason (ack timeout,
-   * engine rejection, disconnect, supersede, dispose). Never throws. */
+   * engine rejection, disconnect, dispose). Never throws. Routing v1.1:
+   * "superseded" no longer exists — racing callers coalesce instead. */
   private rejectPendingLoad(reason: string): void {
     if (!this.pendingLoad) return;
     const pending = this.pendingLoad;
     this.pendingLoad = null;
     window.clearTimeout(pending.timer);
     writeErrorLog("engine", `load FAILED: ${reason} (sent ${pending.sentEvents} events, ${pending.sentBytes} bytes, seq ${pending.seq})`);
-    pending.reject({ ok: false, reason, sentEvents: pending.sentEvents, sentBytes: pending.sentBytes });
+    for (const w of pending.waiters) {
+      w.reject({ ok: false, reason, sentEvents: pending.sentEvents, sentBytes: pending.sentBytes, epoch: w.epoch });
+    }
   }
 
   /**
@@ -999,6 +1266,7 @@ export class EngineClient {
     if (this.pendingLoad) {
       this.rejectPendingLoad("client disposed");
     }
+    this.flushQueuedLoads("client disposed");
     if (this.ws) {
       this.ws.onclose = null;
       this.ws.onerror = null;

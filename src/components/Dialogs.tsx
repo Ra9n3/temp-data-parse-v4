@@ -965,7 +965,7 @@ export function PianoRoll({
   );
 }
 
-function Modal({
+export function Modal({
   title,
   onClose,
   children,

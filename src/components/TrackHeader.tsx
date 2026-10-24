@@ -43,6 +43,18 @@ interface Props {
    * track's own (never in the set by construction). Absent/empty = all 16
    * offered (test-synth tracks, sole riders). */
   engineChannelTaken?: number[];
+  /** Routing v1 — the binding line under the pill: the triple at a glance
+   * ("Falcon #1 · Ch 3 · Out 5/6"), with the state tone. Routing v1.1 adds
+   * the "loading" tone (the silence rules' spinner state). Routing v1.2 —
+   * an offline line may carry `detail` (the engine's failure receipt text):
+   * the tooltip shows "Why offline: …" so the reason lives where the state
+   * is. Absent for audio/structure tracks. Click → the binding picker. */
+  routingLine?: { text: string; tone: "ok" | "missing" | "offline" | "unbound" | "loading"; detail?: string };
+  onOpenRouting?: () => void;
+  /** Routing v1 — the per-bound-output preview volume (0–1.5, engine strip
+   * gain). Only rendered when the track is bound to an output pair. */
+  previewVolume?: number;
+  onPreviewVolume?: (v: number) => void;
 }
 
 export function TrackHeader({
@@ -62,6 +74,10 @@ export function TrackHeader({
   engineChannelExplicit,
   onEngineChannel,
   engineChannelTaken,
+  routingLine,
+  onOpenRouting,
+  previewVolume,
+  onPreviewVolume,
 }: Props) {
   // Patch 4 — the "CC" button, its popup and the expression-editor callback
   // are REMOVED from the UI. track.expressionMapping itself stays in the
@@ -138,6 +154,46 @@ export function TrackHeader({
             >
               <Ph name="loop" className="h-3 w-3" />
             </button>
+          )}
+          {/* Routing v1 — the binding line: instance · channel · pair, with
+              the state tone. The whole line is the picker affordance. */}
+          {!isAudio && !isStructure && routingLine && onOpenRouting && (
+            <div className="mt-0.5 flex items-center gap-1.5">
+              <button
+                type="button"
+                onClick={onOpenRouting}
+                title={
+                  "Edit the routing binding — instance, MIDI channel and output pair"
+                  + (routingLine.tone === "offline" && routingLine.detail
+                    ? `\n\nWhy offline: ${routingLine.detail}`
+                    : "")
+                }
+                className={cn(
+                  "flex min-w-0 flex-1 items-center gap-1 rounded px-1 py-px text-[10px] ring-1 hover:brightness-125",
+                  routingLine.tone === "ok" && "bg-sky-500/10 text-sky-300/90 ring-sky-400/20",
+                  routingLine.tone === "missing" && "bg-red-500/15 text-red-300 ring-red-400/30",
+                  routingLine.tone === "loading" && "animate-pulse bg-amber-500/10 text-amber-200/90 ring-amber-400/20",
+                  routingLine.tone === "offline" && "bg-white/5 text-stone-400 ring-white/10",
+                  routingLine.tone === "unbound" && "bg-white/[0.03] text-stone-500 ring-white/5",
+                )}
+              >
+                <Ph name="route" className="h-2.5 w-2.5 shrink-0" />
+                <span className="truncate">{routingLine.text}</span>
+              </button>
+              {onPreviewVolume && routingLine.tone !== "unbound" && (
+                <input
+                  type="range"
+                  min={0}
+                  max={1.5}
+                  step={0.05}
+                  value={previewVolume ?? 1}
+                  onChange={(e) => onPreviewVolume(Number(e.target.value))}
+                  title="Preview volume (this track's bound output pair)"
+                  aria-label="Preview volume"
+                  className="h-1 w-14 shrink-0 cursor-pointer accent-orange-400"
+                />
+              )}
+            </div>
           )}
         </div>
         <div className="relative flex shrink-0 items-center gap-0.5">

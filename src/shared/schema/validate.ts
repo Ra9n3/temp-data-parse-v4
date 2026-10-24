@@ -86,6 +86,15 @@ function validateTrack(track: Track, index: number, errors: string[]): void {
       errors.push(`${p}.engineChannel must be an integer 1–16 (engine channel)`);
     }
   }
+  // Routing v1 — the bound output pair (optional, additive). Shape-only
+  // here: the 0-based even start of a stereo pair; liveness against the
+  // instance's layout is a RUNTIME view concern (missing state), never a
+  // validation failure — an offline project stays fully editable.
+  if (track.engineOutputPair !== undefined) {
+    if (!isInt(track.engineOutputPair) || track.engineOutputPair < 0 || track.engineOutputPair > 1024 || track.engineOutputPair % 2 !== 0) {
+      errors.push(`${p}.engineOutputPair must be an even integer 0–1024 (bus-aligned pair start)`);
+    }
+  }
   if (!Array.isArray(track.notes)) {
     errors.push(`${p}.notes must be an array`);
     return;

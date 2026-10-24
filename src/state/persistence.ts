@@ -171,3 +171,29 @@ export function saveExtraScanDirs(dirs: string[]): void {
     /* storage unavailable — the box still works for this session */
   }
 }
+
+// ─── Routing v1.1 — the built-in preview preference (the silence rules) ─────
+// The user's fallback rules: Scorch NEVER plays a substitute sound. Tracks
+// without a hosted plugin (unbound, loading, offline, missing output) are
+// SILENT; the built-in synth exists only as this EXPLICIT opt-in, default
+// OFF. A machine preference (not score content) — it never enters the
+// project JSON, the undo stack, or MIDI export.
+export const BUILTIN_PREVIEW_KEY = "scorch.builtinPreview";
+
+/** Default OFF — silence is the contract; sound is a choice. */
+export function readBuiltinPreviewPref(): boolean {
+  try {
+    return window.localStorage.getItem(BUILTIN_PREVIEW_KEY) === "1";
+  } catch {
+    return false;
+  }
+}
+
+export function saveBuiltinPreviewPref(on: boolean): void {
+  try {
+    if (on) window.localStorage.setItem(BUILTIN_PREVIEW_KEY, "1");
+    else window.localStorage.removeItem(BUILTIN_PREVIEW_KEY);
+  } catch {
+    /* storage unavailable — the toggle still works for this session */
+  }
+}

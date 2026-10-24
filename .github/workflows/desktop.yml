@@ -307,21 +307,24 @@ jobs:
 
           Write-Host "All engine protocol tests passed (audio-capable build, graceful headless behavior)"
 
-          # Test D10 — TASK I: the editor-open-under-play stress (the
-          # dangling-WNDPROC race). 60 editor open/close cycles UNDER ACTIVE
-          # PLAYBACK (--null-audio pacing), with a mid-play diff swap every 5
-          # cycles that orphans the outgoing instance's module — JUCE frees a
-          # plugin DLL when the last instance of its path dies (the D5 CI
+          # Test D10 — TASK J: the editor-open-under-play stress (the
+          # dangling-WNDPROC race). 120 editor open/close cycles UNDER ACTIVE
+          # PLAYBACK (--null-audio pacing; amplified per the brief: raised
+          # iterations, seeded timing jitter), with a mid-play diff swap every
+          # 5 cycles that orphans the outgoing instance's module — JUCE frees
+          # a plugin DLL when the last instance of its path dies (the D5 CI
           # finding) — and loads the survivor under play. The survivor's next
           # editor cycle runs INSIDE the freed module's deferred-free window:
-          # the exact shape the TASK F dump died in (user32 dispatch into an
-          # unmapped WNDPROC, race-dependent — attempts 2-5). Pre-guard this
-          # run is the REPRO attempt (a crash here is the required evidence;
-          # the P1 dump's unloaded-module list names the ghost). Post-guard
-          # the same machine is the acceptance gate: 50+ clean cycles, no
-          # [crash] receipts, and the [module-guard] receipts (asserted from
-          # the guard commit onward).
-          Write-Host "=== Test D10: TASK I stress (60 editor cycles under play, module-orphaning swaps) — WARN-ONLY (advisory, non-gating until further notice; user directive 2026-10-22) ==="
+          # the exact shape the TASK F dump died in. THE ENGINE NOW CLOSES
+          # THE CLASS BY ORDERING (the TASK J root fix): destroy windows on
+          # their OWNER threads -> drain pending messages -> THEN unload; the
+          # module-guard is demoted to the fail-loud verify backstop (any
+          # residue = teardown-order defect, logged loudly + the module
+          # PINNED — the unload refused; a leak, never an unmapped dispatch).
+          # Green shape: '[module-guard] retire instance=<iid> orphan=yes
+          # windows=0' verification receipts + zero [crash] + clean exit 0.
+          # The [module-teardown] receipts name every owner-thread destroy.
+          Write-Host "=== Test D10: TASK J stress (120 editor cycles under play, module-orphaning swaps, seeded jitter) — teardown-ordering root fix acceptance — WARN-ONLY (advisory, non-gating until further notice; user directive 2026-10-22) ==="
           $engineLogD10 = Join-Path $env:APPDATA "scorch\engine.log"
           $logLinesBeforeD10 = 0
           if (Test-Path $engineLogD10) { $logLinesBeforeD10 = (Get-Content $engineLogD10 | Measure-Object -Line).Lines }
@@ -372,20 +375,62 @@ jobs:
                     # ADVISORY line instead of throwing — the receipts and dumps
                     # stay on the record for adjudication, the step stays green.
                     $guardD10 = @($d10Lines | Select-String -Pattern "\[module-guard\] retire instance=\S+ orphan=yes")
-                    if (($guardD10 | Measure-Object).Count -lt 1) { Show-StepLogTail -Path $engineLogD10 -Proc $procD10 -Label "Engine D10"; Write-Host "D10 ADVISORY (warn-only, non-gating): no '[module-guard] retire instance=<iid> orphan=yes' summary receipt — the swaps must orphan a module each and the sweep must hold the invariant (execution proof missing)" }
+                    if (($guardD10 | Measure-Object).Count -lt 1) { Show-StepLogTail -Path $engineLogD10 -Proc $procD10 -Label "Engine D10"; Write-Host "D10 ADVISORY (warn-only, non-gating): no '[module-guard] retire instance=<iid> orphan=yes' verification receipt — the swaps must orphan a module each and the teardown+verify must run (execution proof missing)" }
                     $guardD10 | ForEach-Object { Write-Host $_.Line }
                     $pinnedD10 = @($d10Lines | Select-String -Pattern "\[module-guard\] PINNED")
-                    if (($pinnedD10 | Measure-Object).Count -gt 0) { Write-Host "D10 NOTE: $($pinnedD10.Count) window(s) could not be detached and were PINNED (safe leak — the module stays mapped; no unmapped dispatch possible):"; $pinnedD10 | ForEach-Object { Write-Host $_.Line } }
+                    if (($pinnedD10 | Measure-Object).Count -gt 0) { Write-Host "D10 NOTE: $($pinnedD10.Count) module(s) PINNED — teardown-order residue refused the unload (safe leak: the module stays mapped, no unmapped dispatch possible; the teardown-order defect is named in the per-window receipts):"; $pinnedD10 | ForEach-Object { Write-Host $_.Line } }
                     $unresolvedD10 = @($d10Lines | Select-String -Pattern "\[module-guard\] UNRESOLVED")
-                    if (($unresolvedD10 | Measure-Object).Count -ne 0) { $unresolvedD10 | ForEach-Object { Write-Host $_.Line }; Write-Host "D10 ADVISORY (warn-only, non-gating): the guard could neither detach nor pin a window living in a module about to free — the invariant is NOT enforced (the next dispatch into it is the TASK F crash)" }
-                    Write-Host "D10 receipts: $($guardD10.Count) module-guard sweep(s) held the invariant across the orphaning swaps, zero [crash] receipts, clean exit 0"
-                    Write-Host "Engine D10 clean exit 0 (TASK I stress: the engine survived every orphaning free with editors cycling)"
+                    if (($unresolvedD10 | Measure-Object).Count -ne 0) { $unresolvedD10 | ForEach-Object { Write-Host $_.Line }; Write-Host "D10 ADVISORY (warn-only, non-gating): the guard could not PIN a window living in a module about to free — the refuse-unload backstop failed (the next dispatch into it is the TASK F crash)" }
+                    Write-Host "D10 receipts: $($guardD10.Count) teardown verification pass(es) across the orphaning swaps, zero [crash] receipts, clean exit 0"
+                    Write-Host "Engine D10 clean exit 0 (TASK J stress: the engine survived every orphaning free with editors cycling — destroy windows, drain, then unload)"
                   }
                 }
               }
             }
           } finally {
             Stop-Process -Id $procD10.Id -Force -ErrorAction SilentlyContinue
+          }
+
+          # Test D11 — TASK J FIELD BENCH harness validation (hosted): the
+          # fieldbench mode's CI path. The real Falcon/BBCSO legs cannot exist
+          # on a hosted runner (commercial libraries) — the machine must
+          # receipt them ABSENT, pass with 0 field cycles, and shut the engine
+          # down clean. THE DESKTOP RUN (field-bench.ps1 on the user's machine,
+          # SCORCH_FIELD_REQUIRE=1) is the real bench; this step proves the
+          # harness surface is green and the absent-legs path is honest.
+          # GATING — new harness surface, not part of the D10 advisory region.
+          Write-Host "=== Test D11: TASK J fieldbench harness validation (hosted: legs absent, 0 field cycles) ==="
+          $engineLogD11 = Join-Path $env:APPDATA "scorch\engine.log"
+          $logLinesBeforeD11 = 0
+          if (Test-Path $engineLogD11) { $logLinesBeforeD11 = (Get-Content $engineLogD11 | Measure-Object -Line).Lines }
+          $procD11 = Start-Process -FilePath "engine/build/scorch-engine.exe" -ArgumentList "--port","9393","--null-audio" -PassThru -NoNewWindow -RedirectStandardOutput "engine-d11-stdout.txt" -RedirectStandardError "engine-d11-stderr.txt"
+          Start-Sleep -Seconds 3
+          $d11Run = $true
+          try {
+            if ($procD11.HasExited) {
+              Write-Host "Engine D11 exited early (code=$($procD11.ExitCode)). stdout:"
+              if (Test-Path engine-d11-stdout.txt) { Get-Content engine-d11-stdout.txt }
+              throw "D11: Engine D11 process exited before test could connect"
+            }
+            node .github/scripts/test-engine-protocol.mjs 9393 fieldbench "$env:SCAN_FIXTURES"
+            if ($LASTEXITCODE -ne 0) {
+              Show-StepLogTail -Path $engineLogD11 -Proc $procD11 -Label "Engine D11"
+              Write-Host "Engine D11 stdout:"
+              if (Test-Path engine-d11-stdout.txt) { Get-Content engine-d11-stdout.txt }
+              throw "D11: fieldbench harness failed (mjs exit $LASTEXITCODE)"
+            }
+            # TASK D machinery: wait for ENGINE EXIT before reading the log —
+            # the file is final once the process is gone (exit-verified read).
+            $procD11.WaitForExit(20000) | Out-Null
+            if (-not $procD11.HasExited) { Show-StepLogTail -Path $engineLogD11 -Proc $procD11 -Label "Engine D11"; throw "D11: Engine D11 still running 20s after the harness exit — shutdown hung" }
+            if ($procD11.ExitCode -ne 0) { Show-StepLogTail -Path $engineLogD11 -Proc $procD11 -Label "Engine D11"; throw "D11: Engine D11 exited code=$($procD11.ExitCode)" }
+            Write-Host "Engine D11 exit verified BEFORE the log read (file final: exit 0)"
+            $d11Lines = Get-Content $engineLogD11 | Select-Object -Skip $logLinesBeforeD11
+            $crashD11 = @($d11Lines | Select-String -Pattern "\[crash\]")
+            if (($crashD11 | Measure-Object).Count -ne 0) { $crashD11 | ForEach-Object { Write-Host $_.Line }; throw "D11: the in-process crash channel fired during the fieldbench validation — adjudicate the dump" }
+            Write-Host "D11 receipts: fieldbench hosted pass — legs absent, 0 field cycles, zero [crash], clean exit 0"
+          } finally {
+            Stop-Process -Id $procD11.Id -Force -ErrorAction SilentlyContinue
           }
 
           # Test C — Stage 3c-1 VST3 scan protocol: valid plugin found (real
@@ -1867,6 +1912,45 @@ jobs:
       # module and carries per-thread state. Its ABSENCE here is still
       # evidence (an abort/terminate path that bypasses the in-process
       # filters, or a crash inside them).
+      # TASK J step 3 (repro instrument): D10 is warn-only, so a pre-fix
+      # repro crash leaves the JOB green — the failure()-gated upload steps
+      # below would never run and the P1 dump would be lost. This step
+      # uploads the dump + crash log + the stress engine surfaces ALWAYS, so
+      # a wild crash under the inert-guard build lands its evidence as an
+      # artifact (the brief: HALT, adjudicate the dump, then continue).
+      # engine.log lives under %APPDATA% (not in the Actions env context) —
+      # stage it to the repo root so the always-on upload below can carry it.
+      - name: Stage engine.log for the stress-dump artifact
+        if: always()
+        shell: pwsh
+        run: |
+          $src = Join-Path $env:APPDATA 'scorch\engine.log'
+          if (Test-Path $src) { Copy-Item $src 'engine-d10-engine.log' -Force; Write-Host "engine.log staged ($((Get-Item 'engine-d10-engine.log').Length) bytes)" } else { Write-Host "no engine.log at $src" }
+
+      - name: Stage stress dumps inside the workspace (D13 — the init-stall and crash dumps land in APPDATA; upload-artifact v4 errors on any path outside the repo root, run 39848150272)
+        if: always()
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path stress-dumps | Out-Null
+          if (Test-Path $env:SCORCH_CRASH_DIR) { Get-ChildItem $env:SCORCH_CRASH_DIR -Filter *.dmp -ErrorAction SilentlyContinue | Copy-Item -Destination stress-dumps -Force }
+          if (Test-Path $env:SCORCH_CRASH_LOG) { Copy-Item $env:SCORCH_CRASH_LOG stress-dumps -Force }
+          $staged = @(Get-ChildItem stress-dumps -ErrorAction SilentlyContinue)
+          Write-Host "stress-dumps staged: $($staged.Count) file(s)"
+          $staged | Select-Object Name,Length | Format-Table | Out-String | Write-Host
+
+      - name: Upload stress dumps (TASK J repro instrument — always on)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: stress-dumps-taskj-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            stress-dumps\*
+            engine-d10-engine.log
+            engine-d10-stdout.txt
+            engine-d10-stderr.txt
+          if-no-files-found: ignore
+          retention-days: 30
+
       - name: Show engine crash receipts (in-engine [crash] channel, if it fired)
         if: failure() || cancelled()
         shell: pwsh

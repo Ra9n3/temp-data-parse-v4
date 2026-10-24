@@ -413,6 +413,14 @@ export interface Track {
    * engine/engineStream.ts resolveEngineChannels) or stays on the built-in
    * test synth. Optional + additive; export ignores it (byte-identical). */
   engineChannel?: number;
+  /** Routing v1 — the bound OUTPUT pair of the hosted instance: the 0-based
+   * even start of the stereo pair [a, a+1] within the instance's live
+   * output channels (the engine's strips contract). Absent = the MAIN pair
+   * default (Out 1/2). The binding triple is {libraryGroupId (instance),
+   * engineChannel, engineOutputPair}; it persists by instance id and is
+   * restored exactly on project load. Optional + additive; export ignores
+   * it (byte-identical). */
+  engineOutputPair?: number;
   frozen: boolean;
   notes: Note[];
 }
