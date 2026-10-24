@@ -459,7 +459,77 @@ export interface EngineDiagnosticMessage {
   seconds: number;
 }
 
-type EngineMessage = HelloMessage | PongMessage | ErrorMessage | StateMessage | ScanResultMessage | ScanProbeMessage | PluginStateMessage | LoadAckMessage | EditorEventMessage | PluginSavedStateMessage | PluginCapabilitiesMessage | EngineDiagnosticMessage;
+// ─── Routing v1 — the strips wire contract (engine M3 PR2, additive; ────────
+// protocol stays 1). The app OWNS the wiring table; the engine validates it
+// atomically (R1 atomic-or-nothing) and applies it on the message thread.
+
+/** One wire of the app-owned strip table: instance output pair [pair0,
+ * pair0+1] → a mixer strip. pair0 is the 0-based EVEN (bus-aligned) start
+ * the engine's R1 validation requires. */
+export interface StripWire {
+  strip: string;
+  inst: string;
+  pair0: number;
+}
+
+/** The engine's echo for a strips apply: v advances by EXACTLY ONE per
+ * applied table and is UNCHANGED by a rejection (the atomicity witness). */
+export interface StripsResultMessage {
+  type: "strips_result";
+  applied: boolean;
+  v: number;
+  /** Wired strip count (applied only). */
+  strips?: number;
+  /** Rejection reason (applied:false only) — surfaced, never swallowed. */
+  reason?: string;
+}
+
+/** One instance's LIVE output layout — the `layouts` probe reply rows and
+ * the per-commit `instanceLayout` push share this exact shape. */
+export interface InstanceLayout {
+  instanceId: string;
+  buses: number;
+  channels: number;
+  busChannels: number[];
+}
+
+/** Reply to {"type":"layoutAll"} — every published instance's layout. */
+export interface LayoutsMessage {
+  type: "layouts";
+  instances: InstanceLayout[];
+}
+
+/** Per-commit push (after every plugin load commit): the live-node truth,
+ * NOT the captured table (the R3 guard may just have fired). */
+export interface InstanceLayoutMessage extends InstanceLayout {
+  type: "instanceLayout";
+}
+
+/** The R3 LAYOUT-CHANGE GUARD's push: a table pair the live node can no
+ * longer feed was unwired with named receipts — never a silent dead wire.
+ * The app marks the affected bindings MISSING (derived) and re-resolves
+ * them by itself when a wider layout arrives. */
+export interface StripLayoutChangedMessage {
+  type: "stripLayoutChanged";
+  instanceId: string;
+  liveChannels: number;
+  /** The strip ids the guard unwired. */
+  unwired: string[];
+  reason: string;
+}
+
+/** RESERVED — per-strip audio peaks, the activity-meter feed. The engine
+ * ships per-strip stats as LOG receipts today (SCORCH_STRIP_LOG); when the
+ * wire push lands (engine follow-up), this client already speaks it and
+ * the meters light up with zero frontend redesign. Never sent by current
+ * engines — the UI degrades to an explicit "no levels stream" state. */
+export interface StripLevelsMessage {
+  type: "stripLevels";
+  /** stripId → [prePeak, postPeak] (0..1 linear). */
+  peaks: Record<string, [number, number]>;
+}
+
+type EngineMessage = HelloMessage | PongMessage | ErrorMessage | StateMessage | ScanResultMessage | ScanProbeMessage | PluginStateMessage | LoadAckMessage | EditorEventMessage | PluginSavedStateMessage | PluginCapabilitiesMessage | EngineDiagnosticMessage | StripsResultMessage | LayoutsMessage | InstanceLayoutMessage | StripLayoutChangedMessage | StripLevelsMessage;
 
 // Deterministic backoff sequence (seconds): 1, 2, 4, 8, 16 — no jitter.
 const BACKOFF_SEQUENCE = [1, 2, 4, 8, 16] as const;
@@ -536,6 +606,13 @@ export class EngineClient {
   // info panel reads them synchronously) and pushed to the app via callback.
   private capabilities = new Map<string, PluginCapabilitiesMessage>();
   private onPluginCapabilitiesChange: ((msg: PluginCapabilitiesMessage) => void) | null = null;
+  // Routing v1 — strips/layout pushes (all additive; every callback is
+  // optional and the app works fully without any of them).
+  private onStripsResultChange: ((msg: StripsResultMessage) => void) | null = null;
+  private onLayoutsChange: ((msg: LayoutsMessage) => void) | null = null;
+  private onInstanceLayoutChange: ((msg: InstanceLayoutMessage) => void) | null = null;
+  private onStripLayoutChanged: ((msg: StripLayoutChangedMessage) => void) | null = null;
+  private onStripLevelsChange: ((msg: StripLevelsMessage) => void) | null = null;
   private onErrorChange: ((code: string, echo: string, detail: string) => void) | null = null;
   // Stage 3c-hotfix: the in-flight load awaiting its loadAck (single slot —
   // a newer load supersedes an older one; see load()).
@@ -622,6 +699,34 @@ export class EngineClient {
    * hosted instance, right after its loaded receipt). */
   onPluginCapabilities(cb: (msg: PluginCapabilitiesMessage) => void): void {
     this.onPluginCapabilitiesChange = cb;
+  }
+
+  /** Routing v1 — the strips apply echo (applied:true advances v; a
+   * rejection carries the engine's reason). */
+  onStripsResult(cb: (msg: StripsResultMessage) => void): void {
+    this.onStripsResultChange = cb;
+  }
+
+  /** Routing v1 — the layoutAll probe reply (every published instance). */
+  onLayouts(cb: (msg: LayoutsMessage) => void): void {
+    this.onLayoutsChange = cb;
+  }
+
+  /** Routing v1 — per-commit layout push (live-node truth after a load). */
+  onInstanceLayout(cb: (msg: InstanceLayoutMessage) => void): void {
+    this.onInstanceLayoutChange = cb;
+  }
+
+  /** Routing v1 — the R3 guard's push: a bound pair the live node can no
+   * longer feed was unwired engine-side (never a silent dead wire). */
+  onStripLayoutChange(cb: (msg: StripLayoutChangedMessage) => void): void {
+    this.onStripLayoutChanged = cb;
+  }
+
+  /** Routing v1 — RESERVED per-strip levels feed (activity meters). No
+   * current engine sends it; registering is always safe. */
+  onStripLevels(cb: (msg: StripLevelsMessage) => void): void {
+    this.onStripLevelsChange = cb;
   }
 
   /** Stage 3e-1: the stored capability record for a hosted instance (the
@@ -713,6 +818,16 @@ export class EngineClient {
           const iid = msg.instanceId || "hosted";
           this.capabilities.set(iid, msg);
           this.onPluginCapabilitiesChange?.(msg);
+        } else if (msg.type === "strips_result") {
+          this.onStripsResultChange?.(msg);
+        } else if (msg.type === "layouts") {
+          this.onLayoutsChange?.(msg);
+        } else if (msg.type === "instanceLayout") {
+          this.onInstanceLayoutChange?.(msg);
+        } else if (msg.type === "stripLayoutChanged") {
+          this.onStripLayoutChanged?.(msg);
+        } else if (msg.type === "stripLevels") {
+          this.onStripLevelsChange?.(msg);
         } else if (msg.type === "loadAck") {
           // Stage 3c-hotfix: the engine's load receipt. Resolve the pending load.
           if (this.pendingLoad && (msg.seq === this.pendingLoad.seq || msg.seq === 0)) {
@@ -782,10 +897,34 @@ export class EngineClient {
    * Stage 3c-2: per-track mute/solo. The engine gates at dispatch BEFORE any
    * channel send (and CC120-flushes channels whose audibility was lost, so
    * the change is immediately audible).
+   * Routing v1 (additive): `strip` carries the AUDIO-domain strip fields —
+   * gains (0..4, the engine clamps + names), mutes, solos. The per-TRACK
+   * dispatch gate above is untouched (mute/solo stay global across
+   * instances; strips only carry the per-bound-output preview gains).
    */
-  mix(mutedTrackIds: string[], soloTrackIds: string[]): void {
+  mix(mutedTrackIds: string[], soloTrackIds: string[], strip?: { gains?: Record<string, number> }): void {
     if (this.ws && this.ws.readyState === WebSocket.OPEN) {
-      this.ws.send(JSON.stringify({ type: "mix", mutedTracks: mutedTrackIds, soloTracks: soloTrackIds }));
+      const msg: Record<string, unknown> = { type: "mix", mutedTracks: mutedTrackIds, soloTracks: soloTrackIds };
+      if (strip?.gains && Object.keys(strip.gains).length > 0) msg.stripGains = strip.gains;
+      this.ws.send(JSON.stringify(msg));
+    }
+  }
+
+  /** Routing v1 — send the FULL app-owned strip table (never a delta: the
+   * engine unwires instances absent from the message). The engine validates
+   * atomically; the echo arrives via onStripsResult. */
+  sendStrips(wires: StripWire[]): void {
+    if (this.ws && this.ws.readyState === WebSocket.OPEN) {
+      const payload = wires.map((w) => ({ strip: w.strip, inst: w.inst, pair: [w.pair0, w.pair0 + 1] }));
+      this.ws.send(JSON.stringify({ type: "strips", wires: payload }));
+    }
+  }
+
+  /** Routing v1 — probe every published instance's output layout (the
+   * re-check moments: editor close, transport start, picker open). */
+  requestLayouts(): void {
+    if (this.ws && this.ws.readyState === WebSocket.OPEN) {
+      this.ws.send(JSON.stringify({ type: "layoutAll" }));
     }
   }
 

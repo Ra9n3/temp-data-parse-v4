@@ -48,6 +48,8 @@ export const icons = {
   snow: stroke("M12 3v18M5 7l14 10M19 7L5 17M4 12h16"),
   music: stroke("M9 18V6l10-2v12M9 18a3 3 0 11-6 0 3 3 0 016 0zm10-2a3 3 0 11-6 0 3 3 0 016 0z"),
   wand: stroke("M4 20L16 8M14.5 6.5l3 3M16 4l.5 2.5L19 7l-2.5.5L16 10l-.5-2.5L13 7l2.5-.5z"),
+  activity: stroke("M3 12h4l2.5-6 4 12 2.5-6h5"),
+  route: stroke("M4 5h5a4 4 0 014 4v6a4 4 0 004 4h3M20 5h-3a4 4 0 00-4 4M18 3l2 2-2 2M18 17l2 2-2 2"),
 } as const;
 
 export type IconName = keyof typeof icons;

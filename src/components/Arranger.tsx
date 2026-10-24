@@ -88,6 +88,12 @@ interface Props {
   // Stage 3g — per-track channels taken by OTHER tracks of the same group
   // (the dropdown filter data; see takenEngineChannelsByTrack).
   engineChannelsTaken?: Record<string, number[]>;
+  // Routing v1 — per-track binding line (instance · channel · pair) + its
+  // picker affordance + the per-bound-output preview volume.
+  routingLines?: Record<string, { text: string; tone: "ok" | "missing" | "offline" | "unbound" }>;
+  onOpenRouting?: (id: string) => void;
+  previewVolumes?: Record<string, number>;
+  onPreviewVolume?: (id: string, v: number) => void;
   // Chord v2 — editing chord id is owned by App (top-bar panel needs it).
   editingChord: string | null;
   onEditChord: (id: string | null) => void;
@@ -223,6 +229,10 @@ export function Arranger(props: Props) {
     engineChannels,
     onEngineChannel,
     engineChannelsTaken,
+    routingLines,
+    onOpenRouting,
+    previewVolumes,
+    onPreviewVolume,
     audioBuffer,
     audioName,
     selectedTrackId,
@@ -452,6 +462,10 @@ export function Arranger(props: Props) {
             engineChannelExplicit={track.engineChannel !== undefined}
             onEngineChannel={(ch) => onEngineChannel(track.id, ch)}
             engineChannelTaken={engineChannelsTaken?.[track.id]}
+            routingLine={routingLines?.[track.id]}
+            onOpenRouting={onOpenRouting ? () => onOpenRouting(track.id) : undefined}
+            previewVolume={previewVolumes?.[track.id]}
+            onPreviewVolume={onPreviewVolume ? (v) => onPreviewVolume(track.id, v) : undefined}
             onSelectTrack={() => onSelectTrack(track.id)}
             onOpenPianoRoll={() => onOpenPianoRoll(track.id)}
             onSelectSection={(id) => {
@@ -561,6 +575,11 @@ function TrackRow(props: {
   onEngineChannel: (ch: number | null) => void;
   // Stage 3g — channels used by other tracks of this track's group.
   engineChannelTaken?: number[];
+  // Routing v1 — the binding line + picker affordance + preview volume.
+  routingLine?: { text: string; tone: "ok" | "missing" | "offline" | "unbound" };
+  onOpenRouting?: () => void;
+  previewVolume?: number;
+  onPreviewVolume?: (v: number) => void;
 }) {
   const { track, project, ppt, timelineWidth, tpBar, tpb } = props;
   return (
@@ -587,6 +606,10 @@ function TrackRow(props: {
           engineChannelExplicit={props.engineChannelExplicit}
           onEngineChannel={props.onEngineChannel}
           engineChannelTaken={props.engineChannelTaken}
+          routingLine={props.routingLine}
+          onOpenRouting={props.onOpenRouting}
+          previewVolume={props.previewVolume}
+          onPreviewVolume={props.onPreviewVolume}
         />
       </div>
       <div

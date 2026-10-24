@@ -44,6 +44,7 @@ import { consolidateSustains } from "../generation/sustain";
 import { cc7ForWeight, acousticWeightForTrack, DEFAULT_BALANCE_CONFIG } from "../generation/balance";
 import { builtInProfileById, vst3EventAdapter } from "../plugins/expressionMaps";
 import { applyTrackShare, applyTrackUnlink, buildEngineStream, lowestFreeEngineChannel, resolveInstanceRouting, shareCandidatesForPlugin, takenEngineChannelsByTrack } from "../engine/engineStream";
+import { autoSetupProposal, channelsFullAdvice, derivePairs, deriveStripWires, instanceCounters, instanceDisplayName, outputPairView, pairLabel, pairUsers, type InstanceLayout } from "../engine/routing";
 import { createStoppedGate, describeLateLoadAck, formatPluginInfo, formatTailSeconds, mergeScanProbe, planAssignmentLoad, planShareUpdate, planUnlinkUpdate, pluginSetSignature, rowsNeedingProbe, swapPickerRows, type PluginCapabilitiesMessage, type ScannedPlugin } from "../engine/engineClient";
 import userProjectJson from "../fixtures/user-project.json";
 import { mulberry32 } from "../generation/prng";
@@ -1292,6 +1293,175 @@ export function runUnitTests(): TestResult[] {
       assert(planUnlinkUpdate(true, true, true) === "mid-play-effect" && planUnlinkUpdate(true, true, false) === "send", "unlink from a loaded instance → routing-only update");
       assert(planUnlinkUpdate(true, false, false) === "none" && planUnlinkUpdate(false, false, true) === "defer", "unlink from a never-hosted group changes NOTHING engine-side");
       return "candidates by track names; share → one group + channels 1+2; 16-cap refusal; dropdown filter; unlink keeps the group; share/unlink plan tables pinned";
+    }),
+    timed("Routing v1: pair derivation, default-main binding view, missing-state derivation, named conflicts", () => {
+      const project = fixture();
+      const riders = project.tracks.filter((t) => t.family !== "structure" && t.family !== "audio" && t.role !== "structure");
+      const [t1, t2] = [riders[0]!, riders[1]!];
+      const g = { id: "lg_a", name: "Falcon", pluginId: "uid-f", pluginState: null, pluginPath: "C:/VST3/Falcon.vst3" };
+      project.libraryGroups = [g];
+      t1.libraryGroupId = "lg_a";
+      t1.engineChannel = 1;
+      t2.libraryGroupId = "lg_a";
+      t2.engineChannel = 2;
+      // Pair derivation — the engine's exact acceptance rule: EVEN starts,
+      // [a, a+1] within the live channels; bus names ride 2-channel buses.
+      const stereo = { instanceId: "lg_a", buses: 3, channels: 6, busChannels: [2, 2, 2] };
+      const pairs = derivePairs(stereo, ["Main", "Violas", "Violins II"]);
+      assert(pairs.length === 3 && pairs.every((p, i) => p.pair0 === i * 2), "three stereo buses → pairs at 0/2/4");
+      assert(pairs[0]!.main && !pairs[1]!.main && !pairs[2]!.main, "only pair 0 is the main pair");
+      assert(pairs[1]!.busName === "Violas" && pairs[2]!.busName === "Violins II", "2-channel bus names annotate their own pairs");
+      assert(pairLabel(4) === "Out 5/6", "the display label is 1-based (Out a+1/a+2)");
+      const odd = derivePairs({ instanceId: "lg_a", buses: 1, channels: 5, busChannels: [5] });
+      assert(odd.length === 2 && odd[1]!.pair0 === 2, "a 5-channel live node yields pairs 0 and 2 only ([4,5] would not fit)");
+      assert(derivePairs(undefined).length === 0, "an unknown layout derives NO pairs (the picker shows the offline note instead of a fake list)");
+      // Binding view — absent field = the MAIN-pair default; explicit wins.
+      const layouts: Record<string, InstanceLayout> = { lg_a: stereo };
+      const view = outputPairView(project, layouts);
+      assert(view[t1.id]!.pair0 === 0 && !view[t1.id]!.pairExplicit, "an un-set pair rides the main-pair default (D4)");
+      t1.engineOutputPair = 4;
+      t2.engineOutputPair = 0;
+      const view2 = outputPairView(project, layouts);
+      assert(view2[t1.id]!.pair0 === 4 && view2[t1.id]!.pairExplicit, "an explicit pair binding is the view truth");
+      assert(view2[t1.id]!.missing === false, "pair 4 is live against 6 channels");
+      // Missing state — DERIVED, never stored: a narrower live node flips the
+      // flag without touching the project (D16: re-resolves by itself).
+      const narrow: Record<string, InstanceLayout> = { lg_a: { instanceId: "lg_a", buses: 1, channels: 4, busChannels: [4] } };
+      const viewNarrow = outputPairView(project, narrow);
+      assert(viewNarrow[t1.id]!.missing === true, "pair 4 beyond 4 live channels → missing");
+      assert(viewNarrow[t2.id]!.missing === false, "pair 0 still fits the narrow node");
+      assert(outputPairView(project, {})[t1.id]!.missing === false, "an unknown layout is OFFLINE, not missing");
+      assert(validateProject(project).ok, "the project with explicit pair bindings still validates (additive schema)");
+      // Named conflicts (D8): pairUsers keys per instance:pair0 with views.
+      const users = pairUsers(project, layouts);
+      assert(users.get("lg_a:0")!.length === 1 && users.get("lg_a:0")![0]!.trackId === t2.id, "pair 0's user is t2");
+      assert(users.get("lg_a:4")![0]!.trackId === t1.id, "pair 4's user is t1");
+      // Display name: same-plugin groups number deterministically (#1/#2).
+      project.libraryGroups.push({ ...g, id: "lg_b", name: "Falcon" });
+      assert(instanceDisplayName(project.libraryGroups, "lg_a") === "Falcon #1" && instanceDisplayName(project.libraryGroups, "lg_b") === "Falcon #2", "same-plugin groups display as Falcon #1/#2 in project order");
+      assert(instanceDisplayName([g], "lg_a") === "Falcon", "a single group keeps the plain name");
+      return "pairs even/within-channels + bus names; default-main view; derived missing vs offline; named pair users; #n display names";
+    }),
+    timed("Routing v1: the strip table is derived, full, atomic-safe (missing withheld, deduped, capped at the engine's 16)", () => {
+      const project = fixture();
+      const riders = project.tracks.filter((t) => t.family !== "structure" && t.family !== "audio" && t.role !== "structure");
+      const g = { id: "lg_a", name: "Falcon", pluginId: "uid-f", pluginState: null, pluginPath: "C:/VST3/Falcon.vst3" };
+      project.libraryGroups = [g];
+      riders.slice(0, 3).forEach((t, i) => {
+        t.libraryGroupId = "lg_a";
+        t.engineChannel = i + 1;
+      });
+      const wide: Record<string, InstanceLayout> = { lg_a: { instanceId: "lg_a", buses: 8, channels: 16, busChannels: [2, 2, 2, 2, 2, 2, 2, 2] } };
+      // Default binding: every routed track rides main → ONE wire for the
+      // pair (one strip per pair, engine R1), the rest deduped (edit-time
+      // rules prevent this; the derivation is the safety net).
+      const base = deriveStripWires(project, wide);
+      assert(base.wires.length === 1 && base.wires[0]!.pair0 === 0 && base.wires[0]!.inst === "lg_a", "three main-pair tracks derive exactly ONE wire for the main pair");
+      assert(base.wires[0]!.strip === "s:lg_a:0", "strip ids are deterministic (s:<instanceId>:<pair0>)");
+      assert(base.deduped === 2, "the two extra riders are the deduped safety net");
+      // Explicit distinct pairs → one wire each; the strip id rides the pair.
+      riders[1]!.engineOutputPair = 2;
+      riders[2]!.engineOutputPair = 4;
+      const distinct = deriveStripWires(project, wide);
+      assert(distinct.wires.length === 3 && distinct.deduped === 0, "three distinct pairs → three wires, zero dedupe");
+      assert(JSON.stringify(distinct.wires.map((w) => w.pair0)) === "[0,2,4]", "wires carry the exact bound pairs in track order");
+      // Missing pairs are WITHHELD (the engine's R1 would reject the whole
+      // table otherwise) — binding preserved, wire absent (D16). A 2-channel
+      // live node feeds ONLY the main pair: pairs 2 and 4 are both missing.
+      const narrow: Record<string, InstanceLayout> = { lg_a: { instanceId: "lg_a", buses: 1, channels: 2, busChannels: [2] } };
+      const shrunken = deriveStripWires(project, narrow);
+      assert(shrunken.wires.length === 1 && shrunken.wires[0]!.pair0 === 0 && shrunken.skippedMissing === 2, "pairs beyond the live node are withheld, the main pair still wires");
+      // The 16-strip ceiling is GLOBAL across instances (the engine's table
+      // is one table): 16 tracks on instance A + 5 on instance B, every pair
+      // distinct → 21 wires, the first 16 by track order kept, 5 named.
+      const gb = { id: "lg_b", name: "Falcon", pluginId: "uid-f", pluginState: null, pluginPath: "C:/VST3/Falcon.vst3" };
+      const big: Record<string, InstanceLayout> = {
+        lg_a: { instanceId: "lg_a", buses: 18, channels: 36, busChannels: [] },
+        lg_b: { instanceId: "lg_b", buses: 18, channels: 36, busChannels: [] },
+      };
+      const many = fixture();
+      many.libraryGroups = [g, gb];
+      const routable = many.tracks.filter((t) => t.family !== "structure" && t.family !== "audio" && t.role !== "structure");
+      assert(routable.length >= 18, "the fixture has enough routable tracks for the cap test");
+      // The fixture carries 18 routable tracks — clone 3 more (deterministic
+      // ids) so the cap test can present 21 wires against the global 16.
+      for (let i = 0; i < 3; ++i) {
+        const clone = JSON.parse(JSON.stringify(routable[i])) as typeof routable[number];
+        clone.id = `trk_cap_${i}`;
+        many.tracks.push(clone);
+        routable.push(clone);
+      }
+      assert(routable.length >= 21, "21 routable tracks after cloning");
+      routable.slice(0, 21).forEach((t, i) => {
+        const inst = i < 16 ? "lg_a" : "lg_b";
+        t.libraryGroupId = inst;
+        t.engineChannel = (i % 16) + 1;
+        t.engineOutputPair = (i % 16) * 2;
+      });
+      const capped = deriveStripWires(many, big);
+      assert(capped.wires.length === 16 && capped.capped === 5, "the table caps at the engine's 16 strips, overflow named");
+      assert(capped.wires.every((w) => w.inst === "lg_a"), "the cap keeps the FIRST tracks in project order (all of instance A)" );
+      return "one strip per pair; deterministic ids; missing withheld; dedupe net; 16-cap with overflow count";
+    }),
+    timed("Routing v1: auto-setup proposes output bindings only — name matches, generic fill, never a used pair, main anchor", () => {
+      const project = fixture();
+      const riders = project.tracks.filter((t) => t.family !== "structure" && t.family !== "audio" && t.role !== "structure");
+      const g = { id: "lg_a", name: "Falcon", pluginId: "uid-f", pluginState: null, pluginPath: "C:/VST3/Falcon.vst3" };
+      project.libraryGroups = [g];
+      const [a, b, c] = [riders[0]!, riders[1]!, riders[2]!];
+      for (const t of [a, b, c]) { t.libraryGroupId = "lg_a"; t.engineChannel = 1; }
+      a.name = "Violas";
+      b.name = "Violins II";
+      c.name = "Cellos";
+      const layouts: Record<string, InstanceLayout> = { lg_a: { instanceId: "lg_a", buses: 4, channels: 8, busChannels: [2, 2, 2, 2] } };
+      const busNames = ["Main", "Violas", "Violins 2", "Cellos"];
+      const outcome = autoSetupProposal(project, "lg_a", layouts, busNames);
+      assert(outcome.proposals.length === 3, "all three candidates get a proposal");
+      const violas = outcome.proposals.find((p) => p.trackName === "Violas")!;
+      const violins = outcome.proposals.find((p) => p.trackName === "Violins II")!;
+      assert(violas.pair0 === 2 && violas.basis === "name", "\"Violas\" name-matches bus \"Violas\" (pair 2)");
+      assert(violins.pair0 === 4 && violins.basis === "name", "\"Violins II\" normalizes to match \"Violins 2\" (pair 4)");
+      const cellos = outcome.proposals.find((p) => p.trackName === "Cellos")!;
+      assert(cellos.pair0 === 6 && cellos.basis === "name", "\"Cellos\" matches too — with all-bus-named fixtures everything matches");
+      // A used pair is NEVER proposed; the explicitly bound track never moves.
+      a.engineOutputPair = 2;
+      const withUsed = autoSetupProposal(project, "lg_a", layouts, busNames);
+      assert(!withUsed.proposals.some((p) => p.trackId === a.id), "an explicitly bound track is not re-proposed (D14)");
+      assert(withUsed.usedPairs === 1 && !withUsed.proposals.some((p) => p.pair0 === 2), "the used pair is skipped, count named");
+      assert(withUsed.proposals.find((p) => p.trackName === "Violins II")!.pair0 === 4, "\"Violins II\" still takes its name match");
+      assert(withUsed.proposals.find((p) => p.trackName === "Cellos")!.pair0 === 6, "\"Cellos\" still takes its name match");
+      // Generic fill (FRESH project — no explicit pairs anywhere): no bus
+      // names → the first candidate anchors MAIN, the rest fill free pairs
+      // ascending; fewer pairs than candidates → leftovers stay on main.
+      const plain = fixture();
+      plain.libraryGroups = [{ id: "lg_a", name: "Falcon", pluginId: "uid-f", pluginState: null, pluginPath: "C:/VST3/Falcon.vst3" }];
+      const plainRiders = plain.tracks.filter((t) => t.family !== "structure" && t.family !== "audio" && t.role !== "structure").slice(0, 3);
+      for (const t of plainRiders) { t.libraryGroupId = "lg_a"; t.engineChannel = 1; }
+      const generic = autoSetupProposal(plain, "lg_a", { lg_a: { instanceId: "lg_a", buses: 1, channels: 4, busChannels: [4] } });
+      assert(generic.proposals.length === 2 && generic.proposals[0]!.pair0 === 0 && generic.proposals[0]!.basis === "generic", "no names → the first candidate anchors the main pair");
+      assert(generic.proposals[1]!.pair0 === 2, "the second candidate takes the next free pair");
+      assert(generic.leftOnMain === 1, "the third candidate stays on the shared main pair (counted)");
+      return "name-match pass first (normalized, either direction); generic fill with main anchor; used pairs never proposed; leftovers counted";
+    }),
+    timed("Routing v1: instance counters — the dual ceiling, outputs bounded by the live layout", () => {
+      const project = fixture();
+      const riders = project.tracks.filter((t) => t.family !== "structure" && t.family !== "audio" && t.role !== "structure");
+      const g = { id: "lg_a", name: "Falcon", pluginId: "uid-f", pluginState: null, pluginPath: "C:/VST3/Falcon.vst3" };
+      project.libraryGroups = [g];
+      riders.slice(0, 3).forEach((t, i) => {
+        t.libraryGroupId = "lg_a";
+        t.engineChannel = i + 1;
+      });
+      riders[1]!.engineOutputPair = 2;
+      riders[2]!.engineOutputPair = 2; // same pair, distinct channels
+      const layouts: Record<string, InstanceLayout> = { lg_a: { instanceId: "lg_a", buses: 3, channels: 6, busChannels: [2, 2, 2] } };
+      const counters = instanceCounters(project, "lg_a", layouts);
+      assert(counters.channelsUsed === 3 && counters.channelsMax === 16, "three distinct channels of the 16 namespace");
+      assert(counters.outputsUsed === 2 && counters.outputsMax === 3, "two distinct pairs (0 default + 2) of the live node's three");
+      assert(instanceCounters(project, "lg_a", {}).outputsMax === null, "an unknown layout reports the outputs ceiling as unknown (—)");
+      const advice = channelsFullAdvice("Falcon #1");
+      assert(advice.includes("16/16") && advice.includes("second instance") && advice.includes("split by section") && advice.includes("RAM"), "the channels-full advice names the ceiling, the split fix and the RAM truth (D13)");
+      return "dual counter exact (channels 3/16 · outputs 2/3); unknown layout → —; full-state advice pinned";
     }),
   ];
 }

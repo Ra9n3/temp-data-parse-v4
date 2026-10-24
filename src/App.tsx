@@ -5,8 +5,11 @@ import dorianFixture from "./fixtures/dorian-16bars.json";
 import { TopBar } from "./components/TopBar";
 import { Arranger } from "./components/Arranger";
 import { GenerationSettingsPanel } from "./components/GenerationSettingsPanel";
-import { EngineClient, createStoppedGate, formatPluginInfo, mergeScanProbe, planAssignmentLoad, planShareUpdate, planUnlinkUpdate, pluginSetSignature, type EngineLoadMeta, type EngineStatus, type EditorEventMessage, type LoadFailure, type PluginCapabilitiesMessage, type PluginSavedStateMessage, type PluginStateMessage, type ScanResultMessage, type ScannedPlugin, type StoppedGate } from "./engine/engineClient";
+import { EngineClient, createStoppedGate, formatPluginInfo, mergeScanProbe, planAssignmentLoad, planShareUpdate, planUnlinkUpdate, pluginSetSignature, type EngineLoadMeta, type EngineStatus, type EditorEventMessage, type InstanceLayout, type LoadFailure, type PluginCapabilitiesMessage, type PluginSavedStateMessage, type PluginStateMessage, type ScanResultMessage, type ScannedPlugin, type StoppedGate } from "./engine/engineClient";
 import { applyTrackShare, applyTrackUnlink, buildEngineStream, resolveEngineChannelView, shareCandidatesForPlugin, takenEngineChannelsByTrack, type ShareCandidate } from "./engine/engineStream";
+import { deriveStripWires, instanceDisplayName, outputPairView, pairLabel, pairUsers, type TrackBindingView } from "./engine/routing";
+import { BindingPicker, type PickerInstance } from "./components/BindingPicker";
+import { InstancesPanel } from "./components/InstancesPanel";
 import { PPQ, projectEndTick, tickToBar } from "./shared/schema";
 import {
   AboutDialog,
@@ -219,6 +222,19 @@ export default function App() {
   // not show "loading…" forever; the error toast already carries the
   // engine's detail text. Reset alongside hostedIds on a fresh session.
   const [hostingErroredIds, setHostingErroredIds] = useState<Set<string>>(() => new Set());
+  // Routing v1 — the live instance layouts (the `layouts` probe + the
+  // per-commit `instanceLayout` pushes), the R3 layout-guard notices,
+  // per-instance measured latency, the binding-picker target, the instances
+  // rail, per-bound-output preview volumes, and whether the engine has ever
+  // pushed the (reserved) per-strip levels stream.
+  const [layouts, setLayouts] = useState<Record<string, InstanceLayout>>({});
+  const [layoutNotices, setLayoutNotices] = useState<Record<string, { unwired: number; liveChannels: number }>>({});
+  const [pluginLatency, setPluginLatency] = useState<Record<string, number>>({});
+  const [routingTrackId, setRoutingTrackId] = useState<string | null>(null);
+  const [instancesOpen, setInstancesOpen] = useState(true);
+  const [previewVolumes, setPreviewVolumes] = useState<Record<string, number>>({});
+  const [levelsSeen, setLevelsSeen] = useState(false);
+  const lastStripsSentRef = useRef<string | null>(null);
   // Stage 3f-5 — the stop→load gate for assignments made while the transport
   // plays: the load queues here and releases on the engine's OWN playing=false
   // state message (see queueAssignmentLoad + the onState handler below).
@@ -297,6 +313,9 @@ export default function App() {
         lastLoadedRef.current = null;
         setHostedIds(new Set());   // new process: nothing is hosted yet
         setHostingErroredIds(new Set());   // 3f-5: no failure receipts either
+        lastStripsSentRef.current = null;  // routing v1: re-push the whole strip table to the fresh process
+        setLayouts({});                    // routing v1: the new process has no layouts either
+        setLayoutNotices({});
         // Stage 3f-3a — editor windows belong to the app. ONCE per fresh
         // engine session, hand the engine the main window's HWND: every
         // subsequently opened plugin editor window becomes OWNED by the app
@@ -411,6 +430,12 @@ export default function App() {
           next.add(result.instanceId ?? "hosted");
           return next;
         });
+        // Routing v1 — the per-instance measured latency (D10): displayed on
+        // the instance card; the engine measures at prepare and re-detects
+        // changes itself — the app only ever shows numbers it was told.
+        if (result.instanceId && typeof result.latencyMs === "number") {
+          setPluginLatency((prev) => ({ ...prev, [result.instanceId as string]: result.latencyMs as number }));
+        }
         toast("ok", `${result.name ?? "Plugin"} hosted (latency ${result.latencyMs?.toFixed(1) ?? "?"}ms, channels ${(result.channels ?? []).join(",")})`);
       } else {
         // Stage 3f-5 — the error receipt NAMES the instance: its pill must
@@ -497,8 +522,44 @@ export default function App() {
           next.delete(msg.instanceId);
           return next;
         });
+        // Routing v1 — re-check moment (D16): the editor just closed, which
+        // is exactly when a plugin may have changed its own bus layout. The
+        // cheap probe re-syncs the app's layout view; pushes cover the rest.
+        client.requestLayouts();
         writeErrorLog("engine", `editor closed: ${msg.instanceId}`);
       }
+    });
+    // Routing v1 — the strips wire callbacks (all additive; the app works
+    // fully when the engine never sends any of them).
+    client.onLayouts((msg) => {
+      if (disposed) return;
+      setLayouts((prev) => {
+        const next = { ...prev };
+        for (const inst of msg.instances) next[inst.instanceId] = inst;
+        return next;
+      });
+    });
+    client.onInstanceLayout((msg) => {
+      if (disposed) return;
+      const { type: _type, ...layout } = msg;
+      setLayouts((prev) => ({ ...prev, [msg.instanceId]: layout }));
+    });
+    client.onStripLayoutChange((msg) => {
+      if (disposed) return;
+      setLayoutNotices((prev) => ({ ...prev, [msg.instanceId]: { unwired: msg.unwired.length, liveChannels: msg.liveChannels } }));
+      toast("info", `an instance's output layout narrowed — ${msg.unwired.length} pair(s) unwired; the bindings are kept and re-resolve when the output returns`);
+    });
+    client.onStripsResult((msg) => {
+      if (disposed) return;
+      if (!msg.applied) {
+        toast("error", `output wiring rejected by the engine: ${msg.reason ?? "unknown"} — nothing was half-applied`);
+      }
+    });
+    client.onStripLevels(() => {
+      // RESERVED feed (engine follow-up): the first push proves the wire —
+      // the instance cards' meter slots light up from then on.
+      if (disposed) return;
+      setLevelsSeen(true);
     });
     // Stage 3c-hotfix: every engine error is user-visible (toast) in addition
     // to error.log — a rejected/failed load can no longer look like success.
@@ -1158,9 +1219,199 @@ export default function App() {
     }
   }, [project, enginePlaying, toast]);
 
+  // ─── Routing v1 — the multi-timbral binding system (pure rules + wire) ──
+  // The app owns the strip table (derived, never stored twice); the engine
+  // executes it atomically. Every decision from the routing concept lands
+  // here: default binding = next free channel + main pair; conflicts are
+  // visible; rebinding never stops the transport; missing/offline states
+  // are editable views, never destructive edits.
+  const pluginNamesByUid = useMemo(() => {
+    const out: Record<string, string> = {};
+    for (const p of desktopScan?.plugins ?? []) if (p.uid) out[p.uid] = p.name;
+    for (const [iid, caps] of Object.entries(pluginCaps)) {
+      const uid = project.libraryGroups.find((g) => g.id === iid)?.pluginId;
+      if (uid && caps?.name) out[uid] = caps.name;
+    }
+    return out;
+  }, [desktopScan, pluginCaps, project.libraryGroups]);
+
+  const routingView = useMemo(() => outputPairView(project, layouts), [project, layouts]);
+  const strips = useMemo(() => deriveStripWires(project, layouts), [project, layouts]);
+  const stripSignature = useMemo(
+    () => JSON.stringify(strips.wires.map((w) => [w.inst, w.pair0])),
+    [strips],
+  );
+
+  // The track header's binding line: instance · channel · pair + state tone.
+  const routingLines = useMemo(() => {
+    const out: Record<string, { text: string; tone: "ok" | "missing" | "offline" | "unbound" }> = {};
+    for (const t of project.tracks) {
+      if (t.role === "audio" || t.family === "structure") continue;
+      const v = routingView[t.id];
+      if (!v || v.instanceId === null || v.channel === null) {
+        out[t.id] = { text: "no plugin — built-in preview", tone: "unbound" };
+        continue;
+      }
+      const name = instanceDisplayName(project.libraryGroups, v.instanceId, pluginNamesByUid);
+      const pairText = pairLabel(v.pair0 ?? 0);
+      out[t.id] = {
+        text: `${name} · Ch ${v.channel} · ${pairText}${v.missing ? " — missing" : ""}`,
+        tone: v.missing ? "missing" : hostedIds.has(v.instanceId) ? "ok" : "offline",
+      };
+    }
+    return out;
+  }, [project.tracks, project.libraryGroups, routingView, pluginNamesByUid, hostedIds]);
+
+  // Binding-picker data (all PURE-derived; the edited track's own usages are
+  // excluded so its current binding never greys itself out).
+  const pickerInstances = useMemo<PickerInstance[]>(
+    () =>
+      project.libraryGroups
+        .filter((g) => g.pluginId && g.pluginPath)
+        .map((g) => {
+          const caps = pluginCaps[g.id];
+          return {
+            groupId: g.id,
+            hosted: hostedIds.has(g.id),
+            layout: layouts[g.id],
+            busNames: caps?.buses.filter((b) => !b.input).map((b) => b.name),
+            pluginId: g.pluginId,
+          };
+        }),
+    [project.libraryGroups, pluginCaps, hostedIds, layouts],
+  );
+  const pickerPairUsers = useMemo(() => {
+    const out: Record<string, Record<string, string[]>> = {};
+    for (const [key, views] of pairUsers(project, layouts).entries()) {
+      const sep = key.lastIndexOf(":");
+      const iid = key.slice(0, sep);
+      const pairKey = key.slice(sep + 1);
+      const names = views
+        .filter((v) => v.trackId !== routingTrackId)
+        .map((v) => project.tracks.find((t) => t.id === v.trackId)?.name ?? "")
+        .filter(Boolean);
+      if (names.length === 0) continue;
+      (out[iid] ??= {})[pairKey] = names;
+    }
+    return out;
+  }, [project, layouts, routingTrackId]);
+  const pickerChannelUsers = useMemo(() => {
+    const edited = routingTrackId ? project.tracks.find((t) => t.id === routingTrackId) : undefined;
+    if (!edited?.libraryGroupId) return [];
+    return Object.values(routingView)
+      .filter(
+        (v): v is TrackBindingView & { instanceId: string; channel: number } =>
+          v.instanceId === edited.libraryGroupId &&
+          v.trackId !== routingTrackId &&
+          v.channel !== null,
+      )
+      .map((v) => ({ ch: v.channel, by: project.tracks.find((t) => t.id === v.trackId)?.name ?? "" }));
+  }, [routingTrackId, project, routingView]);
+
+  // The strip-table push: the FULL app-owned table, only when every wire's
+  // instance is confirmed live (the engine rejects unknown/no-node instances
+  // atomically — waiting for the commits is the honest order), and only when
+  // something actually changed. A fresh engine session resets the sent
+  // marker (the ready-transition above) so the table re-pushes.
+  useEffect(() => {
+    const client = engineClientRef.current;
+    if (!client || engineStatus !== "ready") return;
+    if (strips.wires.length === 0 && lastStripsSentRef.current === "[]") return;
+    if (!strips.wires.every((w) => hostedIds.has(w.inst))) return;
+    if (lastStripsSentRef.current === stripSignature) return;
+    lastStripsSentRef.current = stripSignature;
+    client.sendStrips(strips.wires);
+  }, [engineStatus, stripSignature, strips, hostedIds]);
+
+  // Layout re-check moment (transport start): plugins may report a different
+  // layout after a prepare — the cheap probe re-syncs before anything binds.
+  const prevEnginePlayingRef = useRef(false);
+  useEffect(() => {
+    if (enginePlaying && !prevEnginePlayingRef.current) {
+      engineClientRef.current?.requestLayouts();
+    }
+    prevEnginePlayingRef.current = enginePlaying;
+  }, [enginePlaying]);
+
+  const handleOpenRouting = useCallback(
+    (trackId: string) => {
+      // Re-check moment (picker open): the freshest layout before choosing.
+      engineClientRef.current?.requestLayouts();
+      setRoutingTrackId(trackId);
+    },
+    [],
+  );
+
+  const handleCommitBinding = useCallback(
+    (trackId: string, binding: { channel: number | null; pair0: number | null }) => {
+      const edited = project.tracks.find((t) => t.id === trackId);
+      if (!edited) return;
+      // D8 — never silently reassign: the picker blocks used pairs; this is
+      // the stale-UI guard that names the owner if one still slips through.
+      if (binding.pair0 !== null && edited.libraryGroupId) {
+        const owner = project.tracks.find(
+          (t) =>
+            t.id !== trackId &&
+            t.libraryGroupId === edited.libraryGroupId &&
+            t.engineOutputPair === binding.pair0,
+        );
+        if (owner) {
+          toast("error", `That output pair is already bound to ${owner.name} — unbind it there first.`);
+          return;
+        }
+      }
+      commit({
+        ...project,
+        tracks: project.tracks.map((t) =>
+          t.id === trackId
+            ? {
+                ...t,
+                engineChannel: binding.channel ?? undefined,
+                engineOutputPair: binding.pair0 ?? undefined,
+              }
+            : t,
+        ),
+      });
+      // D15 — the transport is never touched: a mid-play rebind rides the
+      // engine's atomic strips apply; tails behave per the documented note.
+      toast("ok", "Routing binding updated");
+    },
+    [project, commit, toast],
+  );
+
+  const handleApplyAutoSetup = useCallback(
+    (groupId: string, assignments: Array<{ trackId: string; pair0: number }>) => {
+      void groupId;
+      const byId = new Map(assignments.map((a) => [a.trackId, a.pair0]));
+      commit({
+        ...project,
+        tracks: project.tracks.map((t) => (byId.has(t.id) ? { ...t, engineOutputPair: byId.get(t.id) } : t)),
+      });
+      toast("ok", `Assigned ${assignments.length} output pair${assignments.length === 1 ? "" : "s"}`);
+    },
+    [project, commit, toast],
+  );
+
+  const handlePreviewVolume = useCallback((trackId: string, v: number) => {
+    setPreviewVolumes((prev) => ({ ...prev, [trackId]: Math.max(0, Math.min(1.5, v)) }));
+  }, []);
+
   // Stage 3c-2 — live mute/solo: while the engine drives, every toggle ships
   // a mix message so the engine re-gates BEFORE any channel send (and flushes
   // lost channels — the change is audible immediately).
+  // Routing v1 — the same message carries the per-bound-output preview gains
+  // (stripGains, audio-domain: the engine ramps them ~10 ms). Mute/solo stay
+  // PER-TRACK and global across instances (the dispatch gate); strips only
+  // ever carry gains here.
+  const stripGains = useMemo(() => {
+    const out: Record<string, number> = {};
+    for (const t of project.tracks) {
+      const v = routingView[t.id];
+      if (v?.instanceId && v.pair0 !== null) out[`s:${v.instanceId}:${v.pair0}`] = previewVolumes[t.id] ?? 1;
+    }
+    return out;
+  }, [project.tracks, routingView, previewVolumes]);
+  const gainsSignature = useMemo(() => JSON.stringify(stripGains), [stripGains]);
   const mixSignature =
     project.tracks.map((t) => `${t.id}:${t.muted ? 1 : 0}${t.soloed ? 1 : 0}`).join("|");
   useEffect(() => {
@@ -1168,9 +1419,10 @@ export default function App() {
     engineClientRef.current?.mix(
       project.tracks.filter((t) => t.muted).map((t) => t.id),
       project.tracks.filter((t) => t.soloed).map((t) => t.id),
+      { gains: stripGains },
     );
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [mixSignature, engineDrive]);
+  }, [mixSignature, engineDrive, gainsSignature]);
 
   // Stage 3c-3 — channel assignment UI: the resolved map (explicit + first-come
   // auto) drives the per-track selectors; explicit assignment validates
@@ -1358,6 +1610,8 @@ export default function App() {
         }}
       />
 
+      {/* Routing v1 — the arranger shares the row with the instances rail. */}
+      <div className="flex min-h-0 flex-1">
       <Arranger
         project={project}
         pixelsPerTick={ppt}
@@ -1418,7 +1672,27 @@ export default function App() {
         }}
         onSelectTrack={setSelectedTrackId}
         onOpenPianoRoll={setPianoTrackId}
+        routingLines={routingLines}
+        onOpenRouting={handleOpenRouting}
+        previewVolumes={previewVolumes}
+        onPreviewVolume={handlePreviewVolume}
       />
+
+      <InstancesPanel
+        open={instancesOpen}
+        onToggle={() => setInstancesOpen((v) => !v)}
+        project={project}
+        layouts={layouts}
+        capsByInstance={pluginCaps}
+        pluginNames={pluginNamesByUid}
+        hostedIds={hostedIds}
+        latencyByInstance={pluginLatency}
+        layoutNotices={layoutNotices}
+        levelsSupported={levelsSeen}
+        onOpenPicker={handleOpenRouting}
+        onApplyAutoSetup={handleApplyAutoSetup}
+      />
+      </div>
 
       {generationSettingsOpen && <GenerationSettingsPanel settings={generationSettings} onChange={(value) => patch({ generationSettings: value })} onClose={() => setGenerationSettingsOpen(false)} />}
 
@@ -1592,6 +1866,25 @@ export default function App() {
           }}
         />
       )}
+      {routingTrackId !== null &&
+        (() => {
+          const t = project.tracks.find((tr) => tr.id === routingTrackId);
+          if (!t) return null;
+          return (
+            <BindingPicker
+              track={t}
+              view={routingView[routingTrackId]}
+              instances={pickerInstances}
+              libraryGroups={project.libraryGroups}
+              pluginNames={pluginNamesByUid}
+              channelUsers={pickerChannelUsers}
+              pairUsersByTrack={pickerPairUsers}
+              enginePlaying={enginePlaying}
+              onCommit={(binding) => handleCommitBinding(routingTrackId, binding)}
+              onClose={() => setRoutingTrackId(null)}
+            />
+          );
+        })()}
       <ExportDialog
         open={exportOpen}
         project={project}
