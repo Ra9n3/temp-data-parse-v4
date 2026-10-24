@@ -318,14 +318,21 @@ export function takenEngineChannelsByTrack(project: Project): Record<string, num
  * CC7 fader at tick 0 from the same acoustic-weight balance the exporter
  * uses). WITHOUT a profile → the RAW-NOTES path (universal hosting): notes
  * only (keyswitches skipped — they are profile semantics), same CC7 fader.
- * All other tracks: notes-only events (test synth), tagged with trackId so
- * the engine can gate mute/solo per track. Sorted by tick with the
- * established NOTE_OFF-before-NOTE_ON tie-break.
+ *
+ * Silence semantics (Routing v1.1 — the user's fallback rules): tracks
+ * WITHOUT a hosted plugin are SILENT by default — the built-in test synth
+ * is never an automatic substitute. `builtinPreview: true` (the explicit
+ * "Preview with built-in sounds" opt-in, default OFF) restores the legacy
+ * notes-only test-synth events (tagged with trackId for engine-side
+ * mute/solo gating). MIDI export never touches this builder and is never
+ * affected either way. Sorted by tick with the established
+ * NOTE_OFF-before-NOTE_ON tie-break.
  */
-export function buildEngineStream(project: Project): EngineStream {
+export function buildEngineStream(project: Project, opts?: { builtinPreview?: boolean }): EngineStream {
   const { routing, plugins } = resolveInstanceRouting(project);
   const events: PhysicalMidiStreamEvent[] = [];
   const endTick = projectEndTick(project);
+  const builtinPreview = opts?.builtinPreview === true;
 
   for (const t of project.tracks) {
     // Structure/chords/audio carry no instrument notes (same rule everywhere).
@@ -375,8 +382,10 @@ export function buildEngineStream(project: Project): EngineStream {
         timestampTicks: 0,
         trackId: t.id,
       });
-    } else {
-      // Test-synth path: notes only, tagged for per-track gating.
+    } else if (builtinPreview) {
+      // Built-in preview (EXPLICIT opt-in, Routing v1.1): the legacy test-synth
+      // path — notes only, tagged for per-track gating. Default is silence:
+      // the built-in synth is never an automatic substitute for a plugin.
       for (const note of t.notes) {
         if (note.isKeySwitch) continue;
         if (note.durationTicks <= 0) continue;
@@ -398,6 +407,8 @@ export function buildEngineStream(project: Project): EngineStream {
         });
       }
     }
+    // else: unbound + preview off → SILENCE (the fallback rules: no plugin,
+    // no loading substitute, no sound — MIDI export is a separate path).
   }
 
   events.sort((a, b) => a.timestampTicks - b.timestampTicks ||

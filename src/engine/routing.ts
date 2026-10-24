@@ -280,6 +280,71 @@ export interface InstanceCounters {
   outputsMax: number | null;
 }
 
+// ─── Routing v1.1 — the track AUDIO state (the silence-semantics view) ──────
+// The user's fallback rules, as a PURE derivation: a track is either OK or
+// in one of four named silent states. NOTHING here ever routes a substitute
+// sound — the header chips and the "N tracks still loading" counter render
+// straight from this map, and the audio path is silent in exactly these
+// states (buildEngineStream emits nothing for unbound tracks; loading/
+// offline/missing instances are handled engine-side by the strip table's
+// liveness gate and the missing-pair withhold).
+
+export type TrackAudioState =
+  | { kind: "ok" }
+  /** No plugin bound: silence (or the built-in preview synth when the user
+   * explicitly opts in). MIDI export is NEVER affected. */
+  | { kind: "unbound" }
+  /** The bound instance has no plugin_state receipt yet: spinner state. */
+  | { kind: "loading"; pluginName: string }
+  /** The engine named this instance as a hosting failure ("!" + name). */
+  | { kind: "offline"; pluginName: string }
+  /** The bound pair exceeds the live output layout (D16 — derived, never
+   * stored; re-resolves by itself when the layout widens again). */
+  | { kind: "missing"; pluginName: string; pair: string };
+
+/**
+ * PURE — the per-track audio state for the whole project (instrument tracks
+ * only; structure/audio carry no notes and are absent from the map).
+ *
+ * `hostedIds` = instance ids the engine confirmed with plugin_state "loaded";
+ * `erroredIds` = instance ids named by a plugin_state error receipt. Precedence
+ * (most informative first): unbound → offline (a FAILED hosting is the truth,
+ * not "loading") → loading (no receipt yet) → missing (hosted but the bound
+ * pair is beyond the live layout) → ok.
+ */
+export function deriveTrackAudioStates(
+  project: Project,
+  layouts: Record<string, InstanceLayout>,
+  hostedIds: ReadonlySet<string>,
+  erroredIds: ReadonlySet<string>,
+): Record<string, TrackAudioState> {
+  const view = outputPairView(project, layouts);
+  const out: Record<string, TrackAudioState> = {};
+  for (const t of project.tracks) {
+    if (t.role === "audio" || t.role === "structure" || t.family === "structure") continue;
+    const v = view[t.id];
+    if (!v || v.instanceId === null || v.channel === null) {
+      out[t.id] = { kind: "unbound" };
+      continue;
+    }
+    const name = instanceDisplayName(project.libraryGroups, v.instanceId);
+    if (erroredIds.has(v.instanceId)) {
+      out[t.id] = { kind: "offline", pluginName: name };
+      continue;
+    }
+    if (!hostedIds.has(v.instanceId)) {
+      out[t.id] = { kind: "loading", pluginName: name };
+      continue;
+    }
+    if (v.missing) {
+      out[t.id] = { kind: "missing", pluginName: name, pair: pairLabel(v.pair0 ?? 0) };
+      continue;
+    }
+    out[t.id] = { kind: "ok" };
+  }
+  return out;
+}
+
 /**
  * PURE — the dual counter (D13): "channels 9/16 · outputs 5/8". Both
  * ceilings are real; outputs drain first on multi-bus plugins (Falcon's

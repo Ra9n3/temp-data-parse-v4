@@ -44,7 +44,7 @@ import { consolidateSustains } from "../generation/sustain";
 import { cc7ForWeight, acousticWeightForTrack, DEFAULT_BALANCE_CONFIG } from "../generation/balance";
 import { builtInProfileById, vst3EventAdapter } from "../plugins/expressionMaps";
 import { applyTrackShare, applyTrackUnlink, buildEngineStream, lowestFreeEngineChannel, resolveInstanceRouting, shareCandidatesForPlugin, takenEngineChannelsByTrack } from "../engine/engineStream";
-import { autoSetupProposal, channelsFullAdvice, derivePairs, deriveStripWires, instanceCounters, instanceDisplayName, outputPairView, pairLabel, pairUsers, type InstanceLayout } from "../engine/routing";
+import { autoSetupProposal, channelsFullAdvice, derivePairs, deriveStripWires, deriveTrackAudioStates, instanceCounters, instanceDisplayName, outputPairView, pairLabel, pairUsers, type InstanceLayout } from "../engine/routing";
 import { createStoppedGate, describeLateLoadAck, formatPluginInfo, formatTailSeconds, mergeScanProbe, planAssignmentLoad, planShareUpdate, planUnlinkUpdate, pluginSetSignature, rowsNeedingProbe, swapPickerRows, type PluginCapabilitiesMessage, type ScannedPlugin } from "../engine/engineClient";
 import userProjectJson from "../fixtures/user-project.json";
 import { mulberry32 } from "../generation/prng";
@@ -1038,16 +1038,22 @@ export function runUnitTests(): TestResult[] {
       // CC7 fader from the SAME balance table the exporter uses.
       const cc7 = a.events.find((e) => e.eventType === "CONTROL_CHANGE" && e.data1 === 7);
       assert(!!cc7 && cc7.data2 === cc7ForWeight(acousticWeightForTrack(target)), "CC7 must be cc7ForWeight(acousticWeightForTrack)");
-      // The unbound string track keeps notes-only events (test synth), tagged.
-      const otherNote = a.events.find((e) => e.trackId === other.id && e.eventType === "NOTE_ON");
-      assert(!!otherNote && otherNote.channel === other.midiChannel && a.routing[other.id] === undefined, "unbound track must stay test-synth with trackId tags");
+      // Routing v1.1 — the SILENCE rules: an unbound track emits NOTHING by
+      // default (the built-in synth is never an automatic substitute).
+      const otherNoteDefault = a.events.find((e) => e.trackId === other.id);
+      assert(otherNoteDefault === undefined, "unbound track must be SILENT by default (no substitute sounds)");
+      // The explicit built-in preview opt-in restores the legacy tagged path.
+      const preview = buildEngineStream(project, { builtinPreview: true });
+      const otherNote = preview.events.find((e) => e.trackId === other.id && e.eventType === "NOTE_ON");
+      assert(!!otherNote && otherNote.channel === other.midiChannel && preview.routing[other.id] === undefined, "builtinPreview opt-in: unbound track rides the test synth with trackId tags");
+      assert(preview.events.length > a.events.length, "the opt-in stream strictly adds the unbound track's events");
       // Export PARITY: the adapter output (channel-remapped) is the exporter's
       // own translation — no drift in the mapping truth source.
       const profile = builtInProfileById("spitfire-bbcso")!;
       const exported = vst3EventAdapter(target.notes, profile, project.bpm, { endTick: projectEndTick(project) });
       const cc32Export = exported.find((e) => e.eventType === "CONTROL_CHANGE" && e.data1 === 32);
       assert(!!cc32Export && cc32Export.timestampTicks === 442, "export adapter must agree on the pre-trigger tick");
-      return "deterministic; CC#32=42 @ 480−38 ticks; CC7 from balance; remap+trackId; unbound tracks test-synth; export parity";
+      return "deterministic; CC#32=42 @ 480−38 ticks; CC7 from balance; remap+trackId; unbound SILENT by default (opt-in test synth); export parity";
     }),
     timed("Stage 3c: vst3EventAdapter pre-trigger arithmetic — 20ms→38 ticks @120bpm, zero-clamp at transport start", () => {
       assert(Math.round(msToTicks(20, 120)) === 38, "20ms at 120bpm/960ppqn must be 38 ticks");
@@ -1462,6 +1468,45 @@ export function runUnitTests(): TestResult[] {
       const advice = channelsFullAdvice("Falcon #1");
       assert(advice.includes("16/16") && advice.includes("second instance") && advice.includes("split by section") && advice.includes("RAM"), "the channels-full advice names the ceiling, the split fix and the RAM truth (D13)");
       return "dual counter exact (channels 3/16 · outputs 2/3); unknown layout → —; full-state advice pinned";
+    }),
+    timed("Routing v1.1: the track audio states — unbound/loading/offline/missing/ok, the silence rules' precedence", () => {
+      const project = fixture();
+      const riders = project.tracks.filter((t) => t.family !== "structure" && t.family !== "audio" && t.role !== "structure");
+      const g = { id: "lg_f", name: "Falcon", pluginId: "uid-f", pluginState: null, pluginPath: "C:/VST3/Falcon.vst3" };
+      project.libraryGroups = [g];
+      // Four instrument tracks: unbound / loading / offline / ok, plus a
+      // hosted-but-narrow-layout case for MISSING.
+      const unbound = riders[0]!, loading = riders[1]!, offline = riders[2]!, ok = riders[3]!, missing = riders[4]!;
+      for (const t of [loading, offline, ok, missing]) t.libraryGroupId = "lg_f";
+      loading.engineChannel = 1; offline.engineChannel = 2; ok.engineChannel = 3; missing.engineChannel = 4;
+      missing.engineOutputPair = 6; // Out 7/8 — beyond the 6-channel live layout below
+      const layouts: Record<string, InstanceLayout> = { lg_f: { instanceId: "lg_f", buses: 3, channels: 6, busChannels: [2, 2, 2] } };
+      const hosted = new Set(["lg_f"]);
+      const errored = new Set<string>();
+      // No receipts at all: every bound track → loading (the spinner state).
+      const statesNone = deriveTrackAudioStates(project, layouts, new Set(), new Set());
+      assert(statesNone[unbound!.id]?.kind === "unbound", "no plugin → unbound (silent, MIDI export only)");
+      assert(statesNone[loading!.id]?.kind === "loading", "bound, no receipt yet → loading (spinner)");
+      assert(statesNone[ok!.id]?.kind === "loading", "bound, no receipt yet → loading (every track of the instance)");
+      // Hosted (plugin_state loaded) + live pairs inside the layout → ok.
+      const states = deriveTrackAudioStates(project, layouts, hosted, errored);
+      assert(states[offline!.id]?.kind === "ok", "bound + hosted + pair inside layout → ok");
+      assert(states[ok!.id]?.kind === "ok", "the hosted track with a live pair is ok");
+      // Precedence: a hosting ERROR receipt beats loading (the truth, not a spin).
+      const statesErr = deriveTrackAudioStates(project, layouts, hosted, new Set(["lg_f"]));
+      assert(statesErr[offline!.id]?.kind === "offline" && statesErr[loading!.id]?.kind === "offline", "error receipt → offline for EVERY track of the instance (beats loading)");
+      // MISSING: hosted, but the bound pair exceeds the live channels (D16).
+      const statesMissing = deriveTrackAudioStates(project, { lg_f: { instanceId: "lg_f", buses: 3, channels: 6, busChannels: [2, 2, 2] } }, hosted, errored);
+      const m = statesMissing[missing!.id];
+      assert(m?.kind === "missing" && m.pair === "Out 7/8", "bound pair beyond the live layout → missing, named pair");
+      // Unknown layout is NOT missing (D16: an unprobed instance is not a
+      // dead wire) — the main pair needs no layout proof, so the state is ok.
+      const statesUnknown = deriveTrackAudioStates(project, {}, hosted, errored);
+      assert(statesUnknown[ok!.id]?.kind === "ok", "unknown layout ≠ missing — the binding stays, the view never lies missing without proof");
+      // Structure tracks are absent (no notes, no state).
+      const structure = project.tracks.find((t) => t.family === "structure" || t.role === "structure");
+      if (structure) assert(states[structure.id] === undefined, "structure/audio tracks carry no audio state");
+      return "unbound/loading/offline/missing/ok exact; error beats loading; missing names the pair; unknown layout ≠ missing; structure excluded";
     }),
   ];
 }

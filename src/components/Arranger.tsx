@@ -90,7 +90,7 @@ interface Props {
   engineChannelsTaken?: Record<string, number[]>;
   // Routing v1 — per-track binding line (instance · channel · pair) + its
   // picker affordance + the per-bound-output preview volume.
-  routingLines?: Record<string, { text: string; tone: "ok" | "missing" | "offline" | "unbound" }>;
+  routingLines?: Record<string, { text: string; tone: "ok" | "missing" | "offline" | "unbound" | "loading" }>;
   onOpenRouting?: (id: string) => void;
   previewVolumes?: Record<string, number>;
   onPreviewVolume?: (id: string, v: number) => void;
@@ -576,7 +576,7 @@ function TrackRow(props: {
   // Stage 3g — channels used by other tracks of this track's group.
   engineChannelTaken?: number[];
   // Routing v1 — the binding line + picker affordance + preview volume.
-  routingLine?: { text: string; tone: "ok" | "missing" | "offline" | "unbound" };
+  routingLine?: { text: string; tone: "ok" | "missing" | "offline" | "unbound" | "loading" };
   onOpenRouting?: () => void;
   previewVolume?: number;
   onPreviewVolume?: (v: number) => void;

@@ -7,10 +7,11 @@ import { Arranger } from "./components/Arranger";
 import { GenerationSettingsPanel } from "./components/GenerationSettingsPanel";
 import { EngineClient, createStoppedGate, formatPluginInfo, mergeScanProbe, planAssignmentLoad, planShareUpdate, planUnlinkUpdate, pluginSetSignature, type EngineLoadMeta, type EngineStatus, type EditorEventMessage, type InstanceLayout, type LoadFailure, type PluginCapabilitiesMessage, type PluginSavedStateMessage, type PluginStateMessage, type ScanResultMessage, type ScannedPlugin, type StoppedGate } from "./engine/engineClient";
 import { applyTrackShare, applyTrackUnlink, buildEngineStream, resolveEngineChannelView, shareCandidatesForPlugin, takenEngineChannelsByTrack, type ShareCandidate } from "./engine/engineStream";
-import { deriveStripWires, instanceDisplayName, outputPairView, pairLabel, pairUsers, type TrackBindingView } from "./engine/routing";
+import { deriveStripWires, deriveTrackAudioStates, instanceDisplayName, outputPairView, pairLabel, pairUsers, type TrackBindingView } from "./engine/routing";
 import { BindingPicker, type PickerInstance } from "./components/BindingPicker";
 import { InstancesPanel } from "./components/InstancesPanel";
 import { PPQ, projectEndTick, tickToBar } from "./shared/schema";
+import { cn } from "./utils/cn";
 import {
   AboutDialog,
   ExportDialog,
@@ -44,7 +45,7 @@ import {
 import { generate, fillRandomNotes, generationSummary } from "./generation/generate";
 import { parseChord } from "./shared/schema/chords";
 import { importProjectJson } from "./export/json";
-import { loadAutosave, saveAutosave } from "./state/persistence";
+import { loadAutosave, readBuiltinPreviewPref, saveAutosave, saveBuiltinPreviewPref } from "./state/persistence";
 import { runAlignmentTest, runUnitTests, type TestResult } from "./tests/runTests";
 import type { PluginScanState } from "./plugins/mockService";
 
@@ -196,6 +197,11 @@ export default function App() {
   // Score the engine currently holds; a differing project reference forces a
   // reload before play. (Engine restarts invalidate via prevStatusRef.)
   const lastLoadedRef = useRef<Project | null>(null);
+  // Routing v1.1 — the built-in preview flag the confirmed load was built
+  // with. Toggling the flag changes the STREAM (unbound tracks: silence vs
+  // test synth) without changing the project, so the cache must be keyed on
+  // BOTH — otherwise a toggle would leave the engine playing the stale mix.
+  const lastLoadedPreviewRef = useRef<boolean>(false);
   // Stage 3b-fix: engine audio-init failure code ("no_audio_device") surfaced
   // by a rejected transport play. Footer shows the failure state; cleared on
   // reconnect or on a subsequent successful play.
@@ -233,6 +239,23 @@ export default function App() {
   const [routingTrackId, setRoutingTrackId] = useState<string | null>(null);
   const [instancesOpen, setInstancesOpen] = useState(true);
   const [previewVolumes, setPreviewVolumes] = useState<Record<string, number>>({});
+  // Routing v1.1 — the built-in preview opt-in (the silence rules). DEFAULT
+  // OFF: tracks without a hosted plugin are SILENT; the built-in synth is a
+  // choice, never an automatic substitute. Persisted machine preference.
+  const [builtinPreview, setBuiltinPreview] = useState<boolean>(() => readBuiltinPreviewPref());
+  const builtinPreviewRef = useRef(builtinPreview);
+  useEffect(() => { builtinPreviewRef.current = builtinPreview; }, [builtinPreview]);
+  const toggleBuiltinPreview = useCallback(() => {
+    // Ref-first (no side effects inside a state updater — StrictMode double-
+    // invokes updaters): persist, invalidate the confirmed-load cache (the
+    // engine's held score was built with the OLD flag), then flip the state.
+    const next = !builtinPreviewRef.current;
+    builtinPreviewRef.current = next;
+    saveBuiltinPreviewPref(next);
+    setBuiltinPreview(next);
+    lastLoadedRef.current = null;
+    lastLoadedPreviewRef.current = next;
+  }, []);
   const [levelsSeen, setLevelsSeen] = useState(false);
   const lastStripsSentRef = useRef<string | null>(null);
   // Stage 3f-5 — the stop→load gate for assignments made while the transport
@@ -351,7 +374,7 @@ export default function App() {
         // bindings) needs no hosting — skip the load and keep the first
         // startup clean; the play path loads when there is something to load.
         if (p) {
-          const stream = buildEngineStream(p);
+          const stream = buildEngineStream(p, { builtinPreview: builtinPreviewRef.current });
           if (stream.events.length > 0 || stream.plugins.length > 0) {
             const meta: EngineLoadMeta = {
               bpm: p.bpm,
@@ -363,6 +386,9 @@ export default function App() {
               routing: stream.routing,
               plugins: stream.plugins,
             }).then((receipt) => {
+              // Routing v1.1 — epoch guard: a newer load request owns the
+              // cache/mix actions; this stale confirmation only logs.
+              if (receipt.epoch !== client.currentEpoch()) return;
               if (receipt.skipped > 0) {
                 writeErrorLog("engineAutoLoad", `startup load incomplete: ${receipt.loaded}/${receipt.received} loaded, ${receipt.skipped} skipped`);
               }
@@ -371,9 +397,14 @@ export default function App() {
                 p.tracks.filter((t) => t.soloed).map((t) => t.id),
               );
               lastLoadedRef.current = p; // confirmed load — play fast-path eligible
+              lastLoadedPreviewRef.current = builtinPreviewRef.current;
             }).catch((failure: LoadFailure) => {
+              // Routing v1.1 — a stale failure (a newer load is queued or in
+              // flight) is bookkeeping, not news: silent.
+              if (failure.epoch !== client.currentEpoch()) return;
               // Visible but NOT play-path: the user's first play retries the
-              // load itself and owns the web-synth fallback decision.
+              // load itself. NO substitute sound — the silence rules: tracks
+              // stay silent until a load confirms.
               writeErrorLog("engineAutoLoad", `startup load failed: ${failure.reason}`);
               toast("error", `engine load failed — press play to retry (${failure.reason})`);
             });
@@ -447,12 +478,13 @@ export default function App() {
           return next;
         });
         // Stage 3d-3: a plugin the project references but the machine lacks
-        // is a NAMED, non-breaking case — the track rides the test synth
-        // and the project keeps its embedded state for the next install.
+        // is a NAMED, non-breaking case — Routing v1.1: its tracks are
+        // SILENT (never a test-synth substitute) and the project keeps its
+        // embedded state for the next install.
         if (/no plugin types found at|createPluginInstance failed/i.test(result.detail ?? "")) {
           toast("error", "plugin not found — install to restore");
         } else {
-          toast("error", `${result.name ?? "Plugin"} failed to load — falling back to test synth: ${result.detail ?? "unknown"}`);
+          toast("error", `${result.name ?? "Plugin"} failed to load — its tracks stay silent: ${result.detail ?? "unknown"}`);
         }
       }
     });
@@ -748,7 +780,7 @@ export default function App() {
         toast("info", "audio engine not ready — press play to load the changed project");
         return;
       }
-      const stream = buildEngineStream(p);
+      const stream = buildEngineStream(p, { builtinPreview: builtinPreviewRef.current });
       if (stream.events.length === 0 && stream.plugins.length === 0) return;
       const meta: EngineLoadMeta = {
         bpm: p.bpm,
@@ -758,14 +790,19 @@ export default function App() {
       };
       void client
         .load(stream.events, meta, { routing: stream.routing, plugins: stream.plugins })
-        .then(() => {
+        .then((receipt) => {
+          // Routing v1.1 — epoch guard: only the newest request caches.
+          if (receipt.epoch !== client.currentEpoch()) return;
           lastLoadedRef.current = p; // confirmed load — play fast-path eligible
+          lastLoadedPreviewRef.current = builtinPreviewRef.current;
           client.mix(
             p.tracks.filter((t) => t.muted).map((t) => t.id),
             p.tracks.filter((t) => t.soloed).map((t) => t.id),
           );
         })
         .catch((failure: LoadFailure) => {
+          // Stale failure (newer load queued/in flight) = bookkeeping: silent.
+          if (failure.epoch !== client.currentEpoch()) return;
           writeErrorLog("pluginSwap", `replace load failed: ${failure.reason}`);
           toast("error", `engine reload failed — press play to retry (${failure.reason})`);
         });
@@ -905,9 +942,17 @@ export default function App() {
   const enginePlay = useCallback(() => {
     const client = engineClientRef.current;
     if (!client || client.getStatus() !== "ready") {
-      // Safety-net fallback (kept): no engine → webview synth.
-      setEngineDrive(false);
-      void playback.play();
+      // Routing v1.1 — the silence rules: no engine = NO automatic substitute.
+      // The webview synth plays only when the user EXPLICITLY opted into the
+      // built-in preview (footer toggle); otherwise: named state, silence.
+      if (builtinPreviewRef.current) {
+        setEngineDrive(false);
+        void playback.play();
+      } else {
+        setEngineDrive(false);
+        setEnginePlaying(false);
+        toast("info", "audio engine not ready — tracks stay silent until it connects");
+      }
       return;
     }
     // The play mechanics, run ONLY after the engine confirms the load
@@ -915,8 +960,8 @@ export default function App() {
     const runEnginePlay = () => {
       try {
         // FULL disengagement of the webview synth before the engine renders —
-        // if the fallback was ever running (rare drive flip), its voices and
-        // RAF loop die here. No doubled rendering, ever.
+        // if the built-in preview was ever running (explicit opt-in only),
+        // its voices and RAF loop die here. No doubled rendering, ever.
         playback.stop();
         // Clear the stale audio error so the footer doesn't lag a retry.
         setEngineAudioError(null);
@@ -928,20 +973,24 @@ export default function App() {
         setEngineDrive(true);
         setEnginePlaying(true);
       } catch (err) {
+        // Routing v1.1 — no substitute: log + name the failure; silence until
+        // the next play.
         writeErrorLog("enginePlay", err);
         setEngineDrive(false);
-        void playback.play();
+        setEnginePlaying(false);
+        toast("error", "play failed — press play to retry (see error.log)");
       }
     };
     try {
-      // Load only when the engine's score is stale (project changed or fresh
-      // engine session). Skip-loading on repeat plays removes the load-ack
-      // state{playing:false} round-trip that used to flicker the UI.
-      if (lastLoadedRef.current !== project) {
-        // Stage 3c-2: the M9 profile path builds the stream — profiled tracks
-        // ride the hosted plugin (UACC CC#32 pre-trigger, CC7/11/74), the rest
-        // stay on the engine's test synth. Deterministic; no RNG.
-        const stream = buildEngineStream(project);
+      // Load only when the engine's score is stale (project changed, fresh
+      // engine session, or the built-in preview flag flipped). Skip-loading
+      // on repeat plays removes the load-ack state{playing:false} round-trip
+      // that used to flicker the UI.
+      if (lastLoadedRef.current !== project || lastLoadedPreviewRef.current !== builtinPreviewRef.current) {
+        // Routing v1.1 — the stream is built under the CURRENT preview flag:
+        // unbound tracks are SILENT by default; test-synth events only when
+        // the user opted in. Deterministic; no RNG.
+        const stream = buildEngineStream(project, { builtinPreview: builtinPreviewRef.current });
         const meta: EngineLoadMeta = {
           bpm: project.bpm,
           ppqn: PPQ,
@@ -949,14 +998,16 @@ export default function App() {
           endTick: projectEndTick(project),
         };
         // Stage 3c-hotfix: the source switch is GATED on the engine's loadAck
-        // receipt. No more optimistic fire-and-forget at real project sizes —
-        // if the load never arrives, is rejected, or parses with skipped
-        // events, the failure is visible (toast + error.log) and the webview
-        // synth covers the play instead of a silent empty engine score.
+        // receipt. Routing v1.1: a FAILED load never starts a substitute —
+        // tracks stay silent, the failure is named once (toast + error.log),
+        // and the next play retries. Coalescing makes "superseded"
+        // impossible; the epoch guard keeps a stale caller silent when a
+        // newer load owns the outcome.
         void client.load(stream.events, meta, {
           routing: stream.routing,
           plugins: stream.plugins,
         }).then((receipt) => {
+          if (receipt.epoch !== client.currentEpoch()) return; // stale caller
           if (receipt.skipped > 0) {
             writeErrorLog("enginePlay", `load incomplete: ${receipt.loaded}/${receipt.received} loaded, ${receipt.skipped} skipped (first at index ${receipt.firstErrorIndex}${receipt.firstErrorReason ? ": " + receipt.firstErrorReason : ""})`);
             toast("error", `engine load incomplete: ${receipt.skipped} of ${receipt.received} events rejected (first at index ${receipt.firstErrorIndex}${receipt.firstErrorReason ? ": " + receipt.firstErrorReason : ""}) — see error.log`);
@@ -967,23 +1018,27 @@ export default function App() {
             project.tracks.filter((t) => t.soloed).map((t) => t.id),
           );
           lastLoadedRef.current = project; // cached only on CONFIRMED load
+          lastLoadedPreviewRef.current = builtinPreviewRef.current;
           runEnginePlay();
         }).catch((failure: LoadFailure) => {
+          // Routing v1.1 — NO web-synth substitute, ever. The newest caller
+          // names the failure once; stale callers stay silent.
+          if (failure.epoch !== client.currentEpoch()) return;
           setEngineDrive(false);
           setEnginePlaying(false);
-          toast("error", `engine load failed — using web synth (${failure.reason})`);
-          void playback.play();
+          toast("error", `engine load failed — tracks stay silent until it loads (${failure.reason})`);
         });
         return;
       }
       runEnginePlay();
     } catch (err) {
       // F2 safety net: a throw in the engine branch must never kill the
-      // click — log the live stack to %APPDATA%/scorch/error.log and fall
-      // back to the webview synth (play still works; footer keeps state).
+      // click — log the live stack to %APPDATA%/scorch/error.log. Routing
+      // v1.1: NO substitute sound — the failure is named, silence holds.
       writeErrorLog("enginePlay", err);
       setEngineDrive(false);
-      void playback.play();
+      setEnginePlaying(false);
+      toast("error", "play failed — press play to retry (see error.log)");
     }
   }, [project, playback, toast]);
 
@@ -1183,7 +1238,10 @@ export default function App() {
   // identity = nothing changed = nothing to reload.
   useEffect(() => {
     if (enginePlaying && engineClientRef.current?.getStatus() === "ready") {
-      if (lastLoadedRef.current === project) return; // already confirmed by loadAck
+      const client = engineClientRef.current!;
+      // Already confirmed by loadAck — with the SAME preview flag. (Routing
+      // v1.1: a toggle changes the stream without changing the project.)
+      if (lastLoadedRef.current === project && lastLoadedPreviewRef.current === builtinPreviewRef.current) return;
       // Stage 3f-5 — a plugin-SET difference (any group's id/pluginId/
       // pluginPath) against the last CONFIRMED load means a hosting change:
       // the engine load_rejects plugin-set loads on a rolling transport, and
@@ -1192,18 +1250,22 @@ export default function App() {
       // playing=false → load). Skip SILENTLY — no red toast. Note/mix-only
       // edits keep the same signature and reload exactly as before.
       if (lastLoadedRef.current && pluginSetSignature(lastLoadedRef.current.libraryGroups) !== pluginSetSignature(project.libraryGroups)) return;
-      const client = engineClientRef.current;
-      const stream = buildEngineStream(project);
+      const stream = buildEngineStream(project, { builtinPreview: builtinPreviewRef.current });
       const meta: EngineLoadMeta = {
         bpm: project.bpm,
         ppqn: PPQ,
         timeSignature: project.timeSignature,
         endTick: projectEndTick(project),
       };
+      // Routing v1.1 — this load COALESCES with any in-flight one (binding
+      // commits, play-path loads): exactly one flight, newest payload wins,
+      // no caller is ever rejected for racing. Epoch guards keep stale
+      // callers from caching/toasting over the newest request's outcome.
       void client.load(stream.events, meta, {
         routing: stream.routing,
         plugins: stream.plugins,
       }).then((receipt) => {
+        if (receipt.epoch !== client.currentEpoch()) return; // stale caller
         if (receipt.skipped > 0) {
           writeErrorLog("engineReload", `mid-play reload incomplete: ${receipt.skipped}/${receipt.received} skipped (first at index ${receipt.firstErrorIndex}${receipt.firstErrorReason ? ": " + receipt.firstErrorReason : ""})`);
           toast("error", `engine reload incomplete: ${receipt.skipped} events rejected — see error.log`);
@@ -1213,11 +1275,13 @@ export default function App() {
           project.tracks.filter((t) => t.soloed).map((t) => t.id),
         );
         lastLoadedRef.current = project; // cache stays in sync (confirmed load)
+        lastLoadedPreviewRef.current = builtinPreviewRef.current;
       }).catch((failure: LoadFailure) => {
-        toast("error", `engine reload failed — playing a stale score (${failure.reason})`);
+        if (failure.epoch !== client.currentEpoch()) return; // stale caller
+        toast("error", `engine reload failed — the last confirmed score keeps playing (${failure.reason})`);
       });
     }
-  }, [project, enginePlaying, toast]);
+  }, [project, enginePlaying, toast, builtinPreview]);
 
   // ─── Routing v1 — the multi-timbral binding system (pure rules + wire) ──
   // The app owns the strip table (derived, never stored twice); the engine
@@ -1242,25 +1306,52 @@ export default function App() {
     [strips],
   );
 
+  // Routing v1.1 — the per-track AUDIO state (the silence rules): ok /
+  // unbound / loading / offline / missing. Pure derivation from the hosting
+  // receipts + live layouts; the routing lines and the footer's "still
+  // loading" counter render from the SAME truth.
+  const audioStates = useMemo(
+    () => deriveTrackAudioStates(project, layouts, hostedIds, hostingErroredIds),
+    [project, layouts, hostedIds, hostingErroredIds],
+  );
+
   // The track header's binding line: instance · channel · pair + state tone.
+  // Routing v1.1 — the user's header states, verbatim:
+  //   Unbound → "No plugin" (no preview audio, MIDI export only)
+  //   Loading → spinner (the pill pulses; the line says loading)
+  //   Offline → "!" + plugin name (a hosting failure receipt named it)
+  //   Missing output → "Missing output"
   const routingLines = useMemo(() => {
-    const out: Record<string, { text: string; tone: "ok" | "missing" | "offline" | "unbound" }> = {};
+    const out: Record<string, { text: string; tone: "ok" | "missing" | "offline" | "unbound" | "loading" }> = {};
     for (const t of project.tracks) {
       if (t.role === "audio" || t.family === "structure") continue;
-      const v = routingView[t.id];
-      if (!v || v.instanceId === null || v.channel === null) {
-        out[t.id] = { text: "no plugin — built-in preview", tone: "unbound" };
+      const state = audioStates[t.id];
+      if (!state || state.kind === "unbound") {
+        out[t.id] = { text: "No plugin", tone: "unbound" };
         continue;
       }
-      const name = instanceDisplayName(project.libraryGroups, v.instanceId, pluginNamesByUid);
-      const pairText = pairLabel(v.pair0 ?? 0);
-      out[t.id] = {
-        text: `${name} · Ch ${v.channel} · ${pairText}${v.missing ? " — missing" : ""}`,
-        tone: v.missing ? "missing" : hostedIds.has(v.instanceId) ? "ok" : "offline",
-      };
+      if (state.kind === "ok") {
+        const v = routingView[t.id];
+        const name = v?.instanceId ? instanceDisplayName(project.libraryGroups, v.instanceId, pluginNamesByUid) : "?";
+        out[t.id] = {
+          text: `${name} · Ch ${v?.channel ?? "?"} · ${pairLabel(v?.pair0 ?? 0)}`,
+          tone: "ok",
+        };
+        continue;
+      }
+      // loading | offline | missing — all carry the plugin name.
+      const v = routingView[t.id];
+      const name = v?.instanceId ? instanceDisplayName(project.libraryGroups, v.instanceId, pluginNamesByUid) : state.pluginName;
+      if (state.kind === "loading") {
+        out[t.id] = { text: `${name} — loading`, tone: "loading" };
+      } else if (state.kind === "offline") {
+        out[t.id] = { text: `! ${name} — offline`, tone: "offline" };
+      } else {
+        out[t.id] = { text: `! ${name} · Ch ${v?.channel ?? "?"} — Missing output`, tone: "missing" };
+      }
     }
     return out;
-  }, [project.tracks, project.libraryGroups, routingView, pluginNamesByUid, hostedIds]);
+  }, [project.tracks, project.libraryGroups, routingView, pluginNamesByUid, audioStates]);
 
   // Binding-picker data (all PURE-derived; the edited track's own usages are
   // excluded so its current binding never greys itself out).
@@ -1721,9 +1812,38 @@ export default function App() {
           <span>
             {project.timeSignature.numerator}/{project.timeSignature.denominator} · {project.bpm} BPM
           </span>
+          {/* Routing v1.1 — the silence rules' counter: play is never locked;
+              bound tracks whose instance has no plugin_state receipt yet stay
+              SILENT and are counted here until they land. */}
+          {loadingTrackIds.size > 0 && (
+            <span className="animate-pulse text-amber-300">
+              {loadingTrackIds.size} track{loadingTrackIds.size === 1 ? "" : "s"} still loading
+            </span>
+          )}
         </div>
         <div className="flex items-center gap-2">
           <EngineIndicator status={engineStatus} rtt={engineRtt} playing={enginePlaying} playheadTick={enginePlayheadTick} timeSignature={project.timeSignature} audioError={engineAudioError} pluginState={pluginState} />
+          {/* Routing v1.1 — the built-in preview opt-in (default OFF): the
+              built-in synth is a CHOICE, never an automatic substitute. When
+              off, unbound/failed tracks are silent; MIDI export is unaffected
+              either way. */}
+          <button
+            type="button"
+            onClick={toggleBuiltinPreview}
+            title={
+              builtinPreview
+                ? "Built-in preview is ON — tracks without a plugin play the built-in synth. Click to restore the silence rules (no substitute sounds)."
+                : "Built-in preview is OFF (default) — tracks without a plugin stay silent; no substitute sounds, ever. Click to preview unbound tracks with the built-in synth."
+            }
+            className={cn(
+              "rounded px-1.5 py-0.5 ring-1",
+              builtinPreview
+                ? "bg-amber-500/15 text-amber-300 ring-amber-400/30"
+                : "text-stone-500 ring-white/10 hover:text-stone-300",
+            )}
+          >
+            built-in preview: {builtinPreview ? "on" : "off"}
+          </button>
           <button type="button" className="hover:text-stone-200" onClick={() => jsonInputRef.current?.click()} title="Import project JSON">
             Import
           </button>
