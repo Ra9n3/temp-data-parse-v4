@@ -45,9 +45,11 @@ interface Props {
   engineChannelTaken?: number[];
   /** Routing v1 — the binding line under the pill: the triple at a glance
    * ("Falcon #1 · Ch 3 · Out 5/6"), with the state tone. Routing v1.1 adds
-   * the "loading" tone (the silence rules' spinner state). Absent for
-   * audio/structure tracks. Click → the binding picker. */
-  routingLine?: { text: string; tone: "ok" | "missing" | "offline" | "unbound" | "loading" };
+   * the "loading" tone (the silence rules' spinner state). Routing v1.2 —
+   * an offline line may carry `detail` (the engine's failure receipt text):
+   * the tooltip shows "Why offline: …" so the reason lives where the state
+   * is. Absent for audio/structure tracks. Click → the binding picker. */
+  routingLine?: { text: string; tone: "ok" | "missing" | "offline" | "unbound" | "loading"; detail?: string };
   onOpenRouting?: () => void;
   /** Routing v1 — the per-bound-output preview volume (0–1.5, engine strip
    * gain). Only rendered when the track is bound to an output pair. */
@@ -160,7 +162,12 @@ export function TrackHeader({
               <button
                 type="button"
                 onClick={onOpenRouting}
-                title="Edit the routing binding — instance, MIDI channel and output pair"
+                title={
+                  "Edit the routing binding — instance, MIDI channel and output pair"
+                  + (routingLine.tone === "offline" && routingLine.detail
+                    ? `\n\nWhy offline: ${routingLine.detail}`
+                    : "")
+                }
                 className={cn(
                   "flex min-w-0 flex-1 items-center gap-1 rounded px-1 py-px text-[10px] ring-1 hover:brightness-125",
                   routingLine.tone === "ok" && "bg-sky-500/10 text-sky-300/90 ring-sky-400/20",

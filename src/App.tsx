@@ -227,7 +227,16 @@ export default function App() {
   // plugin_state "error" receipt carries the instanceId). Their pills must
   // not show "loading…" forever; the error toast already carries the
   // engine's detail text. Reset alongside hostedIds on a fresh session.
+  // Routing v1.2 — the set is also RECOVERABLE: a "loaded" receipt for the
+  // same instance removes it again (the offline header state flips back to
+  // the ready binding line by itself — retry/recovery needs no restart).
   const [hostingErroredIds, setHostingErroredIds] = useState<Set<string>>(() => new Set());
+  // Routing v1.2 — the engine's LAST error detail per failed instance (the
+  // offline state's "why"): the routing line's tooltip carries it right
+  // where the state shows, so the reason outlives the one-shot toast.
+  // Receipt bookkeeping, never project content. Cleared on recovery and on
+  // a fresh engine session.
+  const [hostingErrorDetails, setHostingErrorDetails] = useState<Record<string, string>>({});
   // Routing v1 — the live instance layouts (the `layouts` probe + the
   // per-commit `instanceLayout` pushes), the R3 layout-guard notices,
   // per-instance measured latency, the binding-picker target, the instances
@@ -336,6 +345,7 @@ export default function App() {
         lastLoadedRef.current = null;
         setHostedIds(new Set());   // new process: nothing is hosted yet
         setHostingErroredIds(new Set());   // 3f-5: no failure receipts either
+        setHostingErrorDetails({});        // Routing v1.2: no failure reasons either
         lastStripsSentRef.current = null;  // routing v1: re-push the whole strip table to the fresh process
         setLayouts({});                    // routing v1: the new process has no layouts either
         setLayoutNotices({});
@@ -451,6 +461,7 @@ export default function App() {
     client.onPluginState((result) => {
       if (disposed) return;
       setPluginState(result);
+      const iid = result.instanceId ?? "hosted";
       if (result.state === "loaded") {
         // Stage 3d-4 hotfix: per-instance hosting truth — the pill gate
         // checks THIS set instead of firing openEditor at an instance the
@@ -458,7 +469,25 @@ export default function App() {
         // record the reserved id "hosted".
         setHostedIds((prev) => {
           const next = new Set(prev);
-          next.add(result.instanceId ?? "hosted");
+          next.add(iid);
+          return next;
+        });
+        // Routing v1.2 — a "loaded" receipt is RECOVERY: the instance
+        // leaves the offline set ("! name — offline" flips back to the
+        // ready binding line by itself) and its recorded failure reason is
+        // retired. Without this, an instance that failed once and succeeded
+        // on a later retry would stay marked offline forever (the state
+        // precedence puts offline above everything).
+        setHostingErroredIds((prev) => {
+          if (!prev.has(iid)) return prev;
+          const next = new Set(prev);
+          next.delete(iid);
+          return next;
+        });
+        setHostingErrorDetails((prev) => {
+          if (prev[iid] === undefined) return prev;
+          const next = { ...prev };
+          delete next[iid];
           return next;
         });
         // Routing v1 — the per-instance measured latency (D10): displayed on
@@ -474,9 +503,15 @@ export default function App() {
         // forever. The toast below already surfaces the engine's detail text.
         setHostingErroredIds((prev) => {
           const next = new Set(prev);
-          next.add(result.instanceId ?? "hosted");
+          next.add(iid);
           return next;
         });
+        // Routing v1.2 — keep the engine's detail text per instance: the
+        // offline routing line's tooltip shows it ("Why offline: …"), so the
+        // reason survives the 4-second toast and lives where the state is.
+        setHostingErrorDetails((prev) =>
+          prev[iid] === (result.detail ?? "unknown error") ? prev : { ...prev, [iid]: result.detail ?? "unknown error" },
+        );
         // Stage 3d-3: a plugin the project references but the machine lacks
         // is a NAMED, non-breaking case — Routing v1.1: its tracks are
         // SILENT (never a test-synth substitute) and the project keeps its
@@ -926,6 +961,23 @@ export default function App() {
     }
     return ids;
   }, [project, engineStatus, hostedIds, hostingErroredIds]);
+  // Routing v1.2 — the Failed-state RETRY rule (the approved header-states
+  // contract: an offline instance auto-retries on the next transport start).
+  // True while at least one BOUND instance the project actually references
+  // is in the engine's failed set this session: its tracks are silent now,
+  // and the NEXT PLAY re-sends the load (transport stopped — the engine
+  // reuses every healthy instance and re-attempts ONLY the failed one), so
+  // recovery (library installed, dongle plugged, file moved back) needs no
+  // edit, no swap, no restart: press play. A failed retry is receipted
+  // exactly like the first attempt (one named toast + the offline state
+  // holds + silence); play never locks either way.
+  const hasOfflineBoundInstance = useMemo(() => {
+    for (const t of project.tracks) {
+      if (t.role === "audio" || t.family === "structure") continue;
+      if (t.libraryGroupId && hostingErroredIds.has(t.libraryGroupId)) return true;
+    }
+    return false;
+  }, [project, hostingErroredIds]);
 
   // Stage 3e-1: per-track read-only "Plugin info" text (the pill's hover
   // tooltip). Derived from the stored capability record of the track's
@@ -983,10 +1035,15 @@ export default function App() {
     };
     try {
       // Load only when the engine's score is stale (project changed, fresh
-      // engine session, or the built-in preview flag flipped). Skip-loading
-      // on repeat plays removes the load-ack state{playing:false} round-trip
-      // that used to flicker the UI.
-      if (lastLoadedRef.current !== project || lastLoadedPreviewRef.current !== builtinPreviewRef.current) {
+      // engine session, or the built-in preview flag flipped) — or when a
+      // bound instance is OFFLINE (Routing v1.2: the Failed-state retry —
+      // the transport is stopped, so the engine may re-instantiate; healthy
+      // instances reuse, the failed one retries, then play proceeds). The
+      // cache is deliberately NOT invalidated by the offline flag alone: the
+      // re-send rides this same path and re-caches on its own ack.
+      // Skip-loading on repeat plays removes the load-ack state{playing:false}
+      // round-trip that used to flicker the UI.
+      if (lastLoadedRef.current !== project || lastLoadedPreviewRef.current !== builtinPreviewRef.current || hasOfflineBoundInstance) {
         // Routing v1.1 — the stream is built under the CURRENT preview flag:
         // unbound tracks are SILENT by default; test-synth events only when
         // the user opted in. Deterministic; no RNG.
@@ -1040,7 +1097,7 @@ export default function App() {
       setEnginePlaying(false);
       toast("error", "play failed — press play to retry (see error.log)");
     }
-  }, [project, playback, toast]);
+  }, [project, playback, toast, hasOfflineBoundInstance]);
 
   const engineStop = useCallback(() => {
     if (engineDrive) {
@@ -1322,7 +1379,7 @@ export default function App() {
   //   Offline → "!" + plugin name (a hosting failure receipt named it)
   //   Missing output → "Missing output"
   const routingLines = useMemo(() => {
-    const out: Record<string, { text: string; tone: "ok" | "missing" | "offline" | "unbound" | "loading" }> = {};
+    const out: Record<string, { text: string; tone: "ok" | "missing" | "offline" | "unbound" | "loading"; detail?: string }> = {};
     for (const t of project.tracks) {
       if (t.role === "audio" || t.family === "structure") continue;
       const state = audioStates[t.id];
@@ -1345,13 +1402,20 @@ export default function App() {
       if (state.kind === "loading") {
         out[t.id] = { text: `${name} — loading`, tone: "loading" };
       } else if (state.kind === "offline") {
-        out[t.id] = { text: `! ${name} — offline`, tone: "offline" };
+        // Routing v1.2 — the offline line carries the engine's failure
+        // detail (the tooltip's "Why offline: …"): the reason lives where
+        // the state is, not only in the one-shot toast + error.log.
+        out[t.id] = {
+          text: `! ${name} — offline`,
+          tone: "offline",
+          ...(v?.instanceId && hostingErrorDetails[v.instanceId] ? { detail: hostingErrorDetails[v.instanceId] } : {}),
+        };
       } else {
         out[t.id] = { text: `! ${name} · Ch ${v?.channel ?? "?"} — Missing output`, tone: "missing" };
       }
     }
     return out;
-  }, [project.tracks, project.libraryGroups, routingView, pluginNamesByUid, audioStates]);
+  }, [project.tracks, project.libraryGroups, routingView, pluginNamesByUid, audioStates, hostingErrorDetails]);
 
   // Binding-picker data (all PURE-derived; the edited track's own usages are
   // excluded so its current binding never greys itself out).
